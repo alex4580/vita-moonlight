@@ -142,6 +142,8 @@ add_executable(${PROJECT_NAME}.elf
 	src/check_host.c
 )
 
+target_compile_definitions(${PROJECT_NAME}.elf PRIVATE _POSIX_C_SOURCE=200809L)
+
 
 # Por defecto, solo enlazamos curl y el resto de libs estándar:
 target_link_libraries(${PROJECT_NAME}.elf
