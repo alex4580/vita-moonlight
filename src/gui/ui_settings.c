@@ -403,7 +403,7 @@ static int special_keys_menu() {
 
 
 // --- Controller Type Selection ---
-static const char* controller_type_names[] = {"Xbox compatibility", "DS4 + motion/touchpad"};
+static const char* controller_type_names[] = {"Xbox / local PS", "Steam / DS4 + gyro"};
 static int controller_type_values[] = {1, 2}; // 1: Xbox, 2: PS
 #define CONTROLLER_TYPE_COUNT 2
 static const char* touch_mode_names[] = {"Relative mouse", "DS4 Touchpad", "Mouse Absolute", "Tablet (Sunshine)"};
@@ -457,6 +457,19 @@ static int get_controller_type_index(int value) {
     if (controller_type_values[i] == value) return i;
   }
   return 0; // Default to the broadest Windows/XInput compatibility
+}
+
+static void apply_controller_profile(int controller_type) {
+  config.controller_type = controller_type;
+  if (controller_type == 2) {
+    config.enable_motion_controls = true;
+    config.touchscreen_mode = 1;
+    config.psbutton_mode = PSBUTTON_MODE_SAFE_GUIDE;
+  } else {
+    config.touchscreen_mode = 0;
+    config.psbutton_mode = PSBUTTON_MODE_LOCAL_ESCAPE;
+  }
+  touchabsolute_enable(config.touchscreen_mode == 2);
 }
 
 /*
@@ -585,8 +598,8 @@ static int settings_loop(int id, void *context, const input_data *input) {
   if (id == SETTINGS_INPUT_HELP &&
       (input->buttons & config.btn_confirm) != 0 && (input->buttons & SCE_CTRL_HOLD) == 0) {
     display_alert(
-        "Xbox is the most compatible default.\n"
-        "DS4 adds gyro/touchpad but may need Steam Input.\n"
+        "Xbox/local PS is the most compatible default.\n"
+        "Steam/DS4 enables gyro, touchpad, and Safe Guide together. Reconnect after changing.\n"
         "PS Local double-tap never reaches the PC. Safe Guide delays Guide so double-PS stays local. Immediate Guide may trigger PC shortcuts.",
         NULL, 1, NULL, NULL);
     return 0;
@@ -690,11 +703,11 @@ static int settings_loop(int id, void *context, const input_data *input) {
       }
       if (left) {
         idx = (idx - 1 + CONTROLLER_TYPE_COUNT) % CONTROLLER_TYPE_COUNT;
-        config.controller_type = controller_type_values[idx];
+        apply_controller_profile(controller_type_values[idx]);
         did_change = 1;
       } else if (right) {
         idx = (idx + 1) % CONTROLLER_TYPE_COUNT;
-        config.controller_type = controller_type_values[idx];
+        apply_controller_profile(controller_type_values[idx]);
         did_change = 1;
       }
       // Actualiza el subname
@@ -1129,7 +1142,7 @@ int ui_settings_menu() {
   MENU_ENTRY(SETTINGS_ENABLE_MOTION_CONTROLS, SETTINGS_VIEW_ENABLE_MOTION_CONTROLS, "Enable Gyroscope reporting", "");
   MENU_ENTRY(SETTINGS_ENABLE_DOUBLE_TAP_SPRINT, SETTINGS_VIEW_ENABLE_DOUBLE_TAP_SPRINT, "Enable double tap to sprint", "");
   MENU_ENTRY(SETTINGS_DOUBLE_TAP_SPRINT_STEP_TIME, SETTINGS_VIEW_DOUBLE_TAP_SPRINT_STEP_TIME, "Sprint double tap time", "");
-  MENU_ENTRY(SETTINGS_CONTROLLER_TYPE, SETTINGS_VIEW_CONTROLLER_TYPE, "Controller type", ICON_LEFT_RIGHT_ARROWS);
+  MENU_ENTRY(SETTINGS_CONTROLLER_TYPE, SETTINGS_VIEW_CONTROLLER_TYPE, "Controller preset", ICON_LEFT_RIGHT_ARROWS);
   MENU_ENTRY(SETTINGS_SWAP_SHOULDER_BUTTONS, SETTINGS_VIEW_SWAP_SHOULDER_BUTTONS, "Swap R1/L1 <-> R2/L2", "");
   MENU_ENTRY(SETTINGS_MOUSE_ACCEL, SETTINGS_VIEW_MOUSE_ACCEL, "Mouse acceleration", ICON_LEFT_RIGHT_ARROWS);
   MENU_ENTRY(SETTINGS_ENABLE_MAPPING, SETTINGS_VIEW_ENABLE_MAPPING, "Enable mapping file", "");

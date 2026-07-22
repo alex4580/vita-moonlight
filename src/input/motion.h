@@ -1,9 +1,25 @@
+#ifndef VITA_MOTION_H
+#define VITA_MOTION_H
+
 #include "psp2common/types.h"
 #include "stdbool.h"
 
-bool vita_motion_init();
+typedef struct VitaMotionStatus {
+  bool stream_active;
+  bool gyro_requested;
+  bool accel_requested;
+  uint16_t gyro_report_rate;
+  uint16_t accel_report_rate;
+  uint32_t gyro_events_sent;
+  uint32_t accel_events_sent;
+  int last_sensor_error;
+} VitaMotionStatus;
+
+bool vita_motion_init(void);
 void vita_motion_begin_stream(bool allow_motion);
 void vita_motion_end_stream(void);
+void vita_motion_set_state(uint8_t motion_type, uint16_t report_rate);
+void vita_motion_get_status(VitaMotionStatus *status);
 
 #define VITA_MOTION_MIN_REPORT_RATE 1
 #define VITA_MOTION_MAX_REPORT_RATE 120
@@ -15,3 +31,5 @@ int vitainput_motion_accel_thread(SceSize args, void *argp);
 
 void motion_process_gyro(void);
 void motion_process_accel(void);
+
+#endif

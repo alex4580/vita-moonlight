@@ -71,7 +71,7 @@ struct mapping map = {0};
 SceFQuaternion deviceQuat_old = {0.0f, 0.0f, 0.0f, 0.0f};
 
 typedef struct input_data {
-    short button;
+    int32_t button;
     short lx;
     short ly;
     short rx;
@@ -172,6 +172,9 @@ SceRtcTick current, until;
 //static int special_status;
 
 input_data curr, old;
+static volatile uint32_t circle_press_count = 0;
+static volatile uint32_t circle_release_count = 0;
+static volatile bool circle_held = false;
 int controller_port;
 bool _calibrateGyro = true;
 bool _motionActivated = false;
@@ -966,6 +969,13 @@ inline void vitainput_process(void) {
   bool shortcut_both_pressed = (pad.buttons & SCE_CTRL_START) && (pad.buttons & SCE_CTRL_LEFT);
   if (!keyboard_overlay_active || (keyboard_overlay_active && !shortcut_both_pressed)) {
     if (memcmp(&curr, &old, sizeof(input_data)) != 0) {
+      bool was_circle_held = (old.button & B_FLAG) != 0;
+      bool is_circle_held = (curr.button & B_FLAG) != 0;
+      if (was_circle_held != is_circle_held) {
+        if (is_circle_held) circle_press_count++;
+        else circle_release_count++;
+        circle_held = is_circle_held;
+      }
       LiSendMultiControllerEvent(0, 1, curr.button, curr.lt, curr.rt, curr.lx, -1 * curr.ly, curr.rx, -1 * curr.ry);
       memcpy(&old, &curr, sizeof(input_data));
       memcpy(&pad_old, &pad, sizeof(SceCtrlData));
@@ -976,7 +986,14 @@ inline void vitainput_process(void) {
   }
 }
 
-static uint8_t active_input_thread = 0;
+static volatile uint8_t active_input_thread = 0;
+
+void vitainput_get_diagnostics(VitaInputDiagnostics *diagnostics) {
+  if (!diagnostics) return;
+  diagnostics->circle_presses = circle_press_count;
+  diagnostics->circle_releases = circle_release_count;
+  diagnostics->circle_held = circle_held;
+}
 
 int vitainput_thread(SceSize args, void *argp) {
   while (1) {
@@ -1099,6 +1116,8 @@ void vitainput_config(CONFIGURATION config) {
 void vitainput_start(void) {
   memset(&pad_old, 0, sizeof(pad_old));
   memset(&shortcut_pad_old, 0, sizeof(shortcut_pad_old));
+  memset(&old, 0, sizeof(old));
+  circle_held = false;
   reset_physical_shortcuts();
   uint16_t gamepadMask = 1;
   uint16_t gamepadCapabilities = LI_CCAP_BATTERY_STATE;
@@ -1148,9 +1167,18 @@ void vitainput_start(void) {
 }
 
 void vitainput_stop(void) {
+  active_input_thread = false;
+  if (circle_held) {
+    circle_release_count++;
+    circle_held = false;
+  }
+  // Release all controls and remove the virtual pad while the connection is
+  // still alive. This prevents a held button surviving pause or disconnect.
+  LiSendMultiControllerEvent(0, 1, 0, 0, 0, 0, 0, 0, 0);
+  LiSendMultiControllerEvent(0, 0, 0, 0, 0, 0, 0, 0, 0);
+  memset(&old, 0, sizeof(old));
   unlock_psbutton();
   reset_psbutton_state();
-  active_input_thread = false;
   reset_physical_shortcuts();
   vita_motion_end_stream();
 }

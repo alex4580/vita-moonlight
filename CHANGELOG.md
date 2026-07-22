@@ -1,5 +1,16 @@
 ## 0.14.0
 
+* Added a Steam / DS4 controller preset that enables Vita gyro, DS4 touchpad,
+  and delayed Steam Guide behavior together while retaining double-PS as the
+  forced LiveArea escape. The in-stream overlay can also change PS behavior
+  independently.
+* Fixed unsynchronized host motion requests and concurrent Vita sensor reads
+  that could leave Steam seeing a gyro-capable DS4 without receiving motion.
+  The stream overlay now reports requested/live/error gyro state.
+* Hardened controller release handling: button flags use the protocol's full
+  width, stream start clears stale state, and pause/disconnect explicitly send
+  a neutral state and controller removal. Circle down/up counters in the
+  overlay make held-input faults observable during testing.
 * Fixed START + L + R failing when a shoulder was sampled before START or the
   original 300 ms window expired. The overlay now accepts any button order and
   gives the non-leaking START-led sequence a one-second window.

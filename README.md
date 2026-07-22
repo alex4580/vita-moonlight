@@ -72,7 +72,15 @@ recovery, and troubleshooting. Release testing is documented in the
 - **O**: close the overlay and resume.
 - **START + Left**: open the floating keyboard.
 
-The normal Vita settings screen offers four **PS button behavior** choices.
+The **Controller preset** row configures the related options as a group. Choose
+**Steam / DS4 + gyro** to enable DS4 emulation, Vita motion, DS4 touchpad, and
+**Safe PC Guide** together, then reconnect. A single PS press will open Steam's
+Guide/overlay after a short safety delay; double-PS remains the local LiveArea
+escape. Choose **Xbox / local PS** for maximum game compatibility and to keep
+single PS presses off the PC.
+
+The normal Vita settings screen and in-stream overlay also offer four
+individual **PS button behavior** choices.
 **Local double-tap** is the recommended default. **Safe PC Guide** delays a
 single Guide press by 250 ms so a quick double-press can remain local.
 **Immediate PC Guide** is the old low-latency behavior and may activate Steam
@@ -116,14 +124,25 @@ layout and color behavior return when the stream ends.
 
 ## Controller and touch profiles
 
-- **Xbox** is the first-run default and exposes a conventional XInput
-  controller for broad Windows and Steam Big Picture compatibility.
-- **PS4 + gyro** exposes DS4 motion and touchpad capabilities. Gyroscope values
+- **Xbox / local PS** is the first-run default and exposes a conventional
+  XInput controller for broad Windows compatibility. Single PS presses stay
+  local.
+- **Steam / DS4 + gyro** exposes DS4 motion and touchpad capabilities and
+  selects Safe PC Guide so PS opens Steam's overlay without sacrificing the
+  double-PS LiveArea escape. Gyroscope values
   are sent in degrees per second and acceleration in metres per second squared,
   at no more than the host-requested rate.
 - **Relative mouse** is the broadest touchscreen default. **DS4 Touchpad**,
   **Absolute mouse**, and **Tablet** provide specialized mappings. These can be
   changed from the in-stream overlay or the normal settings screen.
+
+The overlay's blue diagnostic line reports whether Sunshine requested gyro,
+whether Vita samples are actually being sent, and matching Circle down/up
+counts. If Circle's counts match but a game still repeats the action, the
+problem is downstream in the host/game mapping; mismatched counts identify a
+Vita input or stream-boundary problem. Stream pause and disconnect now send an
+explicit neutral state and controller removal so a held button cannot survive
+the session.
 
 ## If something goes wrong
 

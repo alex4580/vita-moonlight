@@ -4,6 +4,8 @@
 #include "../config.h"
 #include "../debug.h"
 #include "../input/touchabsolute.h"
+#include "../input/motion.h"
+#include "../input/vita.h"
 
 #include <Limelight.h>
 #include <stdio.h>
@@ -15,6 +17,7 @@ enum {
   OVERLAY_QUALITY,
   OVERLAY_FPS,
   OVERLAY_CONTROLLER,
+  OVERLAY_PSBUTTON,
   OVERLAY_TOUCH,
   OVERLAY_SHOW_FPS,
   OVERLAY_CLOSE_GAME,
@@ -40,6 +43,7 @@ static const int resolutions[][2] = {
 };
 static const int bitrates[] = {5000, 8000, 12000, 15000};
 static const int frame_rates[] = {30, 60};
+static const char *psbutton_names[] = {"Local", "Safe Steam Guide", "Immediate Guide", "LiveArea"};
 
 static bool pressed(const SceCtrlData *pad, const SceCtrlData *previous, unsigned int button) {
   return (pad->buttons & button) && !(previous->buttons & button);
@@ -103,6 +107,23 @@ static void adjust_selected(int direction) {
     }
     case OVERLAY_CONTROLLER:
       config.controller_type = config.controller_type == 1 ? 2 : 1;
+      if (config.controller_type == 2) {
+        // Steam profile: expose a complete DS4 instead of requiring four
+        // separate settings changes that are easy to miss.
+        config.enable_motion_controls = true;
+        config.touchscreen_mode = 1;
+        config.psbutton_mode = PSBUTTON_MODE_SAFE_GUIDE;
+      } else {
+        config.touchscreen_mode = 0;
+        config.psbutton_mode = PSBUTTON_MODE_LOCAL_ESCAPE;
+      }
+      touchabsolute_enable(false);
+      save_settings();
+      break;
+    case OVERLAY_PSBUTTON:
+      config.psbutton_mode += direction;
+      if (config.psbutton_mode < 0) config.psbutton_mode = PSBUTTON_MODE_COUNT - 1;
+      if (config.psbutton_mode >= PSBUTTON_MODE_COUNT) config.psbutton_mode = 0;
       save_settings();
       break;
     case OVERLAY_TOUCH:
@@ -238,7 +259,7 @@ static const char *touch_mode_name(void) {
 
 static void draw_row(int index, const char *label, const char *value) {
   const int x = 190;
-  const int y = 118 + index * 31;
+  const int y = 116 + index * 27;
   const int width = 580;
   unsigned int text_color = RGBA8(235, 240, 250, 255);
   if (selected_item == index) {
@@ -258,9 +279,29 @@ void stream_overlay_draw(void) {
   char resolution[32];
   char quality[32];
   char fps[16];
+  char motion_status[64];
+  char input_status[64];
+  VitaMotionStatus motion;
+  VitaInputDiagnostics input;
+  vita_motion_get_status(&motion);
+  vitainput_get_diagnostics(&input);
   snprintf(resolution, sizeof(resolution), "%dx%d", config.stream.width, config.stream.height);
   snprintf(quality, sizeof(quality), "%.1f Mbps", config.stream.bitrate / 1000.0f);
   snprintf(fps, sizeof(fps), "%d", config.stream.fps);
+  if (config.controller_type != 2 || !config.enable_motion_controls) {
+    snprintf(motion_status, sizeof(motion_status), "Gyro: off");
+  } else if (motion.last_sensor_error < 0) {
+    snprintf(motion_status, sizeof(motion_status), "Gyro: sensor error %08X", (unsigned int)motion.last_sensor_error);
+  } else if (motion.gyro_events_sent > 0) {
+    snprintf(motion_status, sizeof(motion_status), "Gyro: live (%u events)", (unsigned int)motion.gyro_events_sent);
+  } else if (motion.gyro_requested) {
+    snprintf(motion_status, sizeof(motion_status), "Gyro: requested, waiting for samples");
+  } else {
+    snprintf(motion_status, sizeof(motion_status), "Gyro: host has not requested it");
+  }
+  snprintf(input_status, sizeof(input_status), "Circle: %u down / %u up%s",
+           (unsigned int)input.circle_presses, (unsigned int)input.circle_releases,
+           input.circle_held ? " (held)" : "");
 
   vita2d_draw_rectangle(0, 0, 960, 544, RGBA8(5, 10, 20, 180));
   vita2d_draw_rectangle(160, 42, 640, 462, RGBA8(20, 28, 44, 245));
@@ -272,13 +313,18 @@ void stream_overlay_draw(void) {
   draw_row(OVERLAY_RESOLUTION, "Resolution (next stream)", resolution);
   draw_row(OVERLAY_QUALITY, "Video quality (next stream)", quality);
   draw_row(OVERLAY_FPS, "Frame rate (next stream)", fps);
-  draw_row(OVERLAY_CONTROLLER, "Controller (next stream)", config.controller_type == 1 ? "Xbox" : "PS4 + gyro");
+  draw_row(OVERLAY_CONTROLLER, "Controller preset (next stream)", config.controller_type == 1 ? "Xbox / local PS" : "Steam DS4 / gyro");
+  draw_row(OVERLAY_PSBUTTON, "PS button", psbutton_names[config.psbutton_mode]);
   draw_row(OVERLAY_TOUCH, "Touchscreen", touch_mode_name());
   draw_row(OVERLAY_SHOW_FPS, "FPS counter", config.show_fps ? "On" : "Off");
   draw_row(OVERLAY_CLOSE_GAME, "Close Windows game", "X");
   draw_row(OVERLAY_QUIT_APP, "End Sunshine app", "X");
   draw_row(OVERLAY_RECOVER_HOST, "Recover display + Sunshine", "X");
   draw_row(OVERLAY_DISCONNECT, "Disconnect stream", "X");
+
+  vita2d_font_draw_text(font, 190, 459, RGBA8(124, 207, 255, 255), 14, motion_status);
+  int input_width = vita2d_font_text_width(font, 14, input_status);
+  vita2d_font_draw_text(font, 770 - input_width, 459, RGBA8(124, 207, 255, 255), 14, input_status);
 
   const char *footer = settings_changed
     ? "Saved. Stream settings apply after reconnecting."
@@ -290,5 +336,5 @@ void stream_overlay_draw(void) {
   } else if (confirmation_item == OVERLAY_RECOVER_HOST) {
     footer = "Press X again to reset display, VDD, and Sunshine. O: cancel";
   }
-  vita2d_font_draw_text(font, 190, 475, RGBA8(166, 181, 208, 255), 15, footer);
+  vita2d_font_draw_text(font, 190, 486, RGBA8(166, 181, 208, 255), 15, footer);
 }

@@ -66,6 +66,12 @@ typedef struct motion_data_state {
     uint16_t report_rate_accel;
 } motion_data_state;
 
+typedef struct VitaInputDiagnostics {
+  uint32_t circle_presses;
+  uint32_t circle_releases;
+  bool circle_held;
+} VitaInputDiagnostics;
+
 typedef struct double_click_tracker {
   bool y_max_once;
   uint64_t y_max_once_time;
@@ -109,6 +115,7 @@ typedef struct TouchData {
 } TouchData;
 
 bool vitainput_init();
+void vitainput_get_diagnostics(VitaInputDiagnostics *diagnostics);
 void vitainput_config(CONFIGURATION config);
 
 void vitainput_start(void);

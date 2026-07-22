@@ -40,8 +40,8 @@ sessions.
 
 | Mode | Compatibility and behavior |
 |---|---|
-| Xbox compatibility | First-run default. Exposes one conventional XInput controller and works with the broadest range of Windows games and launchers. It does not expose gyro or a DS4 touchpad. |
-| DS4 + motion/touchpad | Exposes a DualShock 4-style controller with Vita gyro and optional touchpad data. Use it for titles or Steam Input layouts that explicitly support those features. Some XInput-only games need a Steam Input translation. |
+| Xbox / local PS | First-run default. Exposes one conventional XInput controller, keeps single PS presses off the PC, and works with the broadest range of Windows games and launchers. It does not expose gyro or a DS4 touchpad. |
+| Steam / DS4 + gyro | Applies DS4 emulation, Vita gyro, DS4 touchpad, and Safe PC Guide as one preset. Reconnect after selecting it. A single PS press reaches Steam after a 250 ms safety window; double-PS remains the local LiveArea escape. Some XInput-only games need Steam Input translation. |
 | Relative mouse | Default touchscreen behavior. One finger moves the pointer, taps click, and two fingers scroll. It works independently of controller type. |
 | DS4 Touchpad | Sends the front panel as a DS4 touchpad. Pair it with DS4 controller mode. |
 | Mouse Absolute | Maps Vita screen coordinates directly to the Windows pointer. It is convenient for desktop/UI control but depends on the host display matching the streamed geometry. |
@@ -59,6 +59,13 @@ sessions.
 Changing this option alters input behavior only; it has no effect on video
 quality, stream latency, or bandwidth. If PS unexpectedly controls PC media,
 select **Local double-tap**.
+
+The in-stream overlay shows live input diagnostics in blue. **Gyro: live**
+confirms that Sunshine requested motion and the Vita is sending sensor packets.
+**Host has not requested it** means the current virtual controller is not using
+the DS4 motion path. The Circle down/up counters should remain equal after the
+button is released. Moonlight sends a neutral state and removes the controller
+on pause or disconnect to prevent stale held buttons.
 
 Gyro reporting remains enabled so switching from Xbox to DS4 immediately makes
 motion available. Motion packets are not advertised as a controller capability
