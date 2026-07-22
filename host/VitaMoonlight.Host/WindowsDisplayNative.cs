@@ -17,6 +17,7 @@ internal static class WindowsDisplayNative
     private const int ErrorInsufficientBuffer = 122;
     private const int GetTargetName = 2;
     private const int GetSourceName = 1;
+    private const int SetAdvancedColorState = 10;
     private const int EnumCurrentSettings = -1;
     private const uint DevModePelsWidth = 0x00080000;
     private const uint DevModePelsHeight = 0x00100000;
@@ -98,6 +99,22 @@ internal static class WindowsDisplayNative
         {
             throw new InvalidOperationException($"Windows rejected {width}x{height}@{fps} for {gdiDeviceName} (result {result}).");
         }
+    }
+
+    internal static bool TrySetAdvancedColorState(DisplayPathInfo path, bool enabled)
+    {
+        var state = new DisplaySetAdvancedColorState
+        {
+            Header = new DisplayDeviceInfoHeader
+            {
+                Type = SetAdvancedColorState,
+                Size = checked((uint)Marshal.SizeOf<DisplaySetAdvancedColorState>()),
+                AdapterId = path.TargetInfo.AdapterId,
+                Id = path.TargetInfo.Id,
+            },
+            EnableAdvancedColor = enabled ? 1u : 0u,
+        };
+        return DisplayConfigSetDeviceInfo(ref state) == 0;
     }
 
     internal static void ValidateSinglePath(DisplayPathInfo path)
@@ -250,6 +267,9 @@ internal static class WindowsDisplayNative
     [DllImport("user32.dll")]
     private static extern int DisplayConfigGetDeviceInfo(ref DisplaySourceName requestPacket);
 
+    [DllImport("user32.dll")]
+    private static extern int DisplayConfigSetDeviceInfo(ref DisplaySetAdvancedColorState setPacket);
+
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool EnumDisplaySettings(string deviceName, int modeNumber, ref DeviceMode deviceMode);
@@ -388,6 +408,13 @@ internal struct DisplayDeviceInfoHeader
     internal uint Size;
     internal DisplayLuid AdapterId;
     internal uint Id;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+internal struct DisplaySetAdvancedColorState
+{
+    internal DisplayDeviceInfoHeader Header;
+    internal uint EnableAdvancedColor;
 }
 
 [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]

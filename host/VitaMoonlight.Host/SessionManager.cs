@@ -28,7 +28,7 @@ internal sealed class SessionManager
                 DisplayWizardAdapter.Locate(settings.DisplayWizardPath).PrepareMode(width, height, fps);
             }
 
-            var selected = ActivateWithRetry(settings.DisplayMatch, width, height, fps);
+            var selected = ActivateWithRetry(settings.DisplayMatch, width, height, fps, settings.ForceSdr);
             displays.SaveRecovery(recovery with { SelectedDisplay = selected.FriendlyName });
             return new SessionStartResult(selected.FriendlyName, width, height, fps, HostStatePaths.RecoveryFile);
         }
@@ -64,14 +64,14 @@ internal sealed class SessionManager
 
     internal bool HasPendingRecovery => File.Exists(HostStatePaths.RecoveryFile);
 
-    private DisplayDescriptor ActivateWithRetry(string? displayMatch, int width, int height, int fps)
+    private DisplayDescriptor ActivateWithRetry(string? displayMatch, int width, int height, int fps, bool forceSdr)
     {
         Exception? lastError = null;
         for (var attempt = 0; attempt < 20; attempt++)
         {
             try
             {
-                return displays.ActivateVirtualDisplay(displayMatch, width, height, fps);
+                return displays.ActivateVirtualDisplay(displayMatch, width, height, fps, forceSdr);
             }
             catch (InvalidOperationException error) when (error.Message.StartsWith("No virtual display", StringComparison.Ordinal))
             {

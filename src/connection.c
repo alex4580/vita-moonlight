@@ -29,6 +29,7 @@
 #include <stdbool.h>
 #include "connection_overlay.h"
 #include "debug.h"
+#include "gui/ui_stream_overlay.h"
 
 static int connection_status = LI_DISCONNECTED;
 
@@ -37,7 +38,7 @@ extern motion_data_state motion_state;
 int connection_stage = 0;
 
 bool pause_overlay_is_open(void) {
-    return connection_status == LI_MINIMIZED;
+    return stream_overlay_is_open();
 }
 
 void pause_output() {
@@ -67,6 +68,7 @@ void connection_connection_started() {
   }
   vita_debug_log("connection started\n");
   connection_status = LI_CONNECTED;
+  stream_overlay_reset();
   start_output();
   vitavideo_hide_poor_net_indicator();
 }
@@ -104,6 +106,7 @@ static void connection_connection_terminated(int error_code) {
   }
   vita_debug_log("connection terminated\n");
   connection_status = LI_DISCONNECTED;
+  stream_overlay_reset();
 }
 
 int connection_reset() {

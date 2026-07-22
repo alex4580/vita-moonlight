@@ -70,6 +70,8 @@ internal static class Program
             SunshineApplicationName = GetOption(args, "--app") ?? previous.SunshineApplicationName,
             DisplayWizardPath = GetOption(args, "--driver-bundle") ?? GetOption(args, "--displaywizard") ?? previous.DisplayWizardPath,
             DisplayMatch = GetOption(args, "--display-match") ?? previous.DisplayMatch,
+            IntegrateAllSunshineApps = GetOptionalBool(args, "--all-apps") ?? previous.IntegrateAllSunshineApps,
+            ForceSdr = GetOptionalBool(args, "--force-sdr") ?? previous.ForceSdr,
         };
 
         if (settings.HostMode == "sunshine")
@@ -84,6 +86,8 @@ internal static class Program
         var result = SunshineConfigurator.Configure(settings, Path.GetFullPath(companionPath));
         Console.WriteLine($"Configured {settings.HostMode} in {result.ConfigurationDirectory}");
         Console.WriteLine($"Moonlight application: {result.ApplicationName}");
+        Console.WriteLine($"Virtual-display integration: {result.HookedApplicationCount} application(s)");
+        Console.WriteLine($"Force SDR: {(settings.ForceSdr ? "enabled" : "disabled")}");
         Console.WriteLine($"Original apps backup: {result.BackupPath}");
         Console.WriteLine("Restart the streaming host, then select the configured application on the Vita.");
         return ExitSuccess;
@@ -257,6 +261,8 @@ internal static class Program
             Console.WriteLine($"Windows:       {Status(report.IsWindows, report.OperatingSystem)}");
             Console.WriteLine($"Administrator: {Status(report.IsAdministrator, report.IsAdministrator ? "yes" : "no (required for setup)")}");
             Console.WriteLine($"Host mode:     {report.HostMode}");
+            Console.WriteLine($"App coverage:  {(report.IntegrateAllSunshineApps ? "every Sunshine app" : "Vita Moonlight app only")}");
+            Console.WriteLine($"Color mode:    {(report.ForceSdr ? "force SDR for Vita sessions" : "leave Windows color mode unchanged")}");
             Console.WriteLine($"Sunshine:      {Status(report.SunshinePath is not null, report.SunshinePath ?? "not found")}");
             Console.WriteLine($"Apollo:        {Status(report.ApolloPath is not null, report.ApolloPath ?? "not found")}");
             Console.WriteLine($"ViGEmBus:      {Status(report.ViGEmBusInstalled, report.ViGEmBusInstalled ? "installed" : "not detected")}");
@@ -298,7 +304,7 @@ internal static class Program
     private static int RunSelfTest()
     {
         var profile = VitaHostProfile.Recommended;
-        Require(profile.Width == 960 && profile.Height == 544 && profile.BitrateKbps == 5000, "Recommended profile invariant failed.");
+        Require(profile.Width == 960 && profile.Height == 544 && profile.BitrateKbps == 8000, "Recommended profile invariant failed.");
         Require(Marshal.SizeOf<DisplayPathInfo>() == 72, "DISPLAYCONFIG_PATH_INFO layout is invalid.");
         Require(Marshal.SizeOf<DisplayModeInfo>() == 64, "DISPLAYCONFIG_MODE_INFO layout is invalid.");
         Require(Marshal.SizeOf<DisplayTargetName>() == 420, "DISPLAYCONFIG_TARGET_DEVICE_NAME layout is invalid.");
@@ -310,6 +316,41 @@ internal static class Program
         Require(roundTrip[0].Flags == 123 && roundTrip[0].SourceInfo.Id == 7, "Display topology serialization failed.");
         var command = SunshineConfigurator.BuildStartCommand(@"C:\Program Files\Vita Moonlight\VitaMoonlight.Host.exe");
         Require(command.Contains("%SUNSHINE_CLIENT_WIDTH%", StringComparison.Ordinal), "Sunshine hook generation failed.");
+
+        var sunshineTestDirectory = Path.Combine(Path.GetTempPath(), $"vita-moonlight-self-test-{Guid.NewGuid():N}");
+        try
+        {
+            Directory.CreateDirectory(sunshineTestDirectory);
+            File.WriteAllText(Path.Combine(sunshineTestDirectory, "apps.json"), """
+                {
+                  "apps": [
+                    { "name": "Desktop", "prep-cmd": [] },
+                    { "name": "Steam Big Picture", "prep-cmd": [
+                      { "do": "steam://open/bigpicture", "undo": "", "elevated": false }
+                    ] }
+                  ]
+                }
+                """);
+            var integrationSettings = HostSettings.Default with { SunshineConfigDirectory = sunshineTestDirectory };
+            var integrationResult = SunshineConfigurator.Configure(integrationSettings, @"C:\Program Files\Vita Moonlight Host\VitaMoonlight.Host.exe");
+            Require(integrationResult.HookedApplicationCount == 3, "Every-app Sunshine integration count failed.");
+            using var integratedApps = JsonDocument.Parse(File.ReadAllText(Path.Combine(sunshineTestDirectory, "apps.json")));
+            foreach (var app in integratedApps.RootElement.GetProperty("apps").EnumerateArray())
+            {
+                Require(app.GetProperty("prep-cmd").EnumerateArray().Any(prep =>
+                    prep.GetProperty("do").GetString()?.Contains("VitaMoonlight.Host", StringComparison.OrdinalIgnoreCase) == true),
+                    $"Sunshine app '{app.GetProperty("name").GetString()}' did not receive the virtual-display hook.");
+            }
+            var steamApp = integratedApps.RootElement.GetProperty("apps").EnumerateArray().First(app =>
+                app.GetProperty("name").GetString() == "Steam Big Picture");
+            Require(steamApp.GetProperty("prep-cmd").EnumerateArray().Any(prep =>
+                prep.GetProperty("do").GetString() == "steam://open/bigpicture"),
+                "Existing Sunshine preparation commands were not preserved.");
+        }
+        finally
+        {
+            if (Directory.Exists(sunshineTestDirectory)) Directory.Delete(sunshineTestDirectory, true);
+        }
 
         var testConfiguration = new List<string> { "gamepad = x360", "unrelated = preserved" };
         SunshineConfigurator.UpdateSunshineConfiguration(testConfiguration);
@@ -340,7 +381,7 @@ internal static class Program
         Console.WriteLine("VitaMoonlight.Host gui");
         Console.WriteLine("VitaMoonlight.Host doctor [--json]");
         Console.WriteLine("VitaMoonlight.Host profile [--json]");
-        Console.WriteLine("VitaMoonlight.Host configure [--host sunshine|apollo] [--config-dir PATH] [--driver-bundle PATH] [--display-match TEXT]");
+        Console.WriteLine("VitaMoonlight.Host configure [--host sunshine|apollo] [--config-dir PATH] [--driver-bundle PATH] [--display-match TEXT] [--all-apps true|false] [--force-sdr true|false]");
         Console.WriteLine("VitaMoonlight.Host host status|restart [--host sunshine]");
         Console.WriteLine("VitaMoonlight.Host driver install|reload [--driver-bundle PATH]");
         Console.WriteLine("VitaMoonlight.Host display list");
@@ -392,6 +433,14 @@ internal static class Program
 
     private static bool HasFlag(string[] args, string name) => args.Any(arg => arg.Equals(name, StringComparison.OrdinalIgnoreCase));
 
+    private static bool? GetOptionalBool(string[] args, string name)
+    {
+        var raw = GetOption(args, name);
+        if (raw is null) return null;
+        if (bool.TryParse(raw, out var value)) return value;
+        throw new ArgumentException($"{name} must be true or false.");
+    }
+
     private static void Require(bool condition, string message)
     {
         if (!condition)
@@ -439,7 +488,7 @@ internal static class Program
 
 internal sealed record VitaHostProfile(int Width, int Height, int FramesPerSecond, int BitrateKbps, string SunshineGamepadMode, bool SunshineMotionAsDs4)
 {
-    public static VitaHostProfile Recommended { get; } = new(960, 544, 60, 5000, "auto", true);
+    public static VitaHostProfile Recommended { get; } = new(960, 544, 60, 8000, "auto", true);
 }
 
 internal sealed record HostDiagnosticReport(
@@ -456,6 +505,8 @@ internal sealed record HostDiagnosticReport(
     bool VirtualDisplayDriverInstalled,
     bool RecoveryPending,
     bool RecoveryTaskInstalled,
+    bool IntegrateAllSunshineApps,
+    bool ForceSdr,
     string Recommendation)
 {
     public bool HasStreamingHost => SunshinePath is not null || ApolloPath is not null;
@@ -508,7 +559,7 @@ internal static class HostDiagnostics
                                 ? "Install the signed virtual display driver, reboot if requested, and run this check again."
                                 : !recoveryTaskInstalled
                                     ? "The host is ready, but automatic logon recovery is not installed. In the Administrator control panel, click Install recovery safeguard."
-                                : "The host is ready. In the control panel, click Configure Sunshine or Configure Apollo, restart the streaming host, and select Vita Moonlight on the client.";
+                                : "The host is ready. Click Apply recommended setup after an install or update, then launch any Sunshine application from the Vita.";
 
         return new HostDiagnosticReport(
             isWindows,
@@ -524,6 +575,8 @@ internal static class HostDiagnostics
             virtualDisplay,
             recoveryPending,
             recoveryTaskInstalled,
+            settings.IntegrateAllSunshineApps,
+            settings.ForceSdr,
             recommendation);
     }
 

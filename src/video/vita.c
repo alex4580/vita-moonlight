@@ -21,6 +21,7 @@
 #include "../config.h"
 #include "../debug.h"
 #include "../gui/guilib.h"
+#include "../gui/ui_stream_overlay.h"
 #include "../util.h"
 #include "../input/vita.h"
 #include "vita.h"
@@ -517,6 +518,7 @@ static int vita_submit_decode_unit(PDECODE_UNIT decodeUnit) {
       draw_streaming(frame_texture);
       draw_fps();
       draw_indicators();
+      stream_overlay_draw();
 
       vita2d_end_drawing();
 

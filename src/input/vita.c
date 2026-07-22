@@ -46,6 +46,7 @@
 #include "shortcuts.h"
 #include "motion.h"
 #include "../connection_overlay.h"
+#include "../gui/ui_stream_overlay.h"
 
 #include <Limelight.h>
 
@@ -86,7 +87,7 @@ static inline void update_touch_points();
 
 double mouse_multiplier;
 
-#define PSBTN_DOUBLETAP_DELAY 250000 // 100ms
+#define PSBTN_DOUBLETAP_DELAY 250000 // 250 ms
 
 #define MOUSE_ACTION_DELAY 100000 // 100ms
 #define MOTION_ACTION_DELAY 200000 // 200ms
@@ -358,7 +359,7 @@ inline void special(uint32_t defined, uint32_t pressed, uint32_t old_pressed) {
         // Enviar frame vacío al host para limpiar estado
         LiSendMultiControllerEvent(0, 1, 0, 0, 0, 0, 0, 0, 0);
         if (dev_val == INPUT_SPECIAL_KEY_PAUSE) {
-          connection_minimize();
+          stream_overlay_open();
           // Limpiar input físico DESPUÉS de overlays/eventos modales
           memset(&curr, 0, sizeof(input_data));
           curr.lt = 0;
@@ -569,10 +570,12 @@ void handle_psbutton() {
 
   if(is_pressed(SCE_CTRL_PSBUTTON | INPUT_TYPE_GAMEPAD)) {
     if(!is_old_pressed(SCE_CTRL_PSBUTTON | INPUT_TYPE_GAMEPAD)) {
-      if(time - psbutton_pressed_time < PSBTN_DOUBLETAP_DELAY)
-        unlock_psbutton();
-      else
+      if(time - psbutton_pressed_time < PSBTN_DOUBLETAP_DELAY) {
+        stream_overlay_open();
+        psbutton_pressed_time = 0;
+      } else {
         special(SPECIAL_FLAG | INPUT_TYPE_GAMEPAD, 1, 0);
+      }
     }
     else {
       if(psbutton_locked)
@@ -785,6 +788,17 @@ inline void vitainput_process(void) {
   read_backscreen();
 
   sceRtcGetCurrentTick(&current);
+  bool overlay_was_open = stream_overlay_is_open();
+  if (!overlay_was_open) {
+    process_physical_shortcuts(&pad, &pad_old);
+    overlay_was_open = stream_overlay_is_open();
+  }
+  if (overlay_was_open) {
+    stream_overlay_handle_input(&pad, &pad_old);
+    memcpy(&pad_old, &pad, sizeof(SceCtrlData));
+    memset(&old, 0, sizeof(input_data));
+    return;
+  }
   // analogs: solo asignar si no están activos por rear touch
   if (!swap_shoulder_buttons && !is_pressed(map.btn_tl2))
     curr.lt = read_analog(map.btn_tl); // l2
@@ -797,19 +811,20 @@ inline void vitainput_process(void) {
 
   process_buttons();
   handle_psbutton();
+  if (stream_overlay_is_open()) {
+    memcpy(&pad_old, &pad, sizeof(SceCtrlData));
+    return;
+  }
   process_triggers();
 
   // --- GESTIÓN DE LIMPIEZA DE INPUT AL ABRIR/CERRAR TECLADO VIRTUAL Y PAUSA ---
   static bool keyboard_overlay_active = false;
-  static bool pause_overlay_active = false;
   static SceCtrlData pad_snapshot = {0};
   static input_data curr_snapshot = {0};
 
   // Hook para saber si el teclado virtual está abierto
 
-  bool shortcut_triggered = process_physical_shortcuts(&pad, &pad_old);
   bool keyboard_now = keyboardsystem_is_open();
-  bool pause_now = pause_overlay_is_open();
 
   // --- BLOQUEO Y LIMPIEZA DE INPUT AL ABRIR TECLADO VIRTUAL ---
   if (keyboard_now && !keyboard_overlay_active) {
@@ -830,32 +845,6 @@ inline void vitainput_process(void) {
     memcpy(&curr, &curr_snapshot, sizeof(input_data));
     keyboard_overlay_active = false;
   } else if (keyboard_overlay_active) {
-    memset(&pad, 0, sizeof(SceCtrlData));
-    memset(&curr, 0, sizeof(input_data));
-    pad.lx = 128; pad.ly = 128; pad.rx = 128; pad.ry = 128;
-    curr.lx = 128; curr.ly = 128; curr.rx = 128; curr.ry = 128;
-    curr.lt = 0;
-    curr.rt = 0;
-  }
-
-  // --- BLOQUEO Y LIMPIEZA DE INPUT AL ABRIR/CERRAR MENÚ DE PAUSA ---
-  if (pause_now && !pause_overlay_active) {
-    memcpy(&pad_snapshot, &pad, sizeof(SceCtrlData));
-    memcpy(&curr_snapshot, &curr, sizeof(input_data));
-    memset(&pad, 0, sizeof(SceCtrlData));
-    memset(&curr, 0, sizeof(input_data));
-    pad.lx = 128; pad.ly = 128; pad.rx = 128; pad.ry = 128;
-    curr.lx = 128; curr.ly = 128; curr.rx = 128; curr.ry = 128;
-    curr.lt = 0;
-    curr.rt = 0;
-    vita_debug_log("[VITA.C] Overlay activo: ABRIR menú de pausa, input bloqueado (sticks centrados, sin enviar frame vacío)");
-    pause_overlay_active = true;
-  } else if (!pause_now && pause_overlay_active) {
-    vita_debug_log("[VITA.C] Menú de pausa CERRADO: restaurando snapshot (sin enviar frame vacío)");
-    memcpy(&pad, &pad_snapshot, sizeof(SceCtrlData));
-    memcpy(&curr, &curr_snapshot, sizeof(input_data));
-    pause_overlay_active = false;
-  } else if (pause_overlay_active) {
     memset(&pad, 0, sizeof(SceCtrlData));
     memset(&curr, 0, sizeof(input_data));
     pad.lx = 128; pad.ly = 128; pad.rx = 128; pad.ry = 128;

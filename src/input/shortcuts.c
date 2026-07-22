@@ -7,13 +7,16 @@
 #include "../keyboardsystem.h"
 #include "../connection.h"
 #include "../debug.h"
+#include "../gui/ui_stream_overlay.h"
 
 // Devuelve true si se ejecutó un acceso directo y se debe limpiar el input
 bool process_physical_shortcuts(const SceCtrlData* pad, const SceCtrlData* pad_old) {
     // Atajo: Start + L1 + R1 para pausar/desplegar menú de pausa
-    if ((pad->buttons & SCE_CTRL_START) && (pad->buttons & SCE_CTRL_L1) && (pad->buttons & SCE_CTRL_R1)) {
-        vita_debug_log("Shortcut: START+L1+R1 detectado, input se soltará por overlay en vita.c y se abrirá menú de pausa");
-        connection_minimize();
+    bool overlay_combo = (pad->buttons & SCE_CTRL_START) && (pad->buttons & SCE_CTRL_L1) && (pad->buttons & SCE_CTRL_R1);
+    bool overlay_combo_old = (pad_old->buttons & SCE_CTRL_START) && (pad_old->buttons & SCE_CTRL_L1) && (pad_old->buttons & SCE_CTRL_R1);
+    if (overlay_combo && !overlay_combo_old) {
+        vita_debug_log("Shortcut: START+L1+R1 opened the stream overlay");
+        stream_overlay_open();
         return true;
     }
 
@@ -43,7 +46,7 @@ bool process_physical_shortcuts(const SceCtrlData* pad, const SceCtrlData* pad_o
                 // Snapshots eliminados: solo se usan en vita.c
                 // Obligatorio porque es bloqueante
                 memset((void*)pad, 0, sizeof(SceCtrlData));
-                LiSendMultiControllerEvent(0, 1, 0, 0, 0, 128, 0, 128, 0);
+                LiSendMultiControllerEvent(0, 1, 0, 0, 0, 0, 0, 0, 0);
                 vita_debug_log("[SHORTCUT] Overlay activo: ABRIR teclado, frame vacío enviado al host");
                 keyboardsystem_open_keyboard();
                 keyboard_shortcut_blocked = true;

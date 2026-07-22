@@ -1,3 +1,22 @@
+## 0.14.0
+
+* Added an in-stream Vita overlay opened with START + L + R or a double press
+  of PS. It provides resume, disconnect, resolution, bitrate, frame-rate,
+  controller, touch-mode, and FPS-counter controls.
+* Sunshine display preparation is now applied to every application by default,
+  including Desktop and Steam Big Picture, while preserving existing prep
+  commands.
+* Vita virtual-display sessions force SDR by default to prevent an HDR physical
+  desktop from appearing washed out on the Vita.
+* Raised the 960x544/60 recommended bitrate from 5 Mbps to 8 Mbps and migrate
+  older native-resolution configurations to reduce motion artifacts.
+* Reworked the Windows host control panel into task-oriented Overview,
+  Streaming, Displays, and Help & recovery pages.
+* Added GUI settings for all-application integration, SDR enforcement, display
+  matching, safe display previews, and recovery.
+* Rewrote the installation and end-to-end test documentation around the GUI
+  workflow and current release behavior.
+
 ## 0.13.2
 
 * added PS button capture

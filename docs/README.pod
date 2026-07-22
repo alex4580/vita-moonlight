@@ -120,9 +120,8 @@ Change the number of frame per second to I<FPS>
 
 Change bitrate to I<BITRATE> kbps.
 By default the bitrate depends on the selected resolution and fps.
-For resolution 1080p and 60 fps and higher 20 Mbps is used.
-For resolution 1080p or 60 fps and higher 10 Mbps is used
-For other configurations 5 Mbps is used by default.
+The Vita-native 960x544 profile uses 8 Mbps at 60 fps and 5 Mbps at 30 fps.
+Higher resolutions use progressively higher defaults.
 
 =item B<-packetsize> [I<PACKETSIZE>]
 

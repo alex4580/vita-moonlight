@@ -7,9 +7,22 @@ internal sealed record HostSettings(
     string? SunshineConfigDirectory,
     string SunshineApplicationName,
     string? DisplayWizardPath,
-    string? DisplayMatch)
+    string? DisplayMatch,
+    int FormatVersion,
+    bool IntegrateAllSunshineApps,
+    bool ForceSdr)
 {
-    internal static HostSettings Default { get; } = new("sunshine", null, "Vita Moonlight", null, null);
+    private const int CurrentFormatVersion = 2;
+
+    internal static HostSettings Default { get; } = new(
+        "sunshine",
+        null,
+        "Vita Moonlight",
+        null,
+        null,
+        CurrentFormatVersion,
+        true,
+        true);
 
     internal static HostSettings Load()
     {
@@ -17,13 +30,22 @@ internal sealed record HostSettings(
         {
             return Default;
         }
-        return JsonSerializer.Deserialize<HostSettings>(File.ReadAllText(HostStatePaths.SettingsFile), JsonOptions)
+        var loaded = JsonSerializer.Deserialize<HostSettings>(File.ReadAllText(HostStatePaths.SettingsFile), JsonOptions)
             ?? Default;
+        return loaded.FormatVersion < CurrentFormatVersion
+            ? loaded with
+            {
+                FormatVersion = CurrentFormatVersion,
+                IntegrateAllSunshineApps = true,
+                ForceSdr = true,
+            }
+            : loaded;
     }
 
     internal void Save()
     {
-        DisplayTopologyService.AtomicWrite(HostStatePaths.SettingsFile, JsonSerializer.Serialize(this, JsonOptions));
+        var current = this with { FormatVersion = CurrentFormatVersion };
+        DisplayTopologyService.AtomicWrite(HostStatePaths.SettingsFile, JsonSerializer.Serialize(current, JsonOptions));
     }
 
     private static readonly JsonSerializerOptions JsonOptions = new()

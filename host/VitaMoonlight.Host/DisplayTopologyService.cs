@@ -158,7 +158,7 @@ internal sealed class DisplayTopologyService
         return recovery;
     }
 
-    internal DisplayDescriptor ActivateVirtualDisplay(string? nameMatch, int width, int height, int fps)
+    internal DisplayDescriptor ActivateVirtualDisplay(string? nameMatch, int width, int height, int fps, bool forceSdr = true)
     {
         var configuration = WindowsDisplayNative.Query(WindowsDisplayNative.QueryAllPaths);
         var displays = Describe(configuration);
@@ -209,6 +209,10 @@ internal sealed class DisplayTopologyService
         }
         var sourceName = WindowsDisplayNative.GetSourceNameFor(activePath.Value);
         WindowsDisplayNative.ChangeSourceMode(sourceName.ViewGdiDeviceName, width, height, fps);
+        if (forceSdr)
+        {
+            WindowsDisplayNative.TrySetAdvancedColorState(activePath.Value, false);
+        }
         return selected;
     }
 

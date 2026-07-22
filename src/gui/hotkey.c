@@ -7,6 +7,7 @@
 #include <psp2/ctrl.h>
 #include "../connection.h"
 #include "../keyboardsystem.h"
+#include "ui_stream_overlay.h"
 #include <psp2/kernel/threadmgr.h>
 
 #define SCE_CTRL_PS 0x1000
@@ -19,7 +20,7 @@ extern char *settings_special_names[];
 
 // Prototipos de funciones especiales
 static void hotkey_none() {}
-static void hotkey_pause_stream() { connection_minimize(); }
+static void hotkey_pause_stream() { stream_overlay_open(); }
 static void hotkey_open_keyboard() { keyboardsystem_open_keyboard(); }
 static void hotkey_gamepad_buttons() {}
 static void hotkey_special_xbox() {}

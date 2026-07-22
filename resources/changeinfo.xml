@@ -1,6 +1,13 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <changeinfo>
-<changes app_ver="00.13"><![CDATA[
+<changes app_ver="00.14"><![CDATA[
+## 0.14.0<br>
+* Add an in-stream settings and disconnect overlay.<br>
+* Use the Vita virtual display for every Sunshine app, including Steam Big Picture.<br>
+* Force SDR during Vita virtual-display sessions.<br>
+* Raise the native 960x544/60 default to 8 Mbps for better motion quality.<br>
+* Add the redesigned GUI-first Windows host setup and recovery tool.<br>
+<br>
 ## 0.13.1<br>
 * fix: Split shortcuts into individual files for better code organization and maintainability.<br>
 * fix: Resolved ghost/phantom button presses when handling overlays and shortcuts. Button state is now correctly reset and restored.<br>

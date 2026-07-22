@@ -3,7 +3,11 @@ using System.Text.Json.Nodes;
 
 namespace VitaMoonlight.Host;
 
-internal sealed record SunshineConfigurationResult(string ConfigurationDirectory, string ApplicationName, string BackupPath);
+internal sealed record SunshineConfigurationResult(
+    string ConfigurationDirectory,
+    string ApplicationName,
+    int HookedApplicationCount,
+    string BackupPath);
 
 internal static class SunshineConfigurator
 {
@@ -23,37 +27,31 @@ internal static class SunshineConfigurator
         var apps = root["apps"] as JsonArray ?? new JsonArray();
         root["apps"] = apps;
 
-        var app = apps.OfType<JsonObject>().FirstOrDefault(candidate =>
+        var managedApp = apps.OfType<JsonObject>().FirstOrDefault(candidate =>
             string.Equals(candidate["name"]?.GetValue<string>(), settings.SunshineApplicationName, StringComparison.OrdinalIgnoreCase));
-        if (app is null)
+        if (managedApp is null)
         {
-            app = new JsonObject
+            managedApp = new JsonObject
             {
                 ["name"] = settings.SunshineApplicationName,
                 ["cmd"] = string.Empty,
                 ["output"] = string.Empty,
                 ["exclude-global-prep-cmd"] = false,
             };
-            apps.Add(app);
+            apps.Add(managedApp);
         }
 
-        var prepCommands = app["prep-cmd"] as JsonArray ?? new JsonArray();
-        app["prep-cmd"] = prepCommands;
-        for (var index = prepCommands.Count - 1; index >= 0; index--)
+        var applicationObjects = apps.OfType<JsonObject>().ToArray();
+        foreach (var app in applicationObjects)
         {
-            if (prepCommands[index] is JsonObject existing &&
-                (existing["do"]?.ToString().Contains(HookMarker, StringComparison.OrdinalIgnoreCase) == true ||
-                 existing["undo"]?.ToString().Contains(HookMarker, StringComparison.OrdinalIgnoreCase) == true))
-            {
-                prepCommands.RemoveAt(index);
-            }
+            RemoveManagedHooks(app);
         }
-        prepCommands.Add(new JsonObject
+
+        var targets = settings.IntegrateAllSunshineApps ? applicationObjects : new[] { managedApp };
+        foreach (var app in targets)
         {
-            ["do"] = BuildStartCommand(companionPath),
-            ["undo"] = BuildStopCommand(companionPath),
-            ["elevated"] = true,
-        });
+            AddManagedHook(app, companionPath);
+        }
 
         DisplayTopologyService.AtomicWrite(appsPath, root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
         var configurationLines = File.Exists(sunshineConfigPath)
@@ -63,7 +61,33 @@ internal static class SunshineConfigurator
         DisplayTopologyService.AtomicWrite(
             sunshineConfigPath,
             string.Join(Environment.NewLine, configurationLines) + Environment.NewLine);
-        return new SunshineConfigurationResult(configDirectory, settings.SunshineApplicationName, backupPath);
+        return new SunshineConfigurationResult(configDirectory, settings.SunshineApplicationName, targets.Length, backupPath);
+    }
+
+    private static void RemoveManagedHooks(JsonObject app)
+    {
+        if (app["prep-cmd"] is not JsonArray prepCommands) return;
+        for (var index = prepCommands.Count - 1; index >= 0; index--)
+        {
+            if (prepCommands[index] is JsonObject existing &&
+                (existing["do"]?.ToString().Contains(HookMarker, StringComparison.OrdinalIgnoreCase) == true ||
+                 existing["undo"]?.ToString().Contains(HookMarker, StringComparison.OrdinalIgnoreCase) == true))
+            {
+                prepCommands.RemoveAt(index);
+            }
+        }
+    }
+
+    private static void AddManagedHook(JsonObject app, string companionPath)
+    {
+        var prepCommands = app["prep-cmd"] as JsonArray ?? new JsonArray();
+        app["prep-cmd"] = prepCommands;
+        prepCommands.Add(new JsonObject
+        {
+            ["do"] = BuildStartCommand(companionPath),
+            ["undo"] = BuildStopCommand(companionPath),
+            ["elevated"] = true,
+        });
     }
 
     internal static string BuildStartCommand(string companionPath)

@@ -5,6 +5,7 @@
 #include "guilib.h"
 #include "ime.h"
 #include "ui_settings.h"
+#include "ui_stream_overlay.h"
 
 #include "../connection.h"
 #include "../configuration.h"
@@ -233,7 +234,11 @@ int ui_connect_loop(int id, void *context, const input_data *input) {
 
 //mainloop:
       while (connection_is_connected()) {
-        sceKernelDelayThread(500 * 1000);
+        if (stream_overlay_take_disconnect_request()) {
+          connection_terminate();
+          break;
+        }
+        sceKernelDelayThread(50 * 1000);
       }
 
       int status = connection_get_status();

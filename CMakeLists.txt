@@ -21,8 +21,8 @@ include("$ENV{VITASDK}/share/vita.cmake" REQUIRED)
 set(TITLE_ID "XYZZ00002")
 set(TITLE "Moonlight")
 set(VERSION_MAJOR "0")
-set(VERSION_MINOR "13")
-set(VERSION_PATCH "2")
+set(VERSION_MINOR "14")
+set(VERSION_PATCH "0")
 
 execute_process(COMMAND
 	python -c "print('%02d.%02d' % (${VERSION_MAJOR}, ${VERSION_MINOR}))"
@@ -80,6 +80,7 @@ add_executable(${PROJECT_NAME}.elf
 	src/gui/ui_hotkey.c
 	src/gui/hotkey.c
 	src/gui/ui_check.c
+	src/gui/ui_stream_overlay.c
 
 	libgamestream/client.c
 	libgamestream/http.c

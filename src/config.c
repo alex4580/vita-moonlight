@@ -37,6 +37,7 @@ extern char* strdup(const char*);
 #define USER_PATHS "."
 #define DEFAULT_CONFIG_DIR "/.config"
 #define DEFAULT_CACHE_DIR "/.cache"
+#define CURRENT_CONFIG_VERSION 2
 
 #define write_config_string(fd, key, value) fprintf(fd, "%s = %s\n", key, value)
 #define write_config_int(fd, key, value) fprintf(fd, "%s = %d\n", key, value)
@@ -52,7 +53,7 @@ int config_recommended_bitrate(int width, int height, int fps) {
   (void)width;
 
   if (height <= 544) {
-    return fps >= 60 ? 5000 : 3000;
+    return fps >= 60 ? 8000 : 5000;
   }
   if (height <= 720) {
     return fps >= 60 ? 7000 : 4500;
@@ -109,7 +110,9 @@ static int ini_handle(void *out, const char *section, const char *name,
       config->special_keys.size = INT(value);
     }
   } else {
-    if (strcmp(name, "address") == 0) {
+    if (strcmp(name, "config_version") == 0) {
+      config->config_version = INT(value);
+    } else if (strcmp(name, "address") == 0) {
       config->address = STR(value);
     } else if (strcmp(name, "width") == 0) {
       config->stream.width = INT(value);
@@ -182,6 +185,8 @@ void config_save(const char* filename, PCONFIGURATION config) {
     fprintf(stderr, "Can't open configuration file: %s\n", filename);
     exit(EXIT_FAILURE);
   }
+
+  write_config_int(fd, "config_version", CURRENT_CONFIG_VERSION);
 
   if (config->address)
     write_config_string(fd, "address", config->address);
@@ -264,6 +269,7 @@ void update_layout() {
 void config_parse(int argc, char* argv[], PCONFIGURATION config) {
   LiInitializeStreamConfiguration(&config->stream);
 
+  config->config_version = 0;
   config->stream.width = 960;
   config->stream.height = 544;
   config->stream.fps = 60;
@@ -324,6 +330,17 @@ void config_parse(int argc, char* argv[], PCONFIGURATION config) {
   if (config_file) {
     config_file_parse(config_file, config);
     vita_debug_log("[DEBUG] Configuración cargada: key_dir = %s, touchscreen_mode = %d, show_fps = %d", config->key_dir, config->touchscreen_mode, config->show_fps);
+  }
+
+  if (config->config_version < CURRENT_CONFIG_VERSION) {
+    if (config->stream.width <= 960 && config->stream.height <= 544 &&
+        config->stream.bitrate > 0 && config->stream.bitrate <= 5000) {
+      config->stream.bitrate = 8000;
+    }
+    config->config_version = CURRENT_CONFIG_VERSION;
+    if (config_file) {
+      config_save(config_file, config);
+    }
   }
 
   update_layout();

@@ -42,6 +42,7 @@ struct special_keys {
 
 typedef struct _CONFIGURATION {
   // static configuration, value will be saved to config file
+  int config_version;
   STREAM_CONFIGURATION stream;
   char* app;
   char* action;
