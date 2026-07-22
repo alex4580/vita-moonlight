@@ -19,6 +19,7 @@
 
 #include <psp2common/ctrl.h>
 #include <psp2/shellutil.h>
+#include <psp2/power.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -43,6 +44,7 @@
 
 #include "touchabsolute.h"
 #include "shortcuts.h"
+#include "motion.h"
 #include "../connection_overlay.h"
 
 #include <Limelight.h>
@@ -1004,14 +1006,10 @@ void vitainput_config(CONFIGURATION config) {
   mouse_multiplier = 1 + (0.01 * config.mouse_acceleration);
 }
 
-extern bool active_motion_threads;
-
 void vitainput_start(void) {
   uint16_t gamepadMask = 1;
-  uint32_t gamepadCapabilites = LI_CCAP_GYRO | LI_CCAP_BATTERY_STATE | LI_CCAP_ACCEL | LI_CCAP_TOUCHPAD;
-
+  uint16_t gamepadCapabilities = LI_CCAP_BATTERY_STATE;
   uint32_t gamepadSupportedButtonFlags = 0xffff;
-  gamepadSupportedButtonFlags |= TOUCHPAD_FLAG;
   gamepadSupportedButtonFlags |= MISC_FLAG;
 
   // Determinar tipo de control a enviar según config.controller_type
@@ -1023,19 +1021,40 @@ void vitainput_start(void) {
     case 4: controller_type = LI_CTYPE_UNKNOWN; break;
     default: controller_type = LI_CTYPE_PS; break;
   }
-  LiSendControllerArrivalEvent(0, gamepadMask, controller_type, gamepadSupportedButtonFlags, gamepadCapabilites);
+  // Keep Xbox mode strictly XInput-compatible. Sunshine's automatic controller
+  // selection promotes motion-capable clients to DS4, so gyro and touchpad are
+  // only advertised by the PlayStation profile that can represent them.
+  if (controller_type == LI_CTYPE_PS) {
+    if (config.enable_motion_controls) {
+      gamepadCapabilities |= LI_CCAP_GYRO | LI_CCAP_ACCEL;
+    }
+    if (config.touchscreen_mode == 1) {
+      gamepadCapabilities |= LI_CCAP_TOUCHPAD;
+      gamepadSupportedButtonFlags |= TOUCHPAD_FLAG;
+    }
+  }
 
-  LiSendControllerBatteryEvent(0, LI_BATTERY_STATE_FULL, 100);
+  vita_motion_begin_stream((gamepadCapabilities & (LI_CCAP_GYRO | LI_CCAP_ACCEL)) != 0);
+  LiSendControllerArrivalEvent(0, gamepadMask, controller_type, gamepadSupportedButtonFlags, gamepadCapabilities);
+
+  int battery_percent = scePowerGetBatteryLifePercent();
+  if (battery_percent < 0 || battery_percent > 100) {
+    LiSendControllerBatteryEvent(0, LI_BATTERY_STATE_UNKNOWN, LI_BATTERY_PERCENTAGE_UNKNOWN);
+  } else {
+    uint8_t battery_state = scePowerIsBatteryCharging()
+        ? LI_BATTERY_STATE_CHARGING
+        : (battery_percent == 100 ? LI_BATTERY_STATE_FULL : LI_BATTERY_STATE_DISCHARGING);
+    LiSendControllerBatteryEvent(0, battery_state, (uint8_t)battery_percent);
+  }
 
   if(config.enable_psbutton_capture)
     lock_psbutton();
 
   active_input_thread = true;
-  active_motion_threads = true;
 }
 
 void vitainput_stop(void) {
   unlock_psbutton();
   active_input_thread = false;
-  active_motion_threads = false;
+  vita_motion_end_stream();
 }

@@ -22,6 +22,37 @@ Vita Moonlight is a PlayStation Vita port of Moonlight, with major improvements 
 - **L1/R1 and L2/R2 Swap:** Swap the functions of the L1/R1 and L2/R2 buttons from the settings menu for greater comfort and customization.
 - **Gamepad Type Selection:** Choose Xbox or PlayStation controller layout directly from the settings menu.
 
+## Integrated Vita and Windows release
+
+The current fork separates controller behavior into two deterministic host
+profiles:
+
+- **Xbox compatibility:** advertises a conventional Xbox controller without
+  motion or controller-touchpad capabilities for reliable XInput and Steam Big
+  Picture support.
+- **DS4 + motion/touchpad:** advertises a PlayStation controller and enables
+  gyro, accelerometer, and DS4 touchpad capabilities only when their matching
+  settings are enabled.
+
+Motion data is converted to the Moonlight protocol units (degrees/second for
+gyro and m/s² for acceleration), and requested sensor rates are capped at 120
+Hz. New configurations default to the Vita-native 960x544, 60 FPS, 5 Mbps
+profile. Configurations with explicit resolution and bitrate values are
+preserved; older configurations that relied on the former implicit 1280x720
+default will migrate to the new native preset.
+
+The Windows package in [`host/`](host/) provides the other half of the system.
+Its installer can install the pinned Sunshine, ViGEmBus, and signed virtual
+display components, generate a Vita-specific Sunshine or Apollo application, and
+transactionally switch to a 960x544 virtual display for each stream. The full
+original display topology is saved before mutation, restored on disconnect, and
+retained for explicit recovery after a crash. Tagged CI releases publish the
+Windows installer and Vita VPK together.
+
+After installation, open **Start > Vita Moonlight Host > Vita Moonlight Host
+Control Panel**. Normal setup, diagnostics, display testing, and recovery are
+available as buttons; command-line use is optional.
+
 ## Documentation
 
 More information can find [moonlight-docs][1], [moonlight-embedded][2], and our [wiki][3].
@@ -32,11 +63,12 @@ If you need more help, join the #vita-help channel in [discord][4].
 [3]: https://github.com/xyzz/vita-moonlight/wiki
 [4]: https://discord.gg/atkmxxT
 
-## Upcoming Features
-
-- **Artemis/Apollo compatibility:** Planned support for Artemis/Apollo (a modified Sunshine host), to allow streaming from more sources and custom servers.
-
-Stay tuned for more improvements!
+Apollo is supported as an alternative host mode; its own virtual display is
+used instead of the separate Windows virtual display driver. See
+[`host/README.md`](host/README.md) for the
+one-package setup, controller profiles, recovery commands, and developer build.
+Use [`host/END_TO_END_TEST.md`](host/END_TO_END_TEST.md) for the clean-machine
+and physical-Vita release acceptance matrix.
 
 ## How to open the Pause Menu
 

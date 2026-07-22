@@ -1,0 +1,103 @@
+name: Build Windows host companion
+
+on:
+  push:
+    branches: [vita]
+    paths:
+      - "host/**"
+      - ".github/workflows/windows-host.yml"
+  pull_request:
+    branches: [vita]
+    paths:
+      - "host/**"
+      - ".github/workflows/windows-host.yml"
+  workflow_dispatch:
+  workflow_call:
+    secrets:
+      WINDOWS_CERTIFICATE_BASE64:
+        required: false
+      WINDOWS_CERTIFICATE_PASSWORD:
+        required: false
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      HAS_WINDOWS_SIGNING_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 != '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - name: Build
+        run: dotnet build host/VitaMoonlight.Host/VitaMoonlight.Host.csproj --configuration Release
+      - name: Self-test
+        run: dotnet run --project host/VitaMoonlight.Host/VitaMoonlight.Host.csproj --configuration Release --no-build -- self-test
+      - name: Publish
+        run: dotnet publish host/VitaMoonlight.Host/VitaMoonlight.Host.csproj --configuration Release --runtime win-x64 --self-contained true -p:PublishSingleFile=true -p:DebugType=None -p:DebugSymbols=false --output artifacts/host
+      - name: Restore optional Windows signing certificate
+        if: env.HAS_WINDOWS_SIGNING_CERTIFICATE == 'true'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
+        run: |
+          $certificateBytes = [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_BASE64)
+          [IO.File]::WriteAllBytes("$env:RUNNER_TEMP\vita-moonlight-signing.pfx", $certificateBytes)
+      - name: Sign host companion
+        if: env.HAS_WINDOWS_SIGNING_CERTIFICATE == 'true'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          $signTool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+          if ($null -eq $signTool) { throw "signtool.exe was not found." }
+          & $signTool.FullName sign /fd SHA256 /td SHA256 /tr http://timestamp.digicert.com /f "$env:RUNNER_TEMP\vita-moonlight-signing.pfx" /p $env:WINDOWS_CERTIFICATE_PASSWORD artifacts/host/VitaMoonlight.Host.exe
+          if ($LASTEXITCODE -ne 0) { throw "Signing the host companion failed." }
+      - name: Test published executable
+        run: artifacts/host/VitaMoonlight.Host.exe self-test
+      - name: Prepare pinned signed display-driver bundle
+        shell: pwsh
+        run: host/installer/prepare-displaywizard.ps1
+      - name: Prepare pinned ViGEmBus bundle
+        shell: pwsh
+        run: host/installer/prepare-vigembus.ps1
+      - name: Prepare pinned Sunshine bundle
+        shell: pwsh
+        run: host/installer/prepare-sunshine.ps1
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+      - name: Build Windows installer
+        shell: pwsh
+        run: '& "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" host\installer\VitaMoonlightHost.iss'
+      - name: Sign Windows installer
+        if: env.HAS_WINDOWS_SIGNING_CERTIFICATE == 'true'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          $signTool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+          if ($null -eq $signTool) { throw "signtool.exe was not found." }
+          & $signTool.FullName sign /fd SHA256 /td SHA256 /tr http://timestamp.digicert.com /f "$env:RUNNER_TEMP\vita-moonlight-signing.pfx" /p $env:WINDOWS_CERTIFICATE_PASSWORD artifacts/installer/Vita-Moonlight-Host-Setup-win-x64.exe
+          if ($LASTEXITCODE -ne 0) { throw "Signing the Windows installer failed." }
+      - name: Build portable archive
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path artifacts/portable/tools -Force | Out-Null
+          Copy-Item artifacts/host/* artifacts/portable -Recurse -Force
+          Copy-Item artifacts/displaywizard artifacts/portable/tools/DisplayWizard -Recurse -Force
+          Copy-Item artifacts/vigembus artifacts/portable/tools/ViGEmBus -Recurse -Force
+          Copy-Item artifacts/sunshine artifacts/portable/tools/Sunshine -Recurse -Force
+          Copy-Item host/README.md,host/END_TO_END_TEST.md,host/THIRD_PARTY_NOTICES.md,LICENSE artifacts/portable -Force
+          Compress-Archive -Path artifacts/portable/* -DestinationPath artifacts/installer/Vita-Moonlight-Host-Portable-win-x64.zip -CompressionLevel Optimal
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vita-moonlight-windows-host
+          path: artifacts/installer/*
+      - name: Remove temporary signing certificate
+        if: ${{ always() && env.HAS_WINDOWS_SIGNING_CERTIFICATE == 'true' }}
+        shell: pwsh
+        run: Remove-Item -LiteralPath "$env:RUNNER_TEMP\vita-moonlight-signing.pfx" -Force -ErrorAction SilentlyContinue

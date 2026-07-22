@@ -6,6 +6,7 @@ on:
   pull_request:
     branches: [ vita ]
   workflow_dispatch:
+  workflow_call:
 
 jobs:
   build:
@@ -15,6 +16,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Set up dependencies
         run: |
@@ -37,13 +40,12 @@ jobs:
           export PATH=$VITASDK/bin:$PATH
           echo "VITASDK: $VITASDK"
           echo "PATH: $PATH"
-          # Install all main packages
+          # Install only the libraries linked by this project. vdpm resolves
+          # their transitive package dependencies.
           git clone https://github.com/vitasdk/vdpm.git
-          for p in zlib bzip2 libzip libpng libexif libjpeg-turbo jansson yaml-cpp freetype harfbuzz fftw libvita2d libvita2d_ext libmad libogg libvorbis flac libtheora libtremor libmikmod libftpvita henkaku taihen kubridge libk libdebugnet onigmo libwebp sdl sdl_image sdl_mixer sdl_net sdl_ttf sdl_gfx sdl2 sdl2_image sdl2_mixer sdl2_net sdl2_ttf sdl2_gfx openal-soft openssl curl curlpp expat opus opusfile unrar glm libxml2 speexdsp pixman TinyGL kuio taipool mpg123 libmpeg2 soloud quirc Box2D libsndfile xz libarchive bullet libimagequant libmodplug libconfig libsodium vitaShaRK libmathneon vitaGL imgui imgui-vita2d libbaremetal minizip jsoncpp lame ffmpeg physfs vita-rss-libdl luajit tinyxml2 cpython cpython3 asio assimp opensles cpr libintl libopenmpt libvpx zstd libpcre2 fribidi libass websocketpp wslay SceShaccCgExt boost pib libxmp libxmp-lite sdl3 sdl3_image sdl3_ttf; do
+          for p in zlib bzip2 libpng libjpeg-turbo freetype libvita2d openssl curl expat opus; do
             ./vdpm/vdpm -f $p
           done
-          # Explicitly install mbedtls
-          ./vdpm/vdpm -f mbedtls
           echo "Contents of $VITASDK after installing packages:"
           ls -l $VITASDK
           echo "Contents of $VITASDK/arm-vita-eabi:"
@@ -54,7 +56,6 @@ jobs:
 
       - name: Update submodules and build
         run: |
-          git submodule update --init
           cmake -S . -B build -DCMAKE_TOOLCHAIN_FILE="${{ env.VITASDK }}/share/vita.toolchain.cmake"
           cd build
           make

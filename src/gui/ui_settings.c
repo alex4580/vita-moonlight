@@ -402,7 +402,7 @@ static int special_keys_menu() {
 
 
 // --- Controller Type Selection ---
-static const char* controller_type_names[] = {"Xbox", "PlayStation"};
+static const char* controller_type_names[] = {"Xbox compatibility", "DS4 + motion/touchpad"};
 static int controller_type_values[] = {1, 2}; // 1: Xbox, 2: PS
 #define CONTROLLER_TYPE_COUNT 2
 
@@ -637,11 +637,15 @@ static int settings_loop(int id, void *context, const input_data *input) {
         break;
       }
       //char *resolutions[] = {"960x540", "960x544", "1280x540", "1280x720", "1920x1080"};
+      int old_recommended_bitrate = config_recommended_bitrate(config.stream.width, config.stream.height, config.stream.fps);
       sprintf(current, "%dx%d", config.stream.width, config.stream.height);
 
       new_idx = move_idx_in_array(support_resolutions, support_resolution_count, current, left ? -1 : +1);
       config.stream.width = RESOLUTIONS[support_resolution_idx[new_idx]][0];
       config.stream.height = RESOLUTIONS[support_resolution_idx[new_idx]][1];
+      if (config.stream.bitrate == old_recommended_bitrate) {
+        config.stream.bitrate = config_recommended_bitrate(config.stream.width, config.stream.height, config.stream.fps);
+      }
 
       did_change = 1;
       break;
@@ -649,6 +653,7 @@ static int settings_loop(int id, void *context, const input_data *input) {
       if (!left && !right) {
           break;
       }
+      int old_fps_recommended_bitrate = config_recommended_bitrate(config.stream.width, config.stream.height, config.stream.fps);
       char *settings[] = {"24", "30", "40", "50", "60"};
       sprintf(current, "%d", config.stream.fps);
       new_idx = _move_idx_in_array(settings, current, left ? -1 : +1);
@@ -659,6 +664,10 @@ static int settings_loop(int id, void *context, const input_data *input) {
         case 2: config.stream.fps = 40; break;
         case 3: config.stream.fps = 50; break; // PAL
         case 4: config.stream.fps = 60; break; // NTSC
+      }
+
+      if (config.stream.bitrate == old_fps_recommended_bitrate) {
+        config.stream.bitrate = config_recommended_bitrate(config.stream.width, config.stream.height, config.stream.fps);
       }
 
       did_change = 1;

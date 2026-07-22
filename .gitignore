@@ -1,8 +1,11 @@
 build/*
 .DS_Store
 .cache/*
+.tools/
 compile_commands.json
 venv/*
+host/**/bin/
+host/**/obj/
 mdns_discovery.py
 .vscode/tasks.json
 psp2core_tmp.psp2dmp

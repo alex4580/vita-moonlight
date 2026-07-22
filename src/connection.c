@@ -23,6 +23,7 @@
 #include "config.h"
 #include "power/vita.h"
 #include "input/vita.h"
+#include "input/motion.h"
 #include "video/vita.h"
 #include "audio/vita.h"
 #include <stdbool.h>
@@ -198,8 +199,8 @@ void connection_set_motion_state(uint16_t controller, uint8_t motion_type, uint1
   vita_debug_log("Set motion state called, controller: %u, Type: %u, Report rate: %u", controller, motion_type, report_rate);
 
   //TODO: Multicontroller support here someday? Can't afford pstv tho
-  if (config.enable_motion_controls == false) {
-    vita_debug_log("Ignored gyro request due to config");
+  if (!config.enable_motion_controls || config.controller_type != 2) {
+    vita_debug_log("Ignored motion request: DS4 motion profile is not active");
     return;
   }
 
@@ -219,12 +220,12 @@ void connection_set_motion_state(uint16_t controller, uint8_t motion_type, uint1
     switch (motion_type) {
       case LI_MOTION_TYPE_GYRO:
         motion_state.motion_type_gyro_enabled = true;
-        motion_state.report_rate_gyro = report_rate;
+        motion_state.report_rate_gyro = vita_motion_clamp_report_rate(report_rate);
         vita_debug_log("Setting gyro state true");
         break;
       case LI_MOTION_TYPE_ACCEL:
         motion_state.motion_type_accel_enabled = true;
-        motion_state.report_rate_accel = report_rate;
+        motion_state.report_rate_accel = vita_motion_clamp_report_rate(report_rate);
         vita_debug_log("Setting accel state true");
         break;
     }

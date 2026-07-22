@@ -48,6 +48,21 @@ extern char* strdup(const char*);
 CONFIGURATION config;
 char *config_path;
 
+int config_recommended_bitrate(int width, int height, int fps) {
+  (void)width;
+
+  if (height <= 544) {
+    return fps >= 60 ? 5000 : 3000;
+  }
+  if (height <= 720) {
+    return fps >= 60 ? 7000 : 4500;
+  }
+  if (height < 1080) {
+    return fps >= 60 ? 9000 : 6000;
+  }
+  return fps >= 60 ? 15000 : 10000;
+}
+
 bool inputAdded = false;
 static bool mapped = true;
 const char* audio_device = NULL;
@@ -175,9 +190,9 @@ void config_save(const char* filename, PCONFIGURATION config) {
   if (config->mapping)
     write_config_string(fd, "mapping", config->mapping);
 
-  if (config->stream.width != 1280)
+  if (config->stream.width != 960)
     write_config_int(fd, "width", config->stream.width);
-  if (config->stream.height != 720)
+  if (config->stream.height != 544)
     write_config_int(fd, "height", config->stream.height);
   if (config->stream.fps != 60)
     write_config_int(fd, "fps", config->stream.fps);
@@ -249,8 +264,8 @@ void update_layout() {
 void config_parse(int argc, char* argv[], PCONFIGURATION config) {
   LiInitializeStreamConfiguration(&config->stream);
 
-  config->stream.width = 1280;
-  config->stream.height = 720;
+  config->stream.width = 960;
+  config->stream.height = 544;
   config->stream.fps = 60;
   config->stream.bitrate = -1;
   config->stream.packetSize = 1024;
@@ -284,6 +299,7 @@ void config_parse(int argc, char* argv[], PCONFIGURATION config) {
   config->mouse_acceleration = 150;
   config->enable_ref_frame_invalidation = false;
   config->enable_vita_vblank_wait = false;
+  config->enable_motion_controls = true;
   config->enable_psbutton_capture = true;
   config->enable_double_tap_sprint = false;
 
@@ -333,14 +349,8 @@ void config_parse(int argc, char* argv[], PCONFIGURATION config) {
   if (config->stream.fps == -1)
     config->stream.fps = config->stream.height >= 1080 ? 30 : 60;
 
-  if (config->stream.bitrate == -1) {
-    if (config->stream.height >= 1080 && config->stream.fps >= 60)
-      config->stream.bitrate = 20000;
-    else if (config->stream.height >= 1080 || config->stream.fps >= 60)
-      config->stream.bitrate = 10000;
-    else
-      config->stream.bitrate = 5000;
-  }
+  if (config->stream.bitrate == -1)
+    config->stream.bitrate = config_recommended_bitrate(config->stream.width, config->stream.height, config->stream.fps);
 
   if (inputAdded) {
     if (!mapped) {

@@ -1,0 +1,506 @@
+using System.Runtime.InteropServices;
+using System.Security.Principal;
+using System.Text.Json;
+using Microsoft.Win32;
+
+namespace VitaMoonlight.Host;
+
+internal static class Program
+{
+    private const int ExitSuccess = 0;
+    private const int ExitFailure = 1;
+    private const int ExitInvalidArguments = 2;
+    private const int ExitMissingRequiredComponent = 3;
+
+    [STAThread]
+    public static int Main(string[] args)
+    {
+        try
+        {
+            var command = args.FirstOrDefault()?.ToLowerInvariant() ?? "gui";
+            var remaining = args.Skip(1).ToArray();
+            return command switch
+            {
+                "gui" => RunControlPanel(),
+                "doctor" => RunDoctor(HasFlag(remaining, "--json")),
+                "profile" => PrintProfile(HasFlag(remaining, "--json")),
+                "configure" => Configure(remaining),
+                "driver" => DriverCommand(remaining),
+                "display" => DisplayCommand(remaining),
+                "session" => SessionCommand(remaining),
+                "recovery" => RecoveryCommand(remaining),
+                "self-test" => RunSelfTest(),
+                "help" or "--help" or "-h" => PrintHelp(),
+                _ => InvalidCommand(command),
+            };
+        }
+        catch (Exception error)
+        {
+            Console.Error.WriteLine($"Error: {error.Message}");
+            if (Environment.GetEnvironmentVariable("VITA_MOONLIGHT_DEBUG") == "1")
+            {
+                Console.Error.WriteLine(error);
+            }
+            return ExitFailure;
+        }
+    }
+
+    private static int RunControlPanel()
+    {
+        EnsureWindows();
+        HostControlPanel.Run();
+        return ExitSuccess;
+    }
+
+    private static int Configure(string[] args)
+    {
+        EnsureWindows();
+        var previous = HostSettings.Load();
+        var hostMode = GetOption(args, "--host") ?? previous.HostMode;
+        if (!hostMode.Equals("sunshine", StringComparison.OrdinalIgnoreCase) &&
+            !hostMode.Equals("apollo", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ArgumentException("--host must be `sunshine` or `apollo`.");
+        }
+
+        var settings = previous with
+        {
+            HostMode = hostMode.ToLowerInvariant(),
+            SunshineConfigDirectory = GetOption(args, "--config-dir") ?? previous.SunshineConfigDirectory,
+            SunshineApplicationName = GetOption(args, "--app") ?? previous.SunshineApplicationName,
+            DisplayWizardPath = GetOption(args, "--driver-bundle") ?? GetOption(args, "--displaywizard") ?? previous.DisplayWizardPath,
+            DisplayMatch = GetOption(args, "--display-match") ?? previous.DisplayMatch,
+        };
+
+        if (settings.HostMode == "sunshine")
+        {
+            var wizard = DisplayWizardAdapter.Locate(settings.DisplayWizardPath);
+            wizard.ValidateDriverBundle();
+            settings = settings with { DisplayWizardPath = wizard.ExecutablePath };
+        }
+
+        var companionPath = GetOption(args, "--companion") ?? Path.Combine(AppContext.BaseDirectory, "VitaMoonlight.Host.exe");
+        settings.Save();
+        var result = SunshineConfigurator.Configure(settings, Path.GetFullPath(companionPath));
+        Console.WriteLine($"Configured {settings.HostMode} in {result.ConfigurationDirectory}");
+        Console.WriteLine($"Moonlight application: {result.ApplicationName}");
+        Console.WriteLine($"Original apps backup: {result.BackupPath}");
+        Console.WriteLine("Restart the streaming host, then select the configured application on the Vita.");
+        return ExitSuccess;
+    }
+
+    private static int DisplayCommand(string[] args)
+    {
+        EnsureWindows();
+        var action = args.FirstOrDefault()?.ToLowerInvariant() ?? "list";
+        var displays = new DisplayTopologyService();
+        if (action == "disable-virtual")
+        {
+            EnsureAdministrator("Disabling the idle virtual display");
+            Console.WriteLine(displays.DisableManagedVirtualDisplays()
+                ? "The idle Vita virtual display was disabled. Your physical display layout remains active."
+                : "No active Vita virtual display needed to be disabled.");
+            return ExitSuccess;
+        }
+        if (action != "list")
+        {
+            return InvalidCommand($"display {action}");
+        }
+
+        foreach (var display in displays.ListDisplays())
+        {
+            Console.WriteLine($"[{display.PathIndex}] {(display.IsActive ? "active" : "inactive"),-8} {(display.IsAvailable ? "available" : "unavailable"),-11} {display.FriendlyName}");
+            Console.WriteLine($"    {display.DevicePath}");
+        }
+        return ExitSuccess;
+    }
+
+    private static int DriverCommand(string[] args)
+    {
+        EnsureWindows();
+        EnsureAdministrator("Virtual display driver setup");
+        var action = args.FirstOrDefault()?.ToLowerInvariant() ?? "install";
+        var configuredPath = GetOption(args, "--driver-bundle") ?? GetOption(args, "--displaywizard") ?? HostSettings.Load().DisplayWizardPath;
+        var wizard = DisplayWizardAdapter.Locate(configuredPath);
+
+        switch (action)
+        {
+            case "install":
+                wizard.InstallDriver();
+                for (var attempt = 0; attempt < 10; attempt++)
+                {
+                    if (new DisplayTopologyService().DisableManagedVirtualDisplays()) break;
+                    Thread.Sleep(250);
+                }
+                Console.WriteLine("Virtual display driver installed. A reboot may be required before it appears.");
+                return ExitSuccess;
+            case "reload":
+                wizard.ReloadDriver();
+                Console.WriteLine("Virtual display driver reloaded.");
+                return ExitSuccess;
+            default:
+                return InvalidCommand($"driver {action}");
+        }
+    }
+
+    private static int SessionCommand(string[] args)
+    {
+        EnsureWindows();
+        var action = args.FirstOrDefault()?.ToLowerInvariant() ?? "status";
+        var manager = new SessionManager();
+        switch (action)
+        {
+            case "start":
+                var result = manager.Start(
+                    GetRequiredInt(args, "--width"),
+                    GetRequiredInt(args, "--height"),
+                    GetRequiredInt(args, "--fps"));
+                Console.WriteLine($"Streaming display active: {result.DisplayName} at {result.Width}x{result.Height}@{result.Fps}");
+                return ExitSuccess;
+            case "test":
+                var seconds = GetOptionalInt(args, "--seconds", 15, 5, 120);
+                try
+                {
+                    var testResult = manager.Start(
+                        GetRequiredInt(args, "--width"),
+                        GetRequiredInt(args, "--height"),
+                        GetRequiredInt(args, "--fps"));
+                    Console.WriteLine($"Test display active: {testResult.DisplayName} at {testResult.Width}x{testResult.Height}@{testResult.Fps}");
+                    Console.WriteLine($"Restoring the original display layout in {seconds} seconds...");
+                    Thread.Sleep(TimeSpan.FromSeconds(seconds));
+                }
+                finally
+                {
+                    manager.RestoreIfPending();
+                }
+                Console.WriteLine("Display test completed and the original topology was restored.");
+                return ExitSuccess;
+            case "stop":
+            case "recover":
+                Console.WriteLine(manager.RestoreIfPending()
+                    ? "Original display topology restored."
+                    : "No pending display recovery was found.");
+                return ExitSuccess;
+            case "status":
+                Console.WriteLine(manager.HasPendingRecovery
+                    ? $"A streaming display session is active or interrupted. Recovery: {HostStatePaths.RecoveryFile}"
+                    : "No display transaction is pending.");
+                return ExitSuccess;
+            default:
+                return InvalidCommand($"session {action}");
+        }
+    }
+
+    private static int RecoveryCommand(string[] args)
+    {
+        EnsureWindows();
+        var action = args.FirstOrDefault()?.ToLowerInvariant() ?? "status";
+        switch (action)
+        {
+            case "install":
+                EnsureAdministrator("Installing the automatic display-recovery safeguard");
+                RecoveryTaskManager.Install(Environment.ProcessPath
+                    ?? Path.Combine(AppContext.BaseDirectory, "VitaMoonlight.Host.exe"));
+                Console.WriteLine("The automatic logon recovery task is installed.");
+                return ExitSuccess;
+            case "uninstall":
+                EnsureAdministrator("Removing the automatic display-recovery safeguard");
+                RecoveryTaskManager.Uninstall();
+                Console.WriteLine("The automatic logon recovery task was removed.");
+                return ExitSuccess;
+            case "status":
+                Console.WriteLine(RecoveryTaskManager.IsInstalled()
+                    ? "The automatic logon recovery task is installed."
+                    : "The automatic logon recovery task is not installed.");
+                return RecoveryTaskManager.IsInstalled() ? ExitSuccess : ExitMissingRequiredComponent;
+            default:
+                return InvalidCommand($"recovery {action}");
+        }
+    }
+
+    private static int RunDoctor(bool json)
+    {
+        var report = HostDiagnostics.Inspect();
+        if (json)
+        {
+            Console.WriteLine(JsonSerializer.Serialize(report, JsonOptions));
+        }
+        else
+        {
+            Console.WriteLine("Vita Moonlight host diagnostics");
+            Console.WriteLine($"Windows:       {Status(report.IsWindows, report.OperatingSystem)}");
+            Console.WriteLine($"Administrator: {Status(report.IsAdministrator, report.IsAdministrator ? "yes" : "no (required for setup)")}");
+            Console.WriteLine($"Host mode:     {report.HostMode}");
+            Console.WriteLine($"Sunshine:      {Status(report.SunshinePath is not null, report.SunshinePath ?? "not found")}");
+            Console.WriteLine($"Apollo:        {Status(report.ApolloPath is not null, report.ApolloPath ?? "not found")}");
+            Console.WriteLine($"ViGEmBus:      {Status(report.ViGEmBusInstalled, report.ViGEmBusInstalled ? "installed" : "not detected")}");
+            Console.WriteLine($"Driver bundle: {Status(report.DisplayWizardPath is not null, report.DisplayWizardPath ?? "not found (not needed for Apollo)")}");
+            Console.WriteLine($"Virtual display: {Status(report.VirtualDisplayDriverInstalled || report.HostMode == "apollo", report.HostMode == "apollo" ? "provided by Apollo" : report.VirtualDisplayDriverInstalled ? "signed driver installed" : "not detected")}");
+            Console.WriteLine($"Recovery:      {Status(!report.RecoveryPending, report.RecoveryPending ? "pending - run session recover" : "none")}");
+            Console.WriteLine($"Recovery task: {Status(report.RecoveryTaskInstalled, report.RecoveryTaskInstalled ? "installed" : "not installed")}");
+            Console.WriteLine();
+            Console.WriteLine(report.Recommendation);
+        }
+
+        return report.IsWindows && report.HasSelectedStreamingHost && report.HasDisplaySupport &&
+            report.ViGEmBusInstalled && !report.RecoveryPending
+            ? ExitSuccess
+            : ExitMissingRequiredComponent;
+    }
+
+    private static int PrintProfile(bool json)
+    {
+        var profile = VitaHostProfile.Recommended;
+        if (json)
+        {
+            Console.WriteLine(JsonSerializer.Serialize(profile, JsonOptions));
+        }
+        else
+        {
+            Console.WriteLine("Recommended Vita streaming profile");
+            Console.WriteLine($"Resolution: {profile.Width}x{profile.Height}");
+            Console.WriteLine($"FPS:        {profile.FramesPerSecond}");
+            Console.WriteLine($"Bitrate:    {profile.BitrateKbps} Kbps");
+            Console.WriteLine($"Gamepad:    {profile.SunshineGamepadMode}");
+            Console.WriteLine($"Motion:     {profile.SunshineMotionAsDs4}");
+        }
+        return ExitSuccess;
+    }
+
+    private static int RunSelfTest()
+    {
+        var profile = VitaHostProfile.Recommended;
+        Require(profile.Width == 960 && profile.Height == 544 && profile.BitrateKbps == 5000, "Recommended profile invariant failed.");
+        Require(Marshal.SizeOf<DisplayPathInfo>() == 72, "DISPLAYCONFIG_PATH_INFO layout is invalid.");
+        Require(Marshal.SizeOf<DisplayModeInfo>() == 64, "DISPLAYCONFIG_MODE_INFO layout is invalid.");
+        Require(Marshal.SizeOf<DisplayTargetName>() == 420, "DISPLAYCONFIG_TARGET_DEVICE_NAME layout is invalid.");
+        Require(Marshal.SizeOf<DisplaySourceName>() == 84, "DISPLAYCONFIG_SOURCE_DEVICE_NAME layout is invalid.");
+        Require(Marshal.SizeOf<DeviceMode>() == 220, "DEVMODE layout is invalid.");
+
+        var sample = new[] { new DisplayPathInfo { Flags = 123, SourceInfo = new DisplayPathSourceInfo { Id = 7 } } };
+        var roundTrip = WindowsDisplayNative.BytesToStructures<DisplayPathInfo>(WindowsDisplayNative.StructuresToBytes(sample), 1);
+        Require(roundTrip[0].Flags == 123 && roundTrip[0].SourceInfo.Id == 7, "Display topology serialization failed.");
+        var command = SunshineConfigurator.BuildStartCommand(@"C:\Program Files\Vita Moonlight\VitaMoonlight.Host.exe");
+        Require(command.Contains("%SUNSHINE_CLIENT_WIDTH%", StringComparison.Ordinal), "Sunshine hook generation failed.");
+
+        var testConfiguration = new List<string> { "gamepad = x360", "unrelated = preserved" };
+        SunshineConfigurator.UpdateSunshineConfiguration(testConfiguration);
+        Require(testConfiguration.Contains("gamepad = auto"), "Sunshine gamepad configuration failed.");
+        Require(testConfiguration.Contains("motion_as_ds4 = enabled"), "Sunshine motion configuration failed.");
+        Require(testConfiguration.Contains("native_pen_touch = enabled"), "Sunshine touch configuration failed.");
+        Require(testConfiguration.Contains("unrelated = preserved"), "Sunshine configuration preservation failed.");
+
+        const string driverConfiguration = "<vdd_settings><resolutions/><options><HardwareCursor>true</HardwareCursor></options></vdd_settings>";
+        var updatedDriverConfiguration = DisplayWizardAdapter.AddModeToConfiguration(driverConfiguration, 960, 544, 60);
+        Require(updatedDriverConfiguration.Contains("<width>960</width>", StringComparison.Ordinal), "Virtual display width configuration failed.");
+        Require(updatedDriverConfiguration.Contains("<height>544</height>", StringComparison.Ordinal), "Virtual display height configuration failed.");
+        Require(updatedDriverConfiguration.Contains("<refresh_rate>60</refresh_rate>", StringComparison.Ordinal), "Virtual display refresh configuration failed.");
+        Require(updatedDriverConfiguration.Contains("<HardwareCursor>true</HardwareCursor>", StringComparison.Ordinal), "Virtual display option preservation failed.");
+        Require(DisplayTopologyService.IsManagedVirtualDisplay(
+            new DisplayDescriptor(0, "VDD by MTT", @"\\?\DISPLAY#MTT1337#1", true, true)),
+            "Signed virtual display identification failed.");
+        Require(!DisplayTopologyService.IsManagedVirtualDisplay(
+            new DisplayDescriptor(0, "LG ULTRAGEAR+", @"\\?\DISPLAY#GSM5CDB#1", true, true)),
+            "Physical display was incorrectly identified as managed virtual display.");
+
+        Console.WriteLine("Host companion self-test passed.");
+        return ExitSuccess;
+    }
+
+    private static int PrintHelp()
+    {
+        Console.WriteLine("VitaMoonlight.Host gui");
+        Console.WriteLine("VitaMoonlight.Host doctor [--json]");
+        Console.WriteLine("VitaMoonlight.Host profile [--json]");
+        Console.WriteLine("VitaMoonlight.Host configure [--host sunshine|apollo] [--config-dir PATH] [--driver-bundle PATH] [--display-match TEXT]");
+        Console.WriteLine("VitaMoonlight.Host driver install|reload [--driver-bundle PATH]");
+        Console.WriteLine("VitaMoonlight.Host display list");
+        Console.WriteLine("VitaMoonlight.Host display disable-virtual");
+        Console.WriteLine("VitaMoonlight.Host session test --width N --height N --fps N [--seconds 5..120]");
+        Console.WriteLine("VitaMoonlight.Host session start --width N --height N --fps N");
+        Console.WriteLine("VitaMoonlight.Host session stop|recover|status");
+        Console.WriteLine("VitaMoonlight.Host recovery install|uninstall|status");
+        Console.WriteLine("VitaMoonlight.Host self-test");
+        return ExitSuccess;
+    }
+
+    private static string? GetOption(string[] args, string name)
+    {
+        for (var index = 0; index < args.Length; index++)
+        {
+            if (args[index].Equals(name, StringComparison.OrdinalIgnoreCase))
+            {
+                if (index + 1 >= args.Length || args[index + 1].StartsWith("--", StringComparison.Ordinal))
+                {
+                    throw new ArgumentException($"{name} requires a value.");
+                }
+                return args[index + 1];
+            }
+        }
+        return null;
+    }
+
+    private static int GetRequiredInt(string[] args, string name)
+    {
+        var value = GetOption(args, name);
+        if (!int.TryParse(value, out var parsed))
+        {
+            throw new ArgumentException($"{name} requires an integer value.");
+        }
+        return parsed;
+    }
+
+    private static int GetOptionalInt(string[] args, string name, int defaultValue, int minimum, int maximum)
+    {
+        var raw = GetOption(args, name);
+        if (raw is null) return defaultValue;
+        if (!int.TryParse(raw, out var value) || value < minimum || value > maximum)
+        {
+            throw new ArgumentException($"{name} must be an integer from {minimum} through {maximum}.");
+        }
+        return value;
+    }
+
+    private static bool HasFlag(string[] args, string name) => args.Any(arg => arg.Equals(name, StringComparison.OrdinalIgnoreCase));
+
+    private static void Require(bool condition, string message)
+    {
+        if (!condition)
+        {
+            throw new InvalidOperationException(message);
+        }
+    }
+
+    private static void EnsureWindows()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            throw new PlatformNotSupportedException("This command is only supported on Windows.");
+        }
+    }
+
+    private static void EnsureAdministrator(string operation)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            throw new PlatformNotSupportedException("Administrator detection is only supported on Windows.");
+        }
+        using var identity = WindowsIdentity.GetCurrent();
+        if (!new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator))
+        {
+            throw new UnauthorizedAccessException($"{operation} requires an Administrator terminal.");
+        }
+    }
+
+    private static int InvalidCommand(string command)
+    {
+        Console.Error.WriteLine($"Unknown command: {command}");
+        PrintHelp();
+        return ExitInvalidArguments;
+    }
+
+    private static string Status(bool ok, string value) => $"{(ok ? "OK" : "--")}  {value}";
+
+    private static readonly JsonSerializerOptions JsonOptions = new()
+    {
+        WriteIndented = true,
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+    };
+}
+
+internal sealed record VitaHostProfile(int Width, int Height, int FramesPerSecond, int BitrateKbps, string SunshineGamepadMode, bool SunshineMotionAsDs4)
+{
+    public static VitaHostProfile Recommended { get; } = new(960, 544, 60, 5000, "auto", true);
+}
+
+internal sealed record HostDiagnosticReport(
+    bool IsWindows,
+    string OperatingSystem,
+    bool IsAdministrator,
+    string HostMode,
+    string? SunshinePath,
+    string? ApolloPath,
+    bool ViGEmBusInstalled,
+    string? DisplayWizardPath,
+    bool VirtualDisplayDriverInstalled,
+    bool RecoveryPending,
+    bool RecoveryTaskInstalled,
+    string Recommendation)
+{
+    public bool HasStreamingHost => SunshinePath is not null || ApolloPath is not null;
+    public bool HasSelectedStreamingHost => HostMode == "apollo" ? ApolloPath is not null : SunshinePath is not null;
+    public bool HasDisplaySupport => HostMode == "apollo" || (DisplayWizardPath is not null && VirtualDisplayDriverInstalled);
+}
+
+internal static class HostDiagnostics
+{
+    public static HostDiagnosticReport Inspect()
+    {
+        var settings = HostSettings.Load();
+        var isWindows = OperatingSystem.IsWindows();
+        var programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+        var sunshine = FindExecutable(Environment.GetEnvironmentVariable("SUNSHINE_PATH"), Path.Combine(programFiles, "Sunshine", "sunshine.exe"));
+        var apollo = FindExecutable(Environment.GetEnvironmentVariable("APOLLO_PATH"), Path.Combine(programFiles, "Apollo", "apollo.exe"), Path.Combine(programFiles, "Apollo", "sunshine.exe"));
+        string? displayWizard = null;
+        try
+        {
+            var wizard = DisplayWizardAdapter.Locate(settings.DisplayWizardPath);
+            wizard.ValidateDriverBundle();
+            displayWizard = wizard.ExecutablePath;
+        }
+        catch (Exception error) when (error is FileNotFoundException or InvalidDataException) { }
+        var vigem = IsViGEmBusInstalled();
+        var virtualDisplay = DisplayWizardAdapter.IsDriverInstalled();
+        var recoveryPending = File.Exists(HostStatePaths.RecoveryFile);
+        var recoveryTaskInstalled = RecoveryTaskManager.IsInstalled();
+
+        var recommendation = !isWindows
+            ? "Run this companion on the Windows streaming host."
+            : recoveryPending
+                ? "An earlier session did not restore its display topology. Run `session recover` before streaming."
+                : settings.HostMode == "apollo" && apollo is null
+                    ? "Install Apollo or configure Sunshine mode, then run this check again."
+                    : settings.HostMode == "sunshine" && sunshine is null
+                        ? "Install Sunshine or configure Apollo mode, then run this check again."
+                    : !vigem
+                        ? "Install ViGEmBus from the host's troubleshooting page, reboot, and run this check again."
+                        : settings.HostMode == "sunshine" && displayWizard is null
+                            ? "Reinstall the host companion's signed display-driver bundle or switch to Apollo."
+                            : settings.HostMode == "sunshine" && !virtualDisplay
+                                ? "Install the signed virtual display driver, reboot if requested, and run this check again."
+                                : !recoveryTaskInstalled
+                                    ? "The host is ready, but automatic logon recovery is not installed. In the Administrator control panel, click Install recovery safeguard."
+                                : "The host is ready. In the control panel, click Configure Sunshine or Configure Apollo, restart the streaming host, and select Vita Moonlight on the client.";
+
+        return new HostDiagnosticReport(
+            isWindows,
+            Environment.OSVersion.VersionString,
+            IsAdministrator(),
+            settings.HostMode,
+            sunshine,
+            apollo,
+            vigem,
+            displayWizard,
+            virtualDisplay,
+            recoveryPending,
+            recoveryTaskInstalled,
+            recommendation);
+    }
+
+    private static string? FindExecutable(params string?[] candidates) =>
+        candidates.FirstOrDefault(candidate => !string.IsNullOrWhiteSpace(candidate) && File.Exists(candidate));
+
+    private static bool IsViGEmBusInstalled()
+    {
+        if (!OperatingSystem.IsWindows()) return false;
+        using var key = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Services\ViGEmBus");
+        return key is not null;
+    }
+
+    private static bool IsAdministrator()
+    {
+        if (!OperatingSystem.IsWindows()) return false;
+        using var identity = WindowsIdentity.GetCurrent();
+        return new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator);
+    }
+}
