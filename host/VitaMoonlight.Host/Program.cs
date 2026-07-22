@@ -29,6 +29,8 @@ internal static class Program
                 "display" => DisplayCommand(remaining),
                 "session" => SessionCommand(remaining),
                 "recovery" => RecoveryCommand(remaining),
+                "agent" => AgentCommand(remaining),
+                "emergency" => EmergencyCommand(remaining),
                 "self-test" => RunSelfTest(),
                 "help" or "--help" or "-h" => PrintHelp(),
                 _ => InvalidCommand(command),
@@ -250,6 +252,62 @@ internal static class Program
         }
     }
 
+    private static int AgentCommand(string[] args)
+    {
+        EnsureWindows();
+        var action = args.FirstOrDefault()?.ToLowerInvariant() ?? "status";
+        switch (action)
+        {
+            case "run":
+                return HostRecoveryAgentManager.Run(HasFlag(args, "--background"));
+            case "install":
+                EnsureAdministrator("Installing the stream rescue agent");
+                HostRecoveryAgentManager.Install(Environment.ProcessPath
+                    ?? Path.Combine(AppContext.BaseDirectory, "VitaMoonlight.Host.exe"));
+                Console.WriteLine("The stream rescue agent is installed and running.");
+                return ExitSuccess;
+            case "uninstall":
+                EnsureAdministrator("Removing the stream rescue agent");
+                HostRecoveryAgentManager.Uninstall();
+                Console.WriteLine("The stream rescue agent was removed.");
+                return ExitSuccess;
+            case "status":
+                var installed = HostRecoveryAgentManager.IsInstalled();
+                var running = HostRecoveryAgentManager.IsRunning();
+                Console.WriteLine($"Stream rescue task: {(installed ? "installed" : "not installed")}");
+                Console.WriteLine($"Stream rescue agent: {(running ? "running" : "not running")}");
+                var last = HostRecoveryAgentManager.ReadLastStatus();
+                if (last is not null)
+                {
+                    Console.WriteLine($"Last rescue: {last.Timestamp.LocalDateTime:g} {last.Action} {(last.Success ? "succeeded" : "failed")} - {last.Message}");
+                }
+                return installed && running ? ExitSuccess : ExitMissingRequiredComponent;
+            default:
+                return InvalidCommand($"agent {action}");
+        }
+    }
+
+    private static int EmergencyCommand(string[] args)
+    {
+        EnsureWindows();
+        EnsureAdministrator("Emergency host recovery");
+        var action = args.FirstOrDefault()?.ToLowerInvariant() ?? "recover-display";
+        HostRescueStatus result;
+        switch (action)
+        {
+            case "close-foreground":
+                result = HostRecoveryActions.CloseForegroundApplication();
+                break;
+            case "recover-display":
+                result = HostRecoveryActions.RecoverDisplayAndStreamingHost();
+                break;
+            default:
+                return InvalidCommand($"emergency {action}");
+        }
+        Console.WriteLine(result.Message);
+        return result.Success ? ExitSuccess : ExitFailure;
+    }
+
     private static int RunDoctor(bool json)
     {
         var report = HostDiagnostics.Inspect();
@@ -275,12 +333,14 @@ internal static class Program
             Console.WriteLine($"Virtual display: {Status(report.VirtualDisplayDriverInstalled || report.HostMode == "apollo", report.HostMode == "apollo" ? "provided by Apollo" : report.VirtualDisplayDriverInstalled ? "signed driver installed" : "not detected")}");
             Console.WriteLine($"Recovery:      {Status(!report.RecoveryPending, report.RecoveryPending ? "pending - run session recover" : "none")}");
             Console.WriteLine($"Recovery task: {Status(report.RecoveryTaskInstalled, report.RecoveryTaskInstalled ? "installed" : "not installed")}");
+            Console.WriteLine($"Stream rescue: {Status(report.RescueAgentInstalled && report.RescueAgentRunning, report.RescueAgentRunning ? "installed and running" : report.RescueAgentInstalled ? "installed but not running" : "not installed")}");
             Console.WriteLine();
             Console.WriteLine(report.Recommendation);
         }
 
         return report.IsWindows && report.HasSelectedStreamingHost && report.HasDisplaySupport && report.NativeDisplayLifecycleReady &&
-            report.ViGEmBusInstalled && report.ViGEmBusRunning && !report.SunshineNeedsRestart && !report.RecoveryPending
+            report.ViGEmBusInstalled && report.ViGEmBusRunning && !report.SunshineNeedsRestart && !report.RecoveryPending &&
+            report.RescueAgentInstalled && report.RescueAgentRunning
             ? ExitSuccess
             : ExitMissingRequiredComponent;
     }
@@ -397,6 +457,9 @@ internal static class Program
         Require(!DisplayTopologyService.IsManagedVirtualDisplay(
             new DisplayDescriptor(0, "LG ULTRAGEAR+", @"\\?\DISPLAY#GSM5CDB#1", true, true)),
             "Physical display was incorrectly identified as managed virtual display.");
+        Require(HostRecoveryActions.IsProtectedProcessName("explorer"), "Windows shell protection failed.");
+        Require(HostRecoveryActions.IsProtectedProcessName("Sunshine"), "Sunshine process protection failed.");
+        Require(!HostRecoveryActions.IsProtectedProcessName("DOOMEternalx64vk"), "Game process was incorrectly protected.");
 
         Console.WriteLine("Host companion self-test passed.");
         return ExitSuccess;
@@ -416,6 +479,8 @@ internal static class Program
         Console.WriteLine("VitaMoonlight.Host session start --width N --height N --fps N");
         Console.WriteLine("VitaMoonlight.Host session stop|recover|status");
         Console.WriteLine("VitaMoonlight.Host recovery install|uninstall|status");
+        Console.WriteLine("VitaMoonlight.Host agent run [--background]|install|uninstall|status");
+        Console.WriteLine("VitaMoonlight.Host emergency close-foreground|recover-display");
         Console.WriteLine("VitaMoonlight.Host self-test");
         return ExitSuccess;
     }
@@ -531,6 +596,8 @@ internal sealed record HostDiagnosticReport(
     bool VirtualDisplayDriverInstalled,
     bool RecoveryPending,
     bool RecoveryTaskInstalled,
+    bool RescueAgentInstalled,
+    bool RescueAgentRunning,
     bool IntegrateAllSunshineApps,
     bool ForceSdr,
     bool NativeDisplayLifecycleReady,
@@ -565,6 +632,8 @@ internal static class HostDiagnostics
         var virtualDisplay = DisplayWizardAdapter.IsDriverInstalled();
         var recoveryPending = File.Exists(HostStatePaths.RecoveryFile);
         var recoveryTaskInstalled = RecoveryTaskManager.IsInstalled();
+        var rescueAgentInstalled = HostRecoveryAgentManager.IsInstalled();
+        var rescueAgentRunning = HostRecoveryAgentManager.IsRunning();
         var nativeDisplayLifecycleReady = settings.HostMode != "sunshine" || !settings.IntegrateAllSunshineApps ||
             SunshineConfigurator.IsNativeDisplayManagementReady(
                 SunshineConfigurator.ResolveConfigurationDirectory(settings.SunshineConfigDirectory, "sunshine"));
@@ -591,6 +660,8 @@ internal static class HostDiagnostics
                                 ? "Install the signed virtual display driver, reboot if requested, and run this check again."
                                 : !recoveryTaskInstalled
                                     ? "The host is ready, but automatic logon recovery is not installed. In the Administrator control panel, click Install recovery safeguard."
+                                : !rescueAgentInstalled || !rescueAgentRunning
+                                    ? "Install or repair the stream rescue agent from Help & recovery so the Vita can close a hung game or recover the host display."
                                 : "The host is ready. Click Apply recommended setup after an install or update, then launch any Sunshine application from the Vita.";
 
         return new HostDiagnosticReport(
@@ -607,6 +678,8 @@ internal static class HostDiagnostics
             virtualDisplay,
             recoveryPending,
             recoveryTaskInstalled,
+            rescueAgentInstalled,
+            rescueAgentRunning,
             settings.IntegrateAllSunshineApps,
             settings.ForceSdr,
             nativeDisplayLifecycleReady,

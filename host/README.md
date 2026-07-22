@@ -13,7 +13,8 @@ arguments launches the control panel and keeps it open.
 4. Choose **Restart as Administrator** if shown.
 5. On **Overview**, click **Apply recommended setup**. This configures the
    controller path, enables Sunshine's native disconnect-aware display
-   lifecycle for every application, and restarts Sunshine.
+   lifecycle for every application, installs the logon safeguard and stream
+   rescue agent, and restarts Sunshine.
 6. Click **Run health check**. Resolve any item that is not ready before
    pairing the Vita.
 
@@ -28,7 +29,7 @@ ZIP is also available: extract the whole folder and double-click
 **Apply recommended setup** is the normal setup and repair action. The default
 profile is 960x544, 60 FPS, 8 Mbps, H.264, and SDR. **Run health check** shows
 the installed host, ViGEmBus state, virtual display, app coverage, SDR policy,
-and recovery state.
+recovery state, and stream rescue agent.
 
 ### Streaming
 
@@ -54,7 +55,9 @@ installation and should be inactive while idle.
 - **Preview 960x544 for 15 seconds** captures the current display layout,
   switches to the virtual display, then restores the original layout.
 - **Disable idle virtual display** disconnects only the managed virtual screen.
-- **Restore physical display** restores the most recently saved layout.
+- **Emergency display reset** disconnects active streams, restores a physical
+  topology, reloads VDD, reapplies the physical-only idle state, and restarts
+  Sunshine.
 - **List displays** and **Session status** show diagnostic details in the
   activity panel.
 
@@ -66,10 +69,16 @@ session.
 
 ### Help & recovery
 
-If a stream is interrupted and the physical monitor does not return, sign out
-and back in. The highest-privilege logon task restores the saved layout. If the
-desktop is already visible, open the panel as Administrator and choose
-**Displays > Restore physical display**.
+**Install stream rescue agent** creates or repairs the background agent used by
+the Vita overlay. **Rescue agent status** shows whether it is installed and
+running plus the last recovery result.
+
+If a stream is interrupted and the physical monitor does not return, use
+**Recover display + Sunshine** from the Vita overlay while input is still
+connected. If the desktop is visible, open the panel as Administrator and
+choose **Displays > Emergency display reset**. Sign out and back in only when
+the agent cannot run; the highest-privilege logon task restores saved manual
+transactions.
 
 The recovery file is stored under `%ProgramData%\VitaMoonlight` before any
 display mutation. Do not deliberately terminate the host during a display test
@@ -93,6 +102,23 @@ disconnect and change resolution, video quality, frame rate, controller
 profile, touch mode, and the FPS counter. Stream-negotiation changes are saved
 for the next connection. **Double-press PS** remains the forced system escape:
 it temporarily releases PS capture and returns to the Vita LiveArea.
+
+Three double-confirmed recovery actions are available:
+
+- **Close Windows game** closes the foreground game normally, then force-kills
+  only that process tree after 1.5 seconds if necessary. The stream stays open
+  so Steam Big Picture can reappear. Windows, Steam, Sunshine, Explorer, and
+  the host companion are protected from termination.
+- **End Sunshine app** asks Sunshine to close its current app session and then
+  disconnects. Use this when no safe game window is in the foreground.
+- **Recover display + Sunshine** disconnects, activates the physical monitor,
+  reloads VDD, and restarts Sunshine. Reconnect after roughly ten seconds.
+
+If video goes black but this Vita-rendered overlay remains visible, begin with
+**Close Windows game**: the decoder and overlay are still alive, so a game,
+exclusive-fullscreen, HDR, Vulkan, or capture transition is more likely than a
+dead Vita client. Escalate to **End Sunshine app**, then **Recover display +
+Sunshine** only if the earlier action does not restore video.
 
 For motion-heavy games, begin at 960x544/60 and 8 Mbps. Try 12 Mbps on a strong
 network or 5 Mbps/30 FPS when Wi-Fi is constrained. The Vita client migrates
@@ -136,6 +162,9 @@ Other supported commands include:
 .\VitaMoonlight.Host.exe driver reload
 .\VitaMoonlight.Host.exe session test --width 960 --height 544 --fps 60 --seconds 15
 .\VitaMoonlight.Host.exe recovery install
+.\VitaMoonlight.Host.exe agent install
+.\VitaMoonlight.Host.exe agent status
+.\VitaMoonlight.Host.exe emergency recover-display
 ```
 
 Useful overrides are `--config-dir PATH`, `--driver-bundle PATH`, and
@@ -156,4 +185,5 @@ dotnet build host\VitaMoonlight.Host\VitaMoonlight.Host.csproj -c Release
 dotnet run --project host\VitaMoonlight.Host\VitaMoonlight.Host.csproj -c Release -- self-test
 ```
 
-Use [END_TO_END_TEST.md](END_TO_END_TEST.md) for the release acceptance pass.
+Use [END_TO_END_TEST.md](END_TO_END_TEST.md) for the functional acceptance pass
+and [FINAL_RELEASE_CHECKLIST.md](FINAL_RELEASE_CHECKLIST.md) for final sign-off.

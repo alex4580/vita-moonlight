@@ -17,13 +17,20 @@ enum {
   OVERLAY_CONTROLLER,
   OVERLAY_TOUCH,
   OVERLAY_SHOW_FPS,
+  OVERLAY_CLOSE_GAME,
+  OVERLAY_QUIT_APP,
+  OVERLAY_RECOVER_HOST,
   OVERLAY_DISCONNECT,
   OVERLAY_ITEM_COUNT
 };
 
 static volatile bool overlay_open = false;
 static volatile bool disconnect_requested = false;
+static volatile bool close_game_requested = false;
+static volatile bool quit_app_requested = false;
+static volatile bool recover_host_requested = false;
 static int selected_item = OVERLAY_RESUME;
+static int confirmation_item = -1;
 static bool settings_changed = false;
 
 static const int resolutions[][2] = {
@@ -121,6 +128,7 @@ bool stream_overlay_is_open(void) {
 void stream_overlay_open(void) {
   if (overlay_open) return;
   selected_item = OVERLAY_RESUME;
+  confirmation_item = -1;
   settings_changed = false;
   overlay_open = true;
   LiSendMultiControllerEvent(0, 1, 0, 0, 0, 0, 0, 0, 0);
@@ -135,7 +143,11 @@ void stream_overlay_close(void) {
 void stream_overlay_reset(void) {
   overlay_open = false;
   disconnect_requested = false;
+  close_game_requested = false;
+  quit_app_requested = false;
+  recover_host_requested = false;
   selected_item = OVERLAY_RESUME;
+  confirmation_item = -1;
   settings_changed = false;
 }
 
@@ -145,25 +157,67 @@ bool stream_overlay_take_disconnect_request(void) {
   return true;
 }
 
+bool stream_overlay_take_close_game_request(void) {
+  if (!close_game_requested) return false;
+  close_game_requested = false;
+  return true;
+}
+
+bool stream_overlay_take_quit_app_request(void) {
+  if (!quit_app_requested) return false;
+  quit_app_requested = false;
+  return true;
+}
+
+bool stream_overlay_take_recover_host_request(void) {
+  if (!recover_host_requested) return false;
+  recover_host_requested = false;
+  return true;
+}
+
 void stream_overlay_handle_input(const SceCtrlData *pad, const SceCtrlData *previous) {
   if (!overlay_open) return;
 
   if (pressed(pad, previous, SCE_CTRL_UP)) {
     selected_item = next_index(selected_item, OVERLAY_ITEM_COUNT, -1);
+    confirmation_item = -1;
   } else if (pressed(pad, previous, SCE_CTRL_DOWN)) {
     selected_item = next_index(selected_item, OVERLAY_ITEM_COUNT, 1);
+    confirmation_item = -1;
   }
 
-  if (pressed(pad, previous, SCE_CTRL_LEFT)) adjust_selected(-1);
-  if (pressed(pad, previous, SCE_CTRL_RIGHT)) adjust_selected(1);
+  if (pressed(pad, previous, SCE_CTRL_LEFT)) {
+    confirmation_item = -1;
+    adjust_selected(-1);
+  }
+  if (pressed(pad, previous, SCE_CTRL_RIGHT)) {
+    confirmation_item = -1;
+    adjust_selected(1);
+  }
 
   if (pressed(pad, previous, config.btn_cancel)) {
+    if (confirmation_item >= 0) {
+      confirmation_item = -1;
+      return;
+    }
     stream_overlay_close();
     return;
   }
   if (!pressed(pad, previous, config.btn_confirm)) return;
 
   if (selected_item == OVERLAY_RESUME) {
+    stream_overlay_close();
+  } else if (selected_item == OVERLAY_CLOSE_GAME ||
+             selected_item == OVERLAY_QUIT_APP ||
+             selected_item == OVERLAY_RECOVER_HOST) {
+    if (confirmation_item != selected_item) {
+      confirmation_item = selected_item;
+      return;
+    }
+    if (selected_item == OVERLAY_CLOSE_GAME) close_game_requested = true;
+    if (selected_item == OVERLAY_QUIT_APP) quit_app_requested = true;
+    if (selected_item == OVERLAY_RECOVER_HOST) recover_host_requested = true;
+    confirmation_item = -1;
     stream_overlay_close();
   } else if (selected_item == OVERLAY_DISCONNECT) {
     disconnect_requested = true;
@@ -184,11 +238,11 @@ static const char *touch_mode_name(void) {
 
 static void draw_row(int index, const char *label, const char *value) {
   const int x = 190;
-  const int y = 125 + index * 39;
+  const int y = 118 + index * 31;
   const int width = 580;
   unsigned int text_color = RGBA8(235, 240, 250, 255);
   if (selected_item == index) {
-    vita2d_draw_rectangle(x, y - 25, width, 34, RGBA8(47, 111, 237, 225));
+    vita2d_draw_rectangle(x, y - 23, width, 29, RGBA8(47, 111, 237, 225));
     text_color = RGBA8(255, 255, 255, 255);
   }
   vita2d_font_draw_text(font, x + 12, y, text_color, 19, label);
@@ -221,8 +275,20 @@ void stream_overlay_draw(void) {
   draw_row(OVERLAY_CONTROLLER, "Controller (next stream)", config.controller_type == 1 ? "Xbox" : "PS4 + gyro");
   draw_row(OVERLAY_TOUCH, "Touchscreen", touch_mode_name());
   draw_row(OVERLAY_SHOW_FPS, "FPS counter", config.show_fps ? "On" : "Off");
+  draw_row(OVERLAY_CLOSE_GAME, "Close Windows game", "X");
+  draw_row(OVERLAY_QUIT_APP, "End Sunshine app", "X");
+  draw_row(OVERLAY_RECOVER_HOST, "Recover display + Sunshine", "X");
   draw_row(OVERLAY_DISCONNECT, "Disconnect stream", "X");
 
-  vita2d_font_draw_text(font, 190, 475, RGBA8(166, 181, 208, 255), 15,
-                        settings_changed ? "Saved. Stream settings apply after reconnecting." : "D-pad: navigate/change   X: select   O: resume");
+  const char *footer = settings_changed
+    ? "Saved. Stream settings apply after reconnecting."
+    : "D-pad: navigate/change   X: select   O: resume";
+  if (confirmation_item == OVERLAY_CLOSE_GAME) {
+    footer = "Press X again to close the foreground Windows game. O: cancel";
+  } else if (confirmation_item == OVERLAY_QUIT_APP) {
+    footer = "Press X again to end Sunshine's app and disconnect. O: cancel";
+  } else if (confirmation_item == OVERLAY_RECOVER_HOST) {
+    footer = "Press X again to reset display, VDD, and Sunshine. O: cancel";
+  }
+  vita2d_font_draw_text(font, 190, 475, RGBA8(166, 181, 208, 255), 15, footer);
 }

@@ -172,7 +172,7 @@ internal sealed class HostControlPanel : Form
             "Choose any Sunshine application—including Steam Big Picture. The host switches to the virtual display before capture and restores your desktop afterward."));
         AddPageControl(page, CreateInfoCard(
             "In-stream controls",
-            "Open the Vita overlay with START + L + R. Use it to resume, disconnect, change quality for the next connection, select controller/touch modes, or toggle the FPS counter. Double-press PS remains the forced escape to Vita LiveArea."));
+            "Open the Vita overlay with START + L + R. It can force-close the foreground Windows game, end the Sunshine app, or recover a failed display/host in addition to the normal stream controls. Double-press PS remains the forced escape to Vita LiveArea."));
         return page;
     }
 
@@ -205,7 +205,7 @@ internal sealed class HostControlPanel : Form
         var actions = CreateActionRow();
         AddCommandButton(actions, "Save and apply", ButtonKind.Primary,
             async () => await ApplyConfigurationAsync(restartSunshine: true), 180);
-        AddCommandButton(actions, "Configure only", ButtonKind.Secondary,
+        AddCommandButton(actions, "Save without restart", ButtonKind.Secondary,
             async () => await ApplyConfigurationAsync(restartSunshine: false), 170);
         AddPageControl(page, actions);
         AddPageControl(page, CreateInfoCard(
@@ -228,9 +228,9 @@ internal sealed class HostControlPanel : Form
         AddCommandButton(actions, "Disable idle virtual display", ButtonKind.Secondary,
             async () => { await RunCommandAsync(new[] { "display", "disable-virtual" }); }, 220,
             "Disable only the idle Vita virtual monitor and keep the physical monitor active?");
-        AddCommandButton(actions, "Restore physical display", ButtonKind.Warning,
-            async () => { await RunCommandAsync(new[] { "session", "recover" }); }, 190,
-            "Restore the display layout saved before the last Vita session?");
+        AddCommandButton(actions, "Emergency display reset", ButtonKind.Warning,
+            async () => { await RunCommandAsync(new[] { "emergency", "recover-display" }); }, 200,
+            "Disconnect active streams, activate the physical monitor, reload the virtual display driver, and restart Sunshine?");
         AddPageControl(page, actions);
 
         var maintenance = CreateActionRow();
@@ -258,12 +258,19 @@ internal sealed class HostControlPanel : Form
         AddCommandButton(actions, "Install recovery safeguard", ButtonKind.Secondary,
             async () => { await RunCommandAsync(new[] { "recovery", "install" }); }, 210,
             "Install or repair the logon recovery task for interrupted display sessions?");
+        AddCommandButton(actions, "Install stream rescue agent", ButtonKind.Secondary,
+            async () => { await RunCommandAsync(new[] { "agent", "install" }); }, 210,
+            "Install or repair the background hotkey agent used by the Vita overlay for game and display recovery?");
+        AddCommandButton(actions, "Rescue agent status", ButtonKind.Secondary,
+            async () => { await RunCommandAsync(new[] { "agent", "status" }, allowNonZeroExit: true); }, 180,
+            requiresAdministrator: false);
         AddDocumentButton(actions, "Open setup guide", "README.md");
         AddDocumentButton(actions, "Open acceptance test", "END_TO_END_TEST.md");
+        AddDocumentButton(actions, "Open release checklist", "FINAL_RELEASE_CHECKLIST.md");
         AddPageControl(page, actions);
         AddPageControl(page, CreateInfoCard(
-            "If the physical monitor does not return",
-            "Sign out and back in to trigger the recovery safeguard. If the desktop is visible, open this panel as Administrator and choose Displays > Restore physical display."));
+            "Black-screen recovery",
+            "From the Vita overlay, first choose Close Windows game. If video does not recover, choose Recover display + Sunshine; the stream will disconnect while Windows activates the physical monitor, reloads VDD, and restarts Sunshine. Sign out and back in only if the rescue agent cannot run."));
         return page;
     }
 
@@ -427,6 +434,8 @@ internal sealed class HostControlPanel : Form
             return;
         }
         if (!await RunCommandAsync(arguments.ToArray())) return;
+        if (!await RunCommandAsync(new[] { "recovery", "install" })) return;
+        if (!await RunCommandAsync(new[] { "agent", "install" })) return;
         if (restartSunshine && selectedHost == "sunshine")
         {
             await RunCommandAsync(new[] { "host", "restart", "--host", "sunshine" });

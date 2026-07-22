@@ -42,6 +42,8 @@ internal static class HostStatePaths
     internal static string RecoveryFile => Path.Combine(Root, "display-recovery.json");
     internal static string SettingsFile => Path.Combine(Root, "host-settings.json");
     internal static string LockFile => Path.Combine(Root, "session.lock");
+    internal static string RescueStatusFile => Path.Combine(Root, "stream-rescue-status.json");
+    internal static string RescueLogFile => Path.Combine(Root, "stream-rescue.log");
 }
 
 internal sealed class DisplayTopologyService
@@ -137,6 +139,33 @@ internal sealed class DisplayTopologyService
 
         WindowsDisplayNative.ApplyPaths(remainingPaths);
         return true;
+    }
+
+    internal IReadOnlyList<string> RecoverPhysicalDisplays()
+    {
+        var configuration = WindowsDisplayNative.Query(WindowsDisplayNative.QueryAllPaths);
+        var displays = Describe(configuration);
+        var activePhysical = displays
+            .Where(display => display.IsActive && !IsManagedVirtualDisplay(display))
+            .ToArray();
+        var selected = activePhysical.Length > 0
+            ? activePhysical
+            : displays
+                .Where(display => display.IsAvailable && !IsManagedVirtualDisplay(display))
+                .Take(1)
+                .ToArray();
+        if (selected.Length == 0)
+        {
+            throw new InvalidOperationException("No available physical display was found for emergency recovery.");
+        }
+
+        var indexes = selected.Select(display => display.PathIndex).ToHashSet();
+        WindowsDisplayNative.ApplyPaths(configuration.Paths
+            .Where((_, index) => indexes.Contains(index))
+            .ToArray());
+        return selected
+            .Select(display => string.IsNullOrWhiteSpace(display.FriendlyName) ? display.DevicePath : display.FriendlyName)
+            .ToArray();
     }
 
     internal void SaveRecovery(DisplayRecoveryRecord recovery)

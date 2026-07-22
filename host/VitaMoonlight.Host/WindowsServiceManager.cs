@@ -58,6 +58,12 @@ internal static class WindowsServiceManager
 
     internal static void Restart(string serviceName, string displayName)
     {
+        Stop(serviceName, displayName);
+        Start(serviceName, displayName);
+    }
+
+    internal static void Stop(string serviceName, string displayName)
+    {
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Windows services are only available on Windows.");
 
         var manager = OpenSCManager(null, null, ScManagerConnect);
@@ -93,7 +99,49 @@ internal static class WindowsServiceManager
                     }
                     WaitForState(service, displayName, WindowsServiceState.Stopped);
                 }
+            }
+            finally
+            {
+                CloseServiceHandle(service);
+            }
+        }
+        finally
+        {
+            CloseServiceHandle(manager);
+        }
+    }
 
+    internal static void Start(string serviceName, string displayName)
+    {
+        if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Windows services are only available on Windows.");
+
+        var manager = OpenSCManager(null, null, ScManagerConnect);
+        if (manager == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error(), "Could not open the Windows service manager.");
+        try
+        {
+            var service = OpenService(manager, serviceName, ServiceQueryStatus | ServiceStart);
+            if (service == IntPtr.Zero)
+            {
+                var error = Marshal.GetLastWin32Error();
+                if (error == ErrorServiceDoesNotExist)
+                {
+                    throw new InvalidOperationException($"The {displayName} Windows service is not installed.");
+                }
+                throw new Win32Exception(error, $"Could not control the {displayName} Windows service.");
+            }
+            try
+            {
+                var state = QueryState(service, displayName);
+                if (state == WindowsServiceState.Running) return;
+                if (state == WindowsServiceState.StartPending)
+                {
+                    WaitForState(service, displayName, WindowsServiceState.Running);
+                    return;
+                }
+                if (state == WindowsServiceState.StopPending)
+                {
+                    WaitForState(service, displayName, WindowsServiceState.Stopped);
+                }
                 if (!StartService(service, 0, IntPtr.Zero))
                 {
                     throw new Win32Exception(Marshal.GetLastWin32Error(), $"Could not start {displayName}.");

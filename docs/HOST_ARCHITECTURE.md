@@ -50,6 +50,23 @@ The driver is installed or updated explicitly by the installer/control panel;
 stream start never installs a driver. Apollo mode delegates virtual-display
 creation to Apollo but retains the same client and controller profile.
 
+## Stream rescue agent
+
+Setup installs a highest-privilege per-user logon task that runs a hidden,
+single-instance WinForms message loop. It registers two non-repeating global
+hotkeys; no TCP listener, credentials, or remotely callable HTTP endpoint is
+added. The Vita overlay emits the matching keyboard chords through the normal
+encrypted Moonlight input channel.
+
+The close-game action captures the foreground window, refuses Windows shell,
+Steam, Sunshine, companion, and critical-system process names, requests a
+normal window close, then terminates only that process tree if it remains alive
+after 1.5 seconds. The display-recovery action stops Sunshine, restores any
+saved manual transaction, forces an available physical topology, reloads the
+signed VDD, reapplies the physical-only topology after driver enumeration, and
+starts Sunshine. Results are written beneath `%ProgramData%\VitaMoonlight` for
+the control panel and diagnostics.
+
 ## Vita client
 
 The client advertises a conventional controller in Xbox mode and DS4 motion
@@ -59,9 +76,10 @@ to Moonlight protocol units and rate-limited to the host request.
 The in-stream overlay is rendered by vita2d over decoded video. While open, it
 sends a neutral controller state and consumes Vita input locally. Settings are
 saved immediately; negotiation settings apply on reconnect, while touch mode
-and the FPS counter can update during the current session. Disconnect requests
-are consumed by the connection UI loop so normal Moonlight teardown and host
-display restoration still run.
+and the FPS counter can update during the current session. Destructive rescue
+items require a second confirmation. Disconnect, Sunshine-app termination, and
+host-recovery requests are consumed by the connection UI loop so network
+teardown remains ordered; close-game recovery keeps the current stream alive.
 
 ## Packaging
 

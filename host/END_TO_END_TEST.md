@@ -15,7 +15,8 @@ and host installer commit.
    choose **Restart as Administrator** if shown.
 4. On **Overview**, click **Apply recommended setup**.
 5. Click **Run health check**. Sunshine, ViGEmBus, Sunshine gamepad, driver
-   bundle, virtual display, and recovery task must report ready. **App
+   bundle, virtual display, recovery task, and **Stream rescue** must report
+   ready. **App
    coverage** must say every Sunshine app, **Display lifecycle** must say native
    disconnect recovery enabled, and **Color mode** must say force SDR.
 
@@ -60,17 +61,39 @@ recovery safeguard.
 
 1. During a stream, press **START + L + R**. The overlay must appear over live
    video and host input must be neutral while it is open.
-2. Close it with **O**, reopen it with **START + L + R**, and choose
-   **Disconnect stream**. The stream must end cleanly and restore Windows.
-3. During another stream, double-press **PS**. The Vita must return to LiveArea
+2. Close it with **O**, reopen it with **START + L + R**, and select **Close
+   Windows game**. The first **X** must show a confirmation; **O** must cancel.
+3. Launch a normal game from Steam Big Picture, reopen the overlay, select
+   **Close Windows game**, and press **X** twice. The foreground game must exit
+   while Moonlight remains connected and Steam Big Picture becomes visible.
+   **Help & recovery > Rescue agent status** must record a successful
+   `close-foreground` action. Repeat with a disposable test app that ignores
+   its normal close request and verify the agent force-terminates that app only.
+4. Select **End Sunshine app** and press **X** twice. Sunshine must end its
+   current app session, Moonlight must disconnect, and the physical monitor
+   must return.
+5. Reconnect, select **Recover display + Sunshine**, and press **X** twice. The
+   stream must disconnect. Within roughly ten seconds the physical monitor must
+   be active, VDD must be inactive, Sunshine must be running, and rescue status
+   must report success. Reconnect successfully.
+6. Reopen the overlay and choose **Disconnect stream**. The stream must end
+   cleanly and restore Windows.
+7. During another stream, double-press **PS**. The Vita must return to LiveArea
    even while PS capture is enabled. Resume Moonlight and verify PS capture is
    restored without a stuck PS/Xbox button.
-4. Set 960x544, 60 FPS, and 8 Mbps. Reconnect and confirm the values persist.
-5. Run a 20-minute motion-heavy stream. Check fine textures, camera pans,
+8. Set 960x544, 60 FPS, and 8 Mbps. Reconnect and confirm the values persist.
+9. Run a 20-minute motion-heavy stream. Check fine textures, camera pans,
    frame pacing, audio, reconnect behavior, and the FPS counter. Repeat at 12
    Mbps on a strong network and at 5 Mbps/30 FPS on constrained Wi-Fi.
-6. Confirm the 8 Mbps native profile has materially fewer motion artifacts than
+10. Confirm the 8 Mbps native profile has materially fewer motion artifacts than
    the former 5 Mbps default and does not produce sustained decode errors.
+
+For the reported Doom Eternal case, run one pass in borderless SDR and one in
+exclusive fullscreen with the normal game HDR setting. Record whether the
+black frame begins during the title-to-menu transition, whether the Vita
+overlay remains visible, whether **Close Windows game** returns to Steam, and
+the matching Sunshine/rescue logs. Do not label it a display-driver crash based
+on a black game frame alone.
 
 ## 5. Controller and motion
 
@@ -99,8 +122,9 @@ recovery safeguard.
 ## 7. Recovery, uninstall, and artifacts
 
 1. End the stream and verify no display transaction is pending.
-2. Uninstall Vita Moonlight Host. The recovery task must be removed and the
-   physical display layout must remain intact.
+2. Uninstall Vita Moonlight Host. The recovery and stream-rescue tasks must be
+   removed, their background process must stop, and the physical display layout
+   must remain intact.
 3. Verify the release contains the VPK, Windows installer, portable host ZIP,
    source archive, licenses, and `THIRD_PARTY_NOTICES.md`.
 4. Repeat sections 1 through 4 on a second clean PC using only release
@@ -119,4 +143,6 @@ Set-Location "C:\Program Files\Vita Moonlight Host"
 .\VitaMoonlight.Host.exe session test --width 960 --height 544 --fps 60 --seconds 15
 .\VitaMoonlight.Host.exe session status
 .\VitaMoonlight.Host.exe session recover
+.\VitaMoonlight.Host.exe agent status
+.\VitaMoonlight.Host.exe emergency recover-display
 ```

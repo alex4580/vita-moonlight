@@ -34,6 +34,18 @@
 #include <psp2/io/stat.h>
 #include <vita2d.h>
 
+static void send_host_rescue_hotkey(int virtual_key) {
+  LiSendMultiControllerEvent(0, 1, 0, 0, 0, 0, 0, 0, 0);
+  LiSendKeyboardEvent(0x11, KEY_ACTION_DOWN, 0); // Control
+  LiSendKeyboardEvent(0x12, KEY_ACTION_DOWN, 0); // Alt
+  LiSendKeyboardEvent(0x10, KEY_ACTION_DOWN, 0); // Shift
+  LiSendKeyboardEvent(virtual_key, KEY_ACTION_DOWN, 0);
+  LiSendKeyboardEvent(virtual_key, KEY_ACTION_UP, 0);
+  LiSendKeyboardEvent(0x10, KEY_ACTION_UP, 0);
+  LiSendKeyboardEvent(0x12, KEY_ACTION_UP, 0);
+  LiSendKeyboardEvent(0x11, KEY_ACTION_UP, 0);
+}
+
 SERVER_DATA server;
 PAPP_LIST server_applist;
 int pos[2];
@@ -234,6 +246,27 @@ int ui_connect_loop(int id, void *context, const input_data *input) {
 
 //mainloop:
       while (connection_is_connected()) {
+        if (stream_overlay_take_close_game_request()) {
+          vita_debug_log("Stream overlay requested foreground Windows game close");
+          send_host_rescue_hotkey(0x7B); // F12
+        }
+        if (stream_overlay_take_quit_app_request()) {
+          vita_debug_log("Stream overlay requested Sunshine app termination");
+          ret = gs_quit_app(&server);
+          if (ret == GS_OK) {
+            server.currentGame = 0;
+            connection_terminate();
+            break;
+          }
+          vita_debug_log("Sunshine app termination failed: %d", ret);
+        }
+        if (stream_overlay_take_recover_host_request()) {
+          vita_debug_log("Stream overlay requested emergency host recovery");
+          send_host_rescue_hotkey(0x7A); // F11
+          sceKernelDelayThread(350 * 1000);
+          connection_terminate();
+          break;
+        }
         if (stream_overlay_take_disconnect_request()) {
           connection_terminate();
           break;

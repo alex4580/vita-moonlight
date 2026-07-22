@@ -19,6 +19,9 @@ not required for normal setup.
   a washed-out image on the Vita.
 - Transactional display recovery after normal exit, network interruption, or
   the next Windows sign-in after an interrupted session.
+- A highest-privilege stream rescue agent: the Vita overlay can close or
+  force-close the foreground Windows game, end Sunshine's current app, or
+  restore the physical display, reload VDD, and restart Sunshine.
 - Xbox-compatible and PS4 + gyro controller profiles, plus DS4 touchpad,
   absolute mouse, and Sunshine tablet touch modes.
 - A real in-stream Vita overlay for resume, disconnect, resolution, bitrate,
@@ -37,8 +40,8 @@ Download both artifacts from the same release:
 3. If prompted, choose **Restart as Administrator**, then click **Apply
    recommended setup**. The control panel enables Sunshine's native global
    display lifecycle and restarts Sunshine.
-4. Run **Run health check**. Sunshine, ViGEmBus, virtual display, and recovery
-   should report ready.
+4. Run **Run health check**. Sunshine, ViGEmBus, virtual display, recovery, and
+   **Stream rescue** should report ready.
 5. Install the matching `.vpk` on the Vita, pair it with Sunshine, and launch
    Desktop, Steam Big Picture, or any other Sunshine application.
 
@@ -48,7 +51,8 @@ the host activates it at the Vita's requested mode only for a stream.
 
 See the [Windows host guide](host/README.md) for installation, configuration,
 recovery, and troubleshooting. Release testing is documented in the
-[GUI-first acceptance test](host/END_TO_END_TEST.md).
+[GUI-first acceptance test](host/END_TO_END_TEST.md); use the
+[final-release checklist](host/FINAL_RELEASE_CHECKLIST.md) for sign-off.
 
 ## Vita controls while streaming
 
@@ -60,6 +64,17 @@ recovery, and troubleshooting. Release testing is documented in the
 - **X**: activate the selected item.
 - **O**: close the overlay and resume.
 - **START + Left**: open the floating keyboard.
+
+Destructive overlay actions require pressing **X twice**:
+
+- **Close Windows game** first asks the rescue agent to close the foreground
+  game normally, then force-terminates that process tree if it does not exit.
+  Steam, Sunshine, Explorer, and critical Windows processes are protected.
+- **End Sunshine app** ends Sunshine's current application session and
+  disconnects Moonlight. This is useful when the foreground window cannot be
+  identified safely.
+- **Recover display + Sunshine** disconnects, forces a physical display active,
+  reloads VDD, enforces the physical-only idle topology, and restarts Sunshine.
 
 Resolution, bitrate, frame-rate, and controller changes take effect on the next
 connection. Touch mode and the FPS counter update immediately. Choose
@@ -96,7 +111,11 @@ layout and color behavior return when the stream ends.
   apply**.
 - The physical monitor does not return: sign out and back in. The installed
   recovery task restores the saved layout. If the desktop is visible, use
-  **Displays > Restore physical display** in the Administrator control panel.
+  **Displays > Emergency display reset** in the Administrator control panel.
+- A game turns black while the local Vita overlay still draws: try **Close
+  Windows game** first. If Steam does not return, use **End Sunshine app**. If
+  the entire captured desktop remains black, use **Recover display +
+  Sunshine**, wait about ten seconds, then reconnect.
 - Sunshine reports ViGEmBus missing: run the control panel health check. If
   ViGEmBus is running but Sunshine started earlier, click **Restart Sunshine**.
 - Motion artifacts: verify the overlay shows at least 8 Mbps at 960x544/60 and

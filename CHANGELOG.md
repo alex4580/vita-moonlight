@@ -3,6 +3,10 @@
 * Added an in-stream Vita overlay opened with START + L + R. It provides
   resume, disconnect, resolution, bitrate, frame-rate, controller, touch-mode,
   and FPS-counter controls. Double-press PS remains the forced LiveArea escape.
+* Added double-confirmed overlay actions to close or force-close the foreground
+  Windows game, end Sunshine's app session, or recover a failed display stack.
+  A protected highest-privilege agent handles the host actions without exposing
+  a network control service.
 * Sunshine's native display lifecycle now covers every application by default,
   including Desktop and Steam Big Picture, and restores the physical layout
   when all clients disconnect even if the application stays open.

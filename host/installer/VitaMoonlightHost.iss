@@ -51,6 +51,7 @@ Source: "{#ViGEmBusDir}\*"; DestDir: "{app}\tools\ViGEmBus"; Flags: ignoreversio
 Source: "{#SunshineDir}\*"; DestDir: "{app}\tools\Sunshine"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "..\README.md"; DestDir: "{app}"; DestName: "README.md"; Flags: ignoreversion
 Source: "..\END_TO_END_TEST.md"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\FINAL_RELEASE_CHECKLIST.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\LICENSE"; DestDir: "{app}"; DestName: "LICENSE-VitaMoonlight.txt"; Flags: ignoreversion
 
@@ -70,9 +71,11 @@ Filename: "{app}\VitaMoonlight.Host.exe"; Parameters: "configure --host sunshine
 Filename: "{app}\VitaMoonlight.Host.exe"; Parameters: "host restart --host sunshine"; StatusMsg: "Restarting Sunshine with gamepad support..."; Tasks: host\sunshine; Flags: runhidden waituntilterminated
 Filename: "{app}\VitaMoonlight.Host.exe"; Parameters: "configure --host apollo"; StatusMsg: "Configuring Apollo..."; Tasks: host\apollo; Flags: waituntilterminated
 Filename: "{app}\VitaMoonlight.Host.exe"; Parameters: "recovery install"; StatusMsg: "Installing the automatic display-recovery safeguard..."; Flags: runhidden waituntilterminated
+Filename: "{app}\VitaMoonlight.Host.exe"; Parameters: "agent install"; StatusMsg: "Installing the in-stream rescue agent..."; Flags: runhidden waituntilterminated
 Filename: "{app}\VitaMoonlight.Host.exe"; Description: "Open the Vita Moonlight Host Control Panel"; Flags: postinstall skipifsilent nowait
 
 [UninstallRun]
+Filename: "{app}\VitaMoonlight.Host.exe"; Parameters: "agent uninstall"; Flags: runhidden waituntilterminated; RunOnceId: "RemoveStreamRescueAgent"
 Filename: "{app}\VitaMoonlight.Host.exe"; Parameters: "session recover"; Flags: runhidden waituntilterminated; RunOnceId: "RecoverDisplays"
 Filename: "{app}\VitaMoonlight.Host.exe"; Parameters: "recovery uninstall"; Flags: runhidden waituntilterminated; RunOnceId: "RemoveRecoveryTask"
 

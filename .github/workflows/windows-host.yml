@@ -91,7 +91,7 @@ jobs:
           Copy-Item artifacts/displaywizard artifacts/portable/tools/DisplayWizard -Recurse -Force
           Copy-Item artifacts/vigembus artifacts/portable/tools/ViGEmBus -Recurse -Force
           Copy-Item artifacts/sunshine artifacts/portable/tools/Sunshine -Recurse -Force
-          Copy-Item host/README.md,host/END_TO_END_TEST.md,host/THIRD_PARTY_NOTICES.md,LICENSE artifacts/portable -Force
+          Copy-Item host/README.md,host/END_TO_END_TEST.md,host/FINAL_RELEASE_CHECKLIST.md,host/THIRD_PARTY_NOTICES.md,LICENSE artifacts/portable -Force
           Compress-Archive -Path artifacts/portable/* -DestinationPath artifacts/installer/Vita-Moonlight-Host-Portable-win-x64.zip -CompressionLevel Optimal
       - uses: actions/upload-artifact@v4
         with:
