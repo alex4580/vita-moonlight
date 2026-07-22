@@ -26,6 +26,8 @@ not required for normal setup.
   absolute mouse, and Sunshine tablet touch modes.
 - A real in-stream Vita overlay for resume, disconnect, resolution, bitrate,
   frame rate, controller mode, touch mode, and the FPS counter.
+- A configurable PS-button policy whose safe default keeps PS entirely local,
+  while preserving double-PS as a forced LiveArea escape.
 - A compatibility-first **Balanced** profile: 960x544, 60 FPS, H.264, 8 Mbps,
   packet-loss recovery, frame pacing, and an Xbox/XInput controller. Reliable
   and High quality presets are available without manual bitrate entry.
@@ -60,13 +62,22 @@ recovery, and troubleshooting. Release testing is documented in the
 
 - Hold **START**, then press **L + R** within 300 ms: open the stream overlay.
   The complete chord is consumed locally and is never sent to the PC.
-- **Double-press PS**: temporarily release PS capture and return to the Vita
-  LiveArea. This remains the forced system-level escape from a stream.
+- **PS (default)**: a single press stays on the Vita and is not sent to
+  Windows. Double-press it to return to LiveArea; this remains the forced
+  system-level escape from a stream.
 - **D-pad Up/Down**: select an overlay item.
 - **D-pad Left/Right**: change a setting.
 - **X**: activate the selected item.
 - **O**: close the overlay and resume.
 - **START + Left**: open the floating keyboard.
+
+The normal Vita settings screen offers four **PS button behavior** choices.
+**Local double-tap** is the recommended default. **Safe PC Guide** delays a
+single Guide press by 250 ms so a quick double-press can remain local.
+**Immediate PC Guide** is the old low-latency behavior and may activate Steam
+or Windows shortcuts—including play/pause mappings. **System / LiveArea** does
+not capture PS, so one press leaves Moonlight and no Guide event reaches the
+PC.
 
 Destructive overlay actions require pressing **X twice**:
 

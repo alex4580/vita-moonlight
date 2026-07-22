@@ -79,18 +79,26 @@ recovery safeguard.
    must report success. Reconnect successfully.
 6. Reopen the overlay and choose **Disconnect stream**. The stream must end
    cleanly and restore Windows.
-7. During another stream, double-press **PS**. The Vita must return to LiveArea
-   even while PS capture is enabled. Resume Moonlight and verify PS capture is
-   restored without a stuck PS/Xbox button.
-8. In the normal Vita settings screen select **Reliable**, **Balanced**, and
+7. In Vita settings leave **PS button behavior** on its default **Local
+   double-tap**. During a stream, pause host media and press PS once. Nothing
+   may reach the Windows gamepad viewer and the media must stay paused. Quickly
+   press PS twice: the Vita must return to LiveArea. Resume Moonlight and verify
+   capture is restored without a stuck PS/Xbox button.
+8. Select **Safe PC Guide**, reconnect, and press PS once. Windows must receive
+   one Guide press after about 250 ms. Reconnect and double-press PS; the Vita
+   must return to LiveArea without any Guide event reaching Windows. Verify
+   **Immediate PC Guide** sends Guide without the delay and **System / LiveArea**
+   returns home on one press without sending Guide. Restore **Local
+   double-tap** after this test.
+9. In the normal Vita settings screen select **Reliable**, **Balanced**, and
    **High quality** in turn. Verify they set 960x544/30/5 Mbps,
    960x544/60/8 Mbps, and 960x544/60/12 Mbps respectively. Change bitrate
    manually and verify the preset reads **Custom** without discarding it.
-9. Select **Balanced**, reconnect, and confirm the values persist.
-10. Run a 20-minute motion-heavy stream. Check fine textures, camera pans,
+10. Select **Balanced**, reconnect, and confirm the values persist.
+11. Run a 20-minute motion-heavy stream. Check fine textures, camera pans,
    frame pacing, audio, reconnect behavior, and the FPS counter. Repeat at 12
    Mbps on a strong network and at 5 Mbps/30 FPS on constrained Wi-Fi.
-11. Confirm the 8 Mbps native profile has materially fewer motion artifacts than
+12. Confirm the 8 Mbps native profile has materially fewer motion artifacts than
    the former 5 Mbps default and does not produce sustained decode errors.
 
 For the reported Doom Eternal case, run one pass in borderless SDR and one in
@@ -104,8 +112,9 @@ on a black game frame alone.
 
 1. In the overlay choose **Xbox** and reconnect. Steam Big Picture and a
    gamepad tester must see one XInput controller with correct sticks, triggers,
-   D-pad, face buttons, START/SELECT, PS, and shoulder-swap behavior. Motion and
-   controller-touchpad capabilities must not appear.
+   D-pad, face buttons, START/SELECT, and shoulder-swap behavior. With **Safe
+   PC Guide** selected, PS must report as Guide after the documented delay.
+   Motion and controller-touchpad capabilities must not appear.
 2. Choose **PS4 + gyro**, reconnect, and verify one DS4. Test pitch, roll, and
    yaw with no drift at rest and the correct direction on all axes.
 3. Disable motion and reconnect. Motion must no longer be advertised.

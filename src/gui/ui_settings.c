@@ -408,6 +408,12 @@ static int controller_type_values[] = {1, 2}; // 1: Xbox, 2: PS
 #define CONTROLLER_TYPE_COUNT 2
 static const char* touch_mode_names[] = {"Relative mouse", "DS4 Touchpad", "Mouse Absolute", "Tablet (Sunshine)"};
 static const char* stream_preset_names[] = {"Reliable", "Balanced", "High quality", "Custom"};
+static const char* psbutton_mode_names[] = {
+  "Local double-tap",
+  "Safe PC Guide",
+  "Immediate PC Guide",
+  "System / LiveArea"
+};
 
 enum {
   STREAM_PRESET_RELIABLE,
@@ -484,7 +490,7 @@ enum {
   SETTINGS_BACK_DEADZONE,
   SETTINGS_SPECIAL_KEYS,
   SETTINGS_ENABLE_SPECIAL_KEYS,
-  SETTINGS_ENABLE_PSBUTTON_CAPTURE,
+  SETTINGS_PSBUTTON_MODE,
   // SETTINGS_HOTKEYS, // Eliminado: hotkeys fijos
   SETTINGS_CONTROLLER_TYPE,
   SETTINGS_SWAP_SHOULDER_BUTTONS, // NUEVO: Swap R1/L1 <-> R2/L2
@@ -518,7 +524,7 @@ enum {
   SETTINGS_VIEW_BACK_DEADZONE,
   SETTINGS_VIEW_SPECIAL_KEYS,
   SETTINGS_VIEW_ENABLE_SPECIAL_KEYS,
-  SETTINGS_VIEW_ENABLE_PSBUTTON_CAPTURE,
+  SETTINGS_VIEW_PSBUTTON_MODE,
   // SETTINGS_VIEW_HOTKEYS, // Eliminado: hotkeys fijos
   SETTINGS_VIEW_CONTROLLER_TYPE,
   SETTINGS_VIEW_SWAP_SHOULDER_BUTTONS, // NUEVO: Swap R1/L1 <-> R2/L2
@@ -581,7 +587,7 @@ static int settings_loop(int id, void *context, const input_data *input) {
     display_alert(
         "Xbox is the most compatible default.\n"
         "DS4 adds gyro/touchpad but may need Steam Input.\n"
-        "Relative mouse works broadly. DS4 touchpad needs DS4 mode; tablet needs Sunshine touch support.",
+        "PS Local double-tap never reaches the PC. Safe Guide delays Guide so double-PS stays local. Immediate Guide may trigger PC shortcuts.",
         NULL, 1, NULL, NULL);
     return 0;
   }
@@ -930,12 +936,11 @@ static int settings_loop(int id, void *context, const input_data *input) {
       config.enable_front_touchzones = !config.enable_front_touchzones;
       did_change = 1;
       break;
-    case SETTINGS_ENABLE_PSBUTTON_CAPTURE:
-      if ((input->buttons & config.btn_confirm) == 0 || input->buttons & SCE_CTRL_HOLD) {
+    case SETTINGS_PSBUTTON_MODE:
+      if (!left && !right) {
         break;
       }
-
-      config.enable_psbutton_capture = !config.enable_psbutton_capture;
+      config.psbutton_mode = (config.psbutton_mode + (left ? PSBUTTON_MODE_COUNT - 1 : 1)) % PSBUTTON_MODE_COUNT;
       did_change = 1;
       break;
     case SETTINGS_MOUSE_ACCEL:
@@ -1038,8 +1043,8 @@ static int settings_loop(int id, void *context, const input_data *input) {
   sprintf(current, "%s", config.save_debug_log ? "yes" : "no");
   MENU_REPLACE(SETTINGS_VIEW_SAVE_DEBUG_LOG, current);
 
-  sprintf(current, "%s", config.enable_psbutton_capture ? "yes" : "no");
-  MENU_REPLACE(SETTINGS_VIEW_ENABLE_PSBUTTON_CAPTURE, current);
+  sprintf(current, "%s", psbutton_mode_names[config.psbutton_mode]);
+  MENU_REPLACE(SETTINGS_VIEW_PSBUTTON_MODE, current);
 
   sprintf(current, "%s", config.enable_front_touchzones ? "yes" : "no");
   MENU_REPLACE(SETTINGS_VIEW_ENABLE_SPECIAL_KEYS, current);
@@ -1135,7 +1140,7 @@ int ui_settings_menu() {
   menu[idx].subname[sizeof(menu[idx].subname) - 1] = '\0';
   idx++;
   MENU_MESSAGE("Example in github repo.");
-  MENU_ENTRY(SETTINGS_ENABLE_PSBUTTON_CAPTURE, SETTINGS_VIEW_ENABLE_PSBUTTON_CAPTURE, "Enable PS button capture", "");
+  MENU_ENTRY(SETTINGS_PSBUTTON_MODE, SETTINGS_VIEW_PSBUTTON_MODE, "PS button behavior", ICON_LEFT_RIGHT_ARROWS);
   MENU_ENTRY(SETTINGS_BACK_DEADZONE, SETTINGS_VIEW_BACK_DEADZONE, "Back touchscreen deadzone", "");
   MENU_ENTRY(SETTINGS_ENABLE_SPECIAL_KEYS, SETTINGS_VIEW_ENABLE_SPECIAL_KEYS, "Enable touchscreen special keys", "");
   MENU_ENTRY(SETTINGS_SPECIAL_KEYS, SETTINGS_VIEW_SPECIAL_KEYS, "Touchscreen special keys", "");

@@ -88,6 +88,7 @@ static inline void update_touch_points();
 double mouse_multiplier;
 
 #define PSBTN_DOUBLETAP_DELAY 250000 // 250 ms
+#define PSBTN_GUIDE_PULSE_DELAY 50000 // 50 ms
 
 #define MOUSE_ACTION_DELAY 100000 // 100ms
 #define MOTION_ACTION_DELAY 200000 // 200ms
@@ -559,38 +560,135 @@ void unlock_psbutton() {
   }
 }
 
-SceUInt64 psbutton_pressed_time = 0;
+typedef enum psbutton_state {
+  PSBUTTON_STATE_IDLE = 0,
+  PSBUTTON_STATE_FIRST_DOWN,
+  PSBUTTON_STATE_FIRST_UP,
+  PSBUTTON_STATE_GUIDE_HELD,
+  PSBUTTON_STATE_GUIDE_PULSE,
+  PSBUTTON_STATE_LOCAL_HELD,
+  PSBUTTON_STATE_ESCAPE_RELEASE
+} psbutton_state;
+
+static psbutton_state current_psbutton_state = PSBUTTON_STATE_IDLE;
+static SceUInt64 psbutton_deadline = 0;
+static SceUInt64 psbutton_last_release = 0;
+
+static void reset_psbutton_state() {
+  current_psbutton_state = PSBUTTON_STATE_IDLE;
+  psbutton_deadline = 0;
+  psbutton_last_release = 0;
+}
+
+static void begin_psbutton_escape(SceUInt64 time) {
+  unlock_psbutton();
+  current_psbutton_state = PSBUTTON_STATE_ESCAPE_RELEASE;
+  psbutton_deadline = time + PSBTN_DOUBLETAP_DELAY;
+  psbutton_last_release = 0;
+}
+
 void handle_psbutton() {
   SceUInt64 time = sceKernelGetSystemTimeWide();
+  bool pressed = is_pressed(SCE_CTRL_PSBUTTON | INPUT_TYPE_GAMEPAD) != 0;
 
-  if(!config.enable_psbutton_capture) {
-    if(psbutton_locked)
-      unlock_psbutton();
+  if (config.psbutton_mode == PSBUTTON_MODE_SYSTEM) {
+    reset_psbutton_state();
+    unlock_psbutton();
     return;
   }
 
-  if(is_pressed(SCE_CTRL_PSBUTTON | INPUT_TYPE_GAMEPAD)) {
-    if(!is_old_pressed(SCE_CTRL_PSBUTTON | INPUT_TYPE_GAMEPAD)) {
-      if(time - psbutton_pressed_time < PSBTN_DOUBLETAP_DELAY) {
-        unlock_psbutton();
+  if (current_psbutton_state == PSBUTTON_STATE_ESCAPE_RELEASE) {
+    if (pressed) {
+      // Keep the Vita shell unlocked until the second press has been released.
+      psbutton_deadline = time + PSBTN_DOUBLETAP_DELAY;
+    } else if (time >= psbutton_deadline) {
+      lock_psbutton();
+      reset_psbutton_state();
+    }
+    return;
+  }
+
+  if (!psbutton_locked) {
+    lock_psbutton();
+  }
+
+  if (config.psbutton_mode == PSBUTTON_MODE_IMMEDIATE_GUIDE) {
+    if (current_psbutton_state == PSBUTTON_STATE_GUIDE_HELD) {
+      if (pressed) {
+        special(SPECIAL_FLAG | INPUT_TYPE_GAMEPAD, 1, 1);
       } else {
+        current_psbutton_state = PSBUTTON_STATE_IDLE;
+        psbutton_last_release = time;
+      }
+    } else if (pressed) {
+      if (psbutton_last_release != 0 &&
+          time - psbutton_last_release < PSBTN_DOUBLETAP_DELAY) {
+        begin_psbutton_escape(time);
+      } else {
+        current_psbutton_state = PSBUTTON_STATE_GUIDE_HELD;
         special(SPECIAL_FLAG | INPUT_TYPE_GAMEPAD, 1, 0);
       }
     }
-    else {
-      if(psbutton_locked)
+    return;
+  }
+
+  switch (current_psbutton_state) {
+    case PSBUTTON_STATE_IDLE:
+      if (pressed) {
+        current_psbutton_state = PSBUTTON_STATE_FIRST_DOWN;
+        psbutton_deadline = time + PSBTN_DOUBLETAP_DELAY;
+      }
+      break;
+    case PSBUTTON_STATE_FIRST_DOWN:
+      if (!pressed) {
+        current_psbutton_state = PSBUTTON_STATE_FIRST_UP;
+        psbutton_deadline = time + PSBTN_DOUBLETAP_DELAY;
+      } else if (time >= psbutton_deadline) {
+        if (config.psbutton_mode == PSBUTTON_MODE_SAFE_GUIDE) {
+          current_psbutton_state = PSBUTTON_STATE_GUIDE_HELD;
+          special(SPECIAL_FLAG | INPUT_TYPE_GAMEPAD, 1, 0);
+        } else {
+          current_psbutton_state = PSBUTTON_STATE_LOCAL_HELD;
+        }
+      }
+      break;
+    case PSBUTTON_STATE_FIRST_UP:
+      if (pressed && time < psbutton_deadline) {
+        begin_psbutton_escape(time);
+      } else if (time >= psbutton_deadline) {
+        // A short single tap becomes a brief Guide pulse only in Safe Guide.
+        // Local double-tap intentionally discards every single PS press.
+        if (config.psbutton_mode == PSBUTTON_MODE_SAFE_GUIDE) {
+          special(SPECIAL_FLAG | INPUT_TYPE_GAMEPAD, 1, 0);
+          current_psbutton_state = PSBUTTON_STATE_GUIDE_PULSE;
+          psbutton_deadline = time + PSBTN_GUIDE_PULSE_DELAY;
+          break;
+        }
+        current_psbutton_state = PSBUTTON_STATE_IDLE;
+      }
+      break;
+    case PSBUTTON_STATE_GUIDE_HELD:
+      if (pressed) {
         special(SPECIAL_FLAG | INPUT_TYPE_GAMEPAD, 1, 1);
-      else
-        special(SPECIAL_FLAG | INPUT_TYPE_GAMEPAD, 0, 1);
-    }
-
-    psbutton_pressed_time = time;
-  } else {
-    if(is_old_pressed(SCE_CTRL_PSBUTTON | INPUT_TYPE_GAMEPAD))
-      special(SPECIAL_FLAG | INPUT_TYPE_GAMEPAD, 0, 1);
-
-    if(!psbutton_locked && time - psbutton_pressed_time > PSBTN_DOUBLETAP_DELAY)
-      lock_psbutton();
+      } else {
+        current_psbutton_state = PSBUTTON_STATE_IDLE;
+      }
+      break;
+    case PSBUTTON_STATE_GUIDE_PULSE:
+      if (time < psbutton_deadline) {
+        special(SPECIAL_FLAG | INPUT_TYPE_GAMEPAD, 1, 1);
+      } else {
+        current_psbutton_state = PSBUTTON_STATE_IDLE;
+      }
+      break;
+    case PSBUTTON_STATE_LOCAL_HELD:
+      if (!pressed) {
+        current_psbutton_state = PSBUTTON_STATE_IDLE;
+      }
+      break;
+    case PSBUTTON_STATE_ESCAPE_RELEASE:
+      // Handled before mode dispatch.
+      break;
   }
 }
 
@@ -1042,7 +1140,8 @@ void vitainput_start(void) {
     LiSendControllerBatteryEvent(0, battery_state, (uint8_t)battery_percent);
   }
 
-  if(config.enable_psbutton_capture)
+  reset_psbutton_state();
+  if(config.psbutton_mode != PSBUTTON_MODE_SYSTEM)
     lock_psbutton();
 
   active_input_thread = true;
@@ -1050,6 +1149,7 @@ void vitainput_start(void) {
 
 void vitainput_stop(void) {
   unlock_psbutton();
+  reset_psbutton_state();
   active_input_thread = false;
   reset_physical_shortcuts();
   vita_motion_end_stream();

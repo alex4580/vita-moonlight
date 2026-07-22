@@ -65,14 +65,17 @@ release notes.
 - [ ] PS4 + gyro reports one DS4 with correct axes, sensible units, no drift at
       rest, and clean state after suspend/reconnect.
 - [ ] All four touch modes and the floating keyboard pass.
-- [ ] Single PS reaches the host; double PS always returns to LiveArea; START +
-      L + R always opens the overlay without leaking input.
+- [ ] Default Local double-tap sends no single-PS event, keeps paused PC media
+      paused, and double PS always returns to LiveArea. Safe Guide, Immediate
+      Guide, and System / LiveArea match the documented behavior; START + L +
+      R opens the overlay without leaking input.
 - [ ] Every destructive overlay action requires the second **X** confirmation,
       and **O** cancels it.
 - [ ] A non-technical tester completes install, health check, pairing, normal
       play, game close, and recovery using only the GUI documentation.
 - [ ] A first-run Vita shows Balanced 960x544/60/8 Mbps, H.264, packet-loss
-      recovery, frame pacing, Xbox controller, and Relative mouse behavior.
+      recovery, frame pacing, Xbox controller, Relative mouse, and Local
+      double-tap PS behavior.
 - [ ] Reliable, Balanced, High quality, and Custom preset detection pass and
       the on-device help accurately describes their tradeoffs.
 

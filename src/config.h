@@ -40,6 +40,14 @@ struct special_keys {
   unsigned int nw, ne, sw, se;
 };
 
+enum psbutton_mode {
+  PSBUTTON_MODE_LOCAL_ESCAPE = 0,
+  PSBUTTON_MODE_SAFE_GUIDE = 1,
+  PSBUTTON_MODE_IMMEDIATE_GUIDE = 2,
+  PSBUTTON_MODE_SYSTEM = 3,
+  PSBUTTON_MODE_COUNT
+};
+
 typedef struct _CONFIGURATION {
   // static configuration, value will be saved to config file
   int config_version;
@@ -72,7 +80,7 @@ typedef struct _CONFIGURATION {
   bool enable_ref_frame_invalidation;
   bool enable_vita_vblank_wait;
   bool enable_motion_controls; //Metalface
-  bool enable_psbutton_capture;
+  int psbutton_mode;
   bool enable_double_tap_sprint; //**
   uint32_t double_tap_sprint_step_time; //** -IN MILLISECONDS
   float motion_controls_scalar_x;//**

@@ -104,8 +104,10 @@ Open the Vita overlay by holding **START**, then pressing **L + R** within
 buttons to Windows. The overlay can resume or
 disconnect and change resolution, video quality, frame rate, controller
 profile, touch mode, and the FPS counter. Stream-negotiation changes are saved
-for the next connection. **Double-press PS** remains the forced system escape:
-it temporarily releases PS capture and returns to the Vita LiveArea.
+for the next connection. The default **Local double-tap** PS policy never sends
+PS to Windows: a single press is ignored and double-PS remains the forced
+LiveArea escape. **Safe PC Guide**, legacy **Immediate PC Guide**, and direct
+**System / LiveArea** behavior are available in the normal Vita settings.
 
 Three double-confirmed recovery actions are available:
 

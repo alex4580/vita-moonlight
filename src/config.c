@@ -37,7 +37,7 @@ extern char* strdup(const char*);
 #define USER_PATHS "."
 #define DEFAULT_CONFIG_DIR "/.config"
 #define DEFAULT_CACHE_DIR "/.cache"
-#define CURRENT_CONFIG_VERSION 3
+#define CURRENT_CONFIG_VERSION 4
 #define DEFAULT_STREAM_WIDTH 960
 #define DEFAULT_STREAM_HEIGHT 544
 #define DEFAULT_STREAM_FPS 60
@@ -162,8 +162,12 @@ static int ini_handle(void *out, const char *section, const char *name,
       config->enable_motion_controls = BOOL(value);
     } else if (strcmp(name, "enable_front_touchzones") == 0) {
       config->enable_front_touchzones = BOOL(value);
+    } else if (strcmp(name, "psbutton_mode") == 0) {
+      config->psbutton_mode = INT(value);
     } else if(strcmp(name, "enable_psbutton_capture") == 0) {
-      config->enable_psbutton_capture = BOOL(value);
+      // Migrate the old boolean to the safest equivalent. Captured PS presses
+      // stay local by default instead of becoming a Windows Guide press.
+      config->psbutton_mode = BOOL(value) ? PSBUTTON_MODE_LOCAL_ESCAPE : PSBUTTON_MODE_SYSTEM;
     } else if (strcmp(name, "enable_double_tap_sprint") == 0) {
       config->enable_double_tap_sprint = BOOL(value);
     } else if (strcmp(name, "double_tap_sprint_step_time") == 0) {
@@ -211,6 +215,9 @@ static void config_sanitize(PCONFIGURATION config) {
   }
   if (config->touchscreen_mode < 0 || config->touchscreen_mode > 3) {
     config->touchscreen_mode = 0;
+  }
+  if (config->psbutton_mode < 0 || config->psbutton_mode >= PSBUTTON_MODE_COUNT) {
+    config->psbutton_mode = PSBUTTON_MODE_LOCAL_ESCAPE;
   }
   if (config->mouse_acceleration < 15 || config->mouse_acceleration > 300) {
     config->mouse_acceleration = 150;
@@ -274,7 +281,7 @@ void config_save(const char* filename, PCONFIGURATION config) {
   write_config_int(fd, "enable_remote_stream_optimization", config->stream.streamingRemotely);
   write_config_bool(fd, "enable_vita_vblank_wait", config->enable_vita_vblank_wait);
   write_config_bool(fd, "enable_motion_controls", config->enable_motion_controls);
-  write_config_bool(fd, "enable_psbutton_capture", config->enable_psbutton_capture);
+  write_config_int(fd, "psbutton_mode", config->psbutton_mode);
   write_config_bool(fd, "enable_double_tap_sprint", config->enable_double_tap_sprint);
   write_config_int(fd, "double_tap_sprint_step_time", config->double_tap_sprint_step_time);
   write_config_float(fd, "motion_controls_scalar_x", config->motion_controls_scalar_x);
@@ -353,7 +360,7 @@ void config_parse(int argc, char* argv[], PCONFIGURATION config) {
   config->enable_ref_frame_invalidation = true;
   config->enable_vita_vblank_wait = false;
   config->enable_motion_controls = true;
-  config->enable_psbutton_capture = true;
+  config->psbutton_mode = PSBUTTON_MODE_LOCAL_ESCAPE;
   config->enable_double_tap_sprint = false;
   config->touchscreen_mode = 0;
   config->controller_type = 1;

@@ -2,6 +2,7 @@
 <changeinfo>
 <changes app_ver="00.14"><![CDATA[
 ## 0.14.0<br>
+* Keep single PS presses local by default while preserving double-PS LiveArea escape; add Safe Guide, Immediate Guide, and System modes.<br>
 * Fix virtual-display selection when the requested Vita mode was missing from VDD.<br>
 * Consume the START + L + R overlay chord locally instead of sending it to the PC.<br>
 * Add Reliable, Balanced, and High quality streaming presets with on-device help.<br>

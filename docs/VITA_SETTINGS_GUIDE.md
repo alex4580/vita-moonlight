@@ -47,6 +47,19 @@ sessions.
 | Mouse Absolute | Maps Vita screen coordinates directly to the Windows pointer. It is convenient for desktop/UI control but depends on the host display matching the streamed geometry. |
 | Tablet (Sunshine) | Sends native pen/touch-style coordinates through Sunshine. Use it for multitouch-aware Windows applications; game support varies. |
 
+### PS button behavior
+
+| Mode | Behavior | Tradeoff |
+|---|---|---|
+| Local double-tap | Recommended default. A single PS press is discarded locally; a quick double-press releases capture and returns to LiveArea. | Windows receives no Guide button. This prevents Steam Input, browser media keys, or another host mapper from turning PS into play/pause. |
+| Safe PC Guide | Waits 250 ms before sending a single PS press as the controller Guide button. A quick double-press is consumed locally and returns to LiveArea. | Preserves Guide with a small delay. Choose this only when a game or Steam layout needs Guide. |
+| Immediate PC Guide | Sends Guide as soon as PS is pressed; double-PS still releases to LiveArea. | Lowest Guide latency, but the first press reaches Windows before Moonlight can know whether a second press is coming. It can trigger host shortcuts or resume paused media. |
+| System / LiveArea | Leaves the PS button under Vita system control. One press returns to LiveArea and nothing is sent to Windows. | No captured double-tap or PC Guide behavior. |
+
+Changing this option alters input behavior only; it has no effect on video
+quality, stream latency, or bandwidth. If PS unexpectedly controls PC media,
+select **Local double-tap**.
+
 Gyro reporting remains enabled so switching from Xbox to DS4 immediately makes
 motion available. Motion packets are not advertised as a controller capability
 while Xbox mode is selected.

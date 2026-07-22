@@ -1,5 +1,9 @@
 ## 0.14.0
 
+* Changed the default PS-button policy so single presses remain local and can
+  no longer trigger Windows/Steam Guide shortcuts such as media play/pause.
+  Double-PS still provides the forced LiveArea escape. Added delayed Safe PC
+  Guide, legacy Immediate PC Guide, and direct System / LiveArea modes.
 * Fixed Sunshine falling back to the physical monitor when the VDD lacked a
   Vita-selectable mode such as 960x540/60. Existing and new installations now
   provision the safe 960x540, 960x544, and 1280x720 desktop modes at 60 Hz;
