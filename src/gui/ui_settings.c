@@ -2,6 +2,7 @@
 
 #include "guilib.h"
 #include "ime.h"
+#include "ui_keyboard.h"
 
 #include "../config.h"
 #include "../input/vita.h"
