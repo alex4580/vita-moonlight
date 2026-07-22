@@ -86,7 +86,9 @@ internal static class Program
         var result = SunshineConfigurator.Configure(settings, Path.GetFullPath(companionPath));
         Console.WriteLine($"Configured {settings.HostMode} in {result.ConfigurationDirectory}");
         Console.WriteLine($"Moonlight application: {result.ApplicationName}");
-        Console.WriteLine($"Virtual-display integration: {result.HookedApplicationCount} application(s)");
+        Console.WriteLine(result.UsesNativeDisplayManagement
+            ? $"Virtual-display integration: Sunshine native lifecycle ({result.CoveredApplicationCount} application(s))"
+            : $"Virtual-display integration: prep hook ({result.CoveredApplicationCount} application(s))");
         Console.WriteLine($"Force SDR: {(settings.ForceSdr ? "enabled" : "disabled")}");
         Console.WriteLine($"Original apps backup: {result.BackupPath}");
         Console.WriteLine("Restart the streaming host, then select the configured application on the Vita.");
@@ -262,6 +264,7 @@ internal static class Program
             Console.WriteLine($"Administrator: {Status(report.IsAdministrator, report.IsAdministrator ? "yes" : "no (required for setup)")}");
             Console.WriteLine($"Host mode:     {report.HostMode}");
             Console.WriteLine($"App coverage:  {(report.IntegrateAllSunshineApps ? "every Sunshine app" : "Vita Moonlight app only")}");
+            Console.WriteLine($"Display lifecycle: {Status(report.NativeDisplayLifecycleReady, report.NativeDisplayLifecycleReady ? "native disconnect recovery enabled" : "reapply recommended setup")}");
             Console.WriteLine($"Color mode:    {(report.ForceSdr ? "force SDR for Vita sessions" : "leave Windows color mode unchanged")}");
             Console.WriteLine($"Sunshine:      {Status(report.SunshinePath is not null, report.SunshinePath ?? "not found")}");
             Console.WriteLine($"Apollo:        {Status(report.ApolloPath is not null, report.ApolloPath ?? "not found")}");
@@ -276,7 +279,7 @@ internal static class Program
             Console.WriteLine(report.Recommendation);
         }
 
-        return report.IsWindows && report.HasSelectedStreamingHost && report.HasDisplaySupport &&
+        return report.IsWindows && report.HasSelectedStreamingHost && report.HasDisplaySupport && report.NativeDisplayLifecycleReady &&
             report.ViGEmBusInstalled && report.ViGEmBusRunning && !report.SunshineNeedsRestart && !report.RecoveryPending
             ? ExitSuccess
             : ExitMissingRequiredComponent;
@@ -331,21 +334,44 @@ internal static class Program
                   ]
                 }
                 """);
+            File.WriteAllText(Path.Combine(sunshineTestDirectory, "sunshine.log"), """
+                [test]: Info: Currently available display devices:
+                [
+                  {
+                    "device_id": "{11111111-2222-3333-4444-555555555555}",
+                    "display_name": "",
+                    "edid": { "manufacturer_id": "MTT", "product_code": "1337" },
+                    "friendly_name": "VDD by MTT",
+                    "info": null
+                  }
+                ]
+                """);
             var integrationSettings = HostSettings.Default with { SunshineConfigDirectory = sunshineTestDirectory };
             var integrationResult = SunshineConfigurator.Configure(integrationSettings, @"C:\Program Files\Vita Moonlight Host\VitaMoonlight.Host.exe");
-            Require(integrationResult.HookedApplicationCount == 3, "Every-app Sunshine integration count failed.");
+            Require(integrationResult.CoveredApplicationCount == 3, "Every-app Sunshine integration count failed.");
+            Require(integrationResult.UsesNativeDisplayManagement, "Sunshine native display management was not selected.");
             using var integratedApps = JsonDocument.Parse(File.ReadAllText(Path.Combine(sunshineTestDirectory, "apps.json")));
             foreach (var app in integratedApps.RootElement.GetProperty("apps").EnumerateArray())
             {
-                Require(app.GetProperty("prep-cmd").EnumerateArray().Any(prep =>
-                    prep.GetProperty("do").GetString()?.Contains("VitaMoonlight.Host", StringComparison.OrdinalIgnoreCase) == true),
-                    $"Sunshine app '{app.GetProperty("name").GetString()}' did not receive the virtual-display hook.");
+                var hasManagedHook = app.TryGetProperty("prep-cmd", out var prepCommands) && prepCommands.EnumerateArray().Any(prep =>
+                    prep.GetProperty("do").GetString()?.Contains("VitaMoonlight.Host", StringComparison.OrdinalIgnoreCase) == true);
+                Require(!hasManagedHook,
+                    $"Sunshine app '{app.GetProperty("name").GetString()}' retained a legacy virtual-display hook.");
             }
             var steamApp = integratedApps.RootElement.GetProperty("apps").EnumerateArray().First(app =>
                 app.GetProperty("name").GetString() == "Steam Big Picture");
             Require(steamApp.GetProperty("prep-cmd").EnumerateArray().Any(prep =>
                 prep.GetProperty("do").GetString() == "steam://open/bigpicture"),
                 "Existing Sunshine preparation commands were not preserved.");
+            var nativeConfiguration = File.ReadAllLines(Path.Combine(sunshineTestDirectory, "sunshine.conf"));
+            Require(nativeConfiguration.Contains("output_name = {11111111-2222-3333-4444-555555555555}"),
+                "Sunshine virtual-display selection failed.");
+            Require(nativeConfiguration.Contains("dd_configuration_option = ensure_only_display"),
+                "Sunshine exclusive-display configuration failed.");
+            Require(nativeConfiguration.Contains("dd_config_revert_on_disconnect = enabled"),
+                "Sunshine disconnect recovery configuration failed.");
+            Require(SunshineConfigurator.IsNativeDisplayManagementReady(sunshineTestDirectory),
+                "Sunshine native display lifecycle readiness check failed.");
         }
         finally
         {
@@ -507,6 +533,7 @@ internal sealed record HostDiagnosticReport(
     bool RecoveryTaskInstalled,
     bool IntegrateAllSunshineApps,
     bool ForceSdr,
+    bool NativeDisplayLifecycleReady,
     string Recommendation)
 {
     public bool HasStreamingHost => SunshinePath is not null || ApolloPath is not null;
@@ -538,6 +565,9 @@ internal static class HostDiagnostics
         var virtualDisplay = DisplayWizardAdapter.IsDriverInstalled();
         var recoveryPending = File.Exists(HostStatePaths.RecoveryFile);
         var recoveryTaskInstalled = RecoveryTaskManager.IsInstalled();
+        var nativeDisplayLifecycleReady = settings.HostMode != "sunshine" || !settings.IntegrateAllSunshineApps ||
+            SunshineConfigurator.IsNativeDisplayManagementReady(
+                SunshineConfigurator.ResolveConfigurationDirectory(settings.SunshineConfigDirectory, "sunshine"));
 
         var recommendation = !isWindows
             ? "Run this companion on the Windows streaming host."
@@ -553,6 +583,8 @@ internal static class HostDiagnostics
                             ? "ViGEmBus is installed but is not running. Reboot Windows; if it remains stopped, repair the ViGEmBus installation."
                             : sunshineNeedsRestart
                                 ? "ViGEmBus is running, but Sunshine started before it was available. Click Restart Sunshine in the control panel."
+                        : !nativeDisplayLifecycleReady
+                            ? "Sunshine is not configured to restore displays when the Vita disconnects. Click Apply recommended setup."
                         : settings.HostMode == "sunshine" && displayWizard is null
                             ? "Reinstall the host companion's signed display-driver bundle or switch to Apollo."
                             : settings.HostMode == "sunshine" && !virtualDisplay
@@ -577,6 +609,7 @@ internal static class HostDiagnostics
             recoveryTaskInstalled,
             settings.IntegrateAllSunshineApps,
             settings.ForceSdr,
+            nativeDisplayLifecycleReady,
             recommendation);
     }
 

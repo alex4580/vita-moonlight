@@ -12,8 +12,8 @@ arguments launches the control panel and keeps it open.
 3. Open **Start > Vita Moonlight Host > Vita Moonlight Host Control Panel**.
 4. Choose **Restart as Administrator** if shown.
 5. On **Overview**, click **Apply recommended setup**. This configures the
-   controller path, adds display preparation to every Sunshine application,
-   and restarts Sunshine.
+   controller path, enables Sunshine's native disconnect-aware display
+   lifecycle for every application, and restarts Sunshine.
 6. Click **Run health check**. Resolve any item that is not ready before
    pairing the Vita.
 
@@ -35,15 +35,16 @@ and recovery state.
 - **Streaming host** selects Sunshine or Apollo.
 - **Virtual display match** is normally blank. Enter part of a device name only
   when the PC has multiple virtual-display drivers.
-- **Use the Vita virtual display for every Sunshine application** must remain
-  enabled if you launch Desktop, Steam Big Picture, or individual games. A
-  Sunshine preparation command belongs to an application; disabling this
-  option limits switching to the generated Vita Moonlight application.
+- **Automatically switch to the Vita display for every Sunshine application**
+  must remain enabled if you launch Desktop, Steam Big Picture, or individual
+  games. It selects Sunshine's global display manager, including automatic
+  client resolution/refresh-rate selection and restoration when all clients
+  disconnect. Disabling it uses the legacy generated-app prep hook only.
 - **Force SDR for Vita virtual-display sessions** prevents HDR capture from
   looking washed out on the Vita.
 
-Choose **Save and apply** to write the settings and restart Sunshine. Existing
-Sunshine prep commands are preserved.
+Choose **Save and apply** to refresh Sunshine's display inventory, write the
+settings, and restart Sunshine. Existing application commands are preserved.
 
 ### Displays
 
@@ -77,14 +78,15 @@ unless the PC has an independent remote-control path.
 ## Streaming from the Vita
 
 After pairing, you may launch any Sunshine application, including its built-in
-**Steam Big Picture** entry. The per-app hook:
+**Steam Big Picture** entry. Sunshine's native display lifecycle:
 
-1. saves the active physical display topology;
-2. activates the matched virtual display at the resolution and refresh rate
-   requested by the Vita;
-3. disables advanced color on that virtual target when Force SDR is enabled;
-4. lets Sunshine start capture; and
-5. restores the saved layout when the application ends.
+1. selects the stable VDD device ID discovered in Sunshine's display inventory;
+2. activates only that display at the resolution and refresh rate requested by
+   the Vita;
+3. applies SDR because the Vita does not request HDR;
+4. lets Sunshine capture the virtual target; and
+5. restores the physical layout 500 ms after all clients disconnect, even if
+   Steam remains open for a later session.
 
 Open the Vita overlay with **START + L + R**. The overlay can resume or
 disconnect and change resolution, video quality, frame rate, controller
@@ -140,9 +142,10 @@ Useful overrides are `--config-dir PATH`, `--driver-bundle PATH`, and
 `--display-match TEXT`. Environment overrides include `SUNSHINE_PATH`,
 `APOLLO_PATH`, `DISPLAYWIZARD_PATH`, and `VITA_MOONLIGHT_STATE_DIR`.
 
-Configuration creates `apps.json.vita-moonlight.backup` once, removes only old
+Configuration creates `apps.json.vita-moonlight.backup` once, removes obsolete
 prep commands marked `VitaMoonlight.Host`, and preserves unrelated applications
-and commands.
+and commands. The global Sunshine display settings are health-checked by the
+control panel.
 
 ## Developer build
 

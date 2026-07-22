@@ -26,7 +26,7 @@ internal sealed class HostControlPanel : Form
     private readonly CheckBox integrateAllApps = new()
     {
         AutoSize = true,
-        Text = "Use the Vita virtual display for every Sunshine application",
+        Text = "Automatically switch to the Vita display for every Sunshine application",
     };
     private readonly CheckBox forceSdr = new()
     {
@@ -179,7 +179,7 @@ internal sealed class HostControlPanel : Form
     private TabPage CreateStreamingPage()
     {
         var page = CreatePage("Streaming");
-        AddHeading(page, "Streaming behavior", "These settings are written to the managed Sunshine applications when you apply configuration.");
+        AddHeading(page, "Streaming behavior", "These settings configure Sunshine's global display lifecycle and compatibility launcher.");
 
         var form = new TableLayoutPanel
         {
@@ -210,7 +210,7 @@ internal sealed class HostControlPanel : Form
         AddPageControl(page, actions);
         AddPageControl(page, CreateInfoCard(
             "Why “every application” is recommended",
-            "Sunshine runs preparation commands per application. Enabling this option ensures Desktop, Steam Big Picture, and custom games all activate the 960x544 virtual display instead of capturing an HDR physical monitor."));
+            "Sunshine's native display manager covers Desktop, Steam Big Picture, and custom games, then restores the physical desktop when every client disconnects—even if Steam remains open for resume."));
         return page;
     }
 
@@ -420,6 +420,11 @@ internal sealed class HostControlPanel : Form
         {
             arguments.Add("--display-match");
             arguments.Add(displayMatch.Text.Trim());
+        }
+        if (restartSunshine && selectedHost == "sunshine" &&
+            !await RunCommandAsync(new[] { "host", "restart", "--host", "sunshine" }))
+        {
+            return;
         }
         if (!await RunCommandAsync(arguments.ToArray())) return;
         if (restartSunshine && selectedHost == "sunshine")

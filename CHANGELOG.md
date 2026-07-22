@@ -3,9 +3,9 @@
 * Added an in-stream Vita overlay opened with START + L + R. It provides
   resume, disconnect, resolution, bitrate, frame-rate, controller, touch-mode,
   and FPS-counter controls. Double-press PS remains the forced LiveArea escape.
-* Sunshine display preparation is now applied to every application by default,
-  including Desktop and Steam Big Picture, while preserving existing prep
-  commands.
+* Sunshine's native display lifecycle now covers every application by default,
+  including Desktop and Steam Big Picture, and restores the physical layout
+  when all clients disconnect even if the application stays open.
 * Vita virtual-display sessions force SDR by default to prevent an HDR physical
   desktop from appearing washed out on the Vita.
 * Raised the 960x544/60 recommended bitrate from 5 Mbps to 8 Mbps and migrate

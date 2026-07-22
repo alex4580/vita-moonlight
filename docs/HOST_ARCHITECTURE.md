@@ -12,16 +12,25 @@ WinForms control panel and an optional CLI. It detects Sunshine or Apollo,
 ViGEmBus, the packaged signed virtual-display driver, and elevation state. Its
 recommended profile is 960x544, 60 FPS, 8000 Kbps, H.264, and SDR.
 
-Sunshine preparation commands are installed per application because Sunshine
-does not apply an application-specific hook globally. By default the
-configurator removes stale commands carrying the `VitaMoonlight.Host` marker
-and appends a current start/stop pair to every application, including the
-generated Vita Moonlight app. Unrelated commands and applications are retained,
-and the original `apps.json` is backed up once.
+For the bundled Sunshine version, the companion selects the virtual display by
+Sunshine's stable `device_id` and enables its native Windows display manager:
+`ensure_only_display`, automatic client resolution and refresh rate, automatic
+HDR state, and `dd_config_revert_on_disconnect`. This policy is global, so it
+covers Desktop, Steam Big Picture, and custom games and restores the physical
+layout after the final client disconnects even when the application remains
+open. Obsolete `VitaMoonlight.Host` prep hooks are removed while unrelated
+commands are retained, and the original `apps.json` is backed up once.
 
-## Display transaction
+## Display lifecycle and manual transaction
 
-Before Sunshine begins capture, `session start`:
+Sunshine owns the default streaming transaction. It snapshots display state,
+activates only the configured virtual target, applies the mode requested by the
+Vita, and reverts after a 500 ms disconnect grace period. This avoids tying
+display restoration to application shutdown; Sunshine deliberately keeps
+detached applications such as Steam Big Picture alive for resume.
+
+The companion's `session start` transaction remains available for Apollo,
+legacy single-app mode, and the timed manual preview. It:
 
 1. acquires a single-instance session lock;
 2. captures the active Windows paths and modes;
@@ -31,10 +40,10 @@ Before Sunshine begins capture, `session start`:
 6. changes it to the Vita-requested resolution and refresh rate; and
 7. disables advanced color on the target when Force SDR is enabled.
 
-If any activation step fails, the saved physical topology is restored
-immediately. `session stop` restores it after a normal disconnect. A scheduled
-highest-privilege logon task invokes recovery after a host or power interruption
-left a transaction pending. The saved record is cleared only after a successful
+If a manual activation step fails, the saved physical topology is restored
+immediately. `session stop` restores it after the legacy application ends. A
+scheduled highest-privilege logon task invokes recovery after an interrupted
+manual transaction. The saved record is cleared only after a successful
 restore.
 
 The driver is installed or updated explicitly by the installer/control panel;

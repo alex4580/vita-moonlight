@@ -35,8 +35,8 @@ Download both artifacts from the same release:
    PC. Keep Sunshine, ViGEmBus, and the signed virtual-display driver selected.
 2. Open **Start > Vita Moonlight Host > Vita Moonlight Host Control Panel**.
 3. If prompted, choose **Restart as Administrator**, then click **Apply
-   recommended setup**. The control panel applies the hook to all Sunshine
-   applications and restarts Sunshine.
+   recommended setup**. The control panel enables Sunshine's native global
+   display lifecycle and restarts Sunshine.
 4. Run **Run health check**. Sunshine, ViGEmBus, virtual display, and recovery
    should report ready.
 5. Install the matching `.vpk` on the Vita, pair it with Sunshine, and launch
@@ -91,8 +91,9 @@ layout and color behavior return when the stream ends.
 ## If something goes wrong
 
 - Washed-out video or Sunshine capturing the physical monitor: open the host
-  control panel, keep **Use the Vita virtual display for every Sunshine
-  application** and **Force SDR** enabled, then choose **Save and apply**.
+  control panel, keep **Automatically switch to the Vita display for every
+  Sunshine application** and **Force SDR** enabled, then choose **Save and
+  apply**.
 - The physical monitor does not return: sign out and back in. The installed
   recovery task restores the saved layout. If the desktop is visible, use
   **Displays > Restore physical display** in the Administrator control panel.

@@ -16,7 +16,8 @@ and host installer commit.
 4. On **Overview**, click **Apply recommended setup**.
 5. Click **Run health check**. Sunshine, ViGEmBus, Sunshine gamepad, driver
    bundle, virtual display, and recovery task must report ready. **App
-   coverage** must say every Sunshine app and **Color mode** must say force SDR.
+   coverage** must say every Sunshine app, **Display lifecycle** must say native
+   disconnect recovery enabled, and **Color mode** must say force SDR.
 
 Opening the executable itself must show a persistent control panel. A terminal
 window that only flashes and closes indicates an obsolete package.
@@ -50,7 +51,7 @@ recovery safeguard.
 5. End the stream from the Vita overlay. Verify the physical display returns
    and **Session status** is clear.
 6. Repeat with **Desktop** and one custom Sunshine game. This is the regression
-   test for per-application display-hook coverage.
+   test for global native display-lifecycle coverage.
 7. Repeat one connection with Wi-Fi loss and one with Vita suspend. In both
    cases the physical display must recover or the logon safeguard must recover
    it at the next sign-in.

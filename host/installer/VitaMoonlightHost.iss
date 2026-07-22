@@ -65,6 +65,7 @@ Filename: "{app}\tools\ViGEmBus\ViGEmBus_1.22.0_x64_x86_arm64.exe"; Parameters: 
 Filename: "{sys}\msiexec.exe"; Parameters: "/i ""{app}\tools\Sunshine\Sunshine-Windows-AMD64-installer.msi"" /qn /norestart"; StatusMsg: "Installing Sunshine..."; Tasks: host\sunshine; Check: SunshineMissing; Flags: runhidden waituntilterminated
 Filename: "{app}\tools\DisplayWizard\VC_redist.x64.exe"; Parameters: "/install /quiet /norestart"; StatusMsg: "Installing the virtual display runtime..."; Tasks: host\sunshine\virtualdriver; Flags: runhidden waituntilterminated
 Filename: "{app}\VitaMoonlight.Host.exe"; Parameters: "driver install"; StatusMsg: "Installing the virtual display driver..."; Tasks: host\sunshine\virtualdriver; Flags: waituntilterminated
+Filename: "{app}\VitaMoonlight.Host.exe"; Parameters: "host restart --host sunshine"; StatusMsg: "Refreshing Sunshine display detection..."; Tasks: host\sunshine; Flags: runhidden waituntilterminated
 Filename: "{app}\VitaMoonlight.Host.exe"; Parameters: "configure --host sunshine"; StatusMsg: "Configuring Sunshine..."; Tasks: host\sunshine; Flags: waituntilterminated
 Filename: "{app}\VitaMoonlight.Host.exe"; Parameters: "host restart --host sunshine"; StatusMsg: "Restarting Sunshine with gamepad support..."; Tasks: host\sunshine; Flags: runhidden waituntilterminated
 Filename: "{app}\VitaMoonlight.Host.exe"; Parameters: "configure --host apollo"; StatusMsg: "Configuring Apollo..."; Tasks: host\apollo; Flags: waituntilterminated
