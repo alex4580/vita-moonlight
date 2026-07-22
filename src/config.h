@@ -84,8 +84,8 @@ typedef struct _CONFIGURATION {
   int pin;
   uint16_t port;
   int keyboard_layout; // 0=EN_US, 1=ES_ES, 2=ES_LATAM
-  int touchscreen_mode; // 0=off, 1=DS4, 2=Mouse absoluto, 3=Tableta multitouch
-  int controller_type; // 1: Xbox, 2: PS (default), 3: Nintendo, 4: Generic
+  int touchscreen_mode; // 0=relative mouse, 1=DS4, 2=absolute mouse, 3=multitouch tablet
+  int controller_type; // 1=Xbox (compatibility default), 2=DS4
   bool swap_shoulder_buttons; // Nuevo: swap R1/L1 <-> R2/L2
 } CONFIGURATION, *PCONFIGURATION;
 

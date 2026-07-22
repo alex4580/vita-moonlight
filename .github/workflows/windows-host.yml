@@ -5,11 +5,13 @@ on:
     branches: [vita]
     paths:
       - "host/**"
+      - "docs/VITA_SETTINGS_GUIDE.md"
       - ".github/workflows/windows-host.yml"
   pull_request:
     branches: [vita]
     paths:
       - "host/**"
+      - "docs/VITA_SETTINGS_GUIDE.md"
       - ".github/workflows/windows-host.yml"
   workflow_dispatch:
   workflow_call:
@@ -20,6 +22,23 @@ on:
         required: false
 
 jobs:
+  compatibility:
+    name: self-test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - name: Build with warnings as errors
+        run: dotnet build host/VitaMoonlight.Host/VitaMoonlight.Host.csproj --configuration Release
+      - name: Portable logic self-test
+        run: dotnet run --project host/VitaMoonlight.Host/VitaMoonlight.Host.csproj --configuration Release --no-build -- self-test
+
   build:
     runs-on: windows-latest
     env:
@@ -91,7 +110,7 @@ jobs:
           Copy-Item artifacts/displaywizard artifacts/portable/tools/DisplayWizard -Recurse -Force
           Copy-Item artifacts/vigembus artifacts/portable/tools/ViGEmBus -Recurse -Force
           Copy-Item artifacts/sunshine artifacts/portable/tools/Sunshine -Recurse -Force
-          Copy-Item host/README.md,host/END_TO_END_TEST.md,host/FINAL_RELEASE_CHECKLIST.md,host/THIRD_PARTY_NOTICES.md,LICENSE artifacts/portable -Force
+          Copy-Item host/README.md,host/END_TO_END_TEST.md,host/FINAL_RELEASE_CHECKLIST.md,host/COMPATIBILITY.md,docs/VITA_SETTINGS_GUIDE.md,host/THIRD_PARTY_NOTICES.md,LICENSE artifacts/portable -Force
           Compress-Archive -Path artifacts/portable/* -DestinationPath artifacts/installer/Vita-Moonlight-Host-Portable-win-x64.zip -CompressionLevel Optimal
       - uses: actions/upload-artifact@v4
         with:

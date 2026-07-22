@@ -137,11 +137,11 @@ internal static class Program
         {
             case "restart":
                 EnsureAdministrator("Restarting Sunshine");
-                WindowsServiceManager.Restart("SunshineService", "Sunshine");
+                WindowsServiceManager.Restart(StreamingHostLocator.FindSunshineServiceName(), "Sunshine");
                 Console.WriteLine("Sunshine restarted. It will now detect the installed ViGEmBus driver and the updated Vita configuration.");
                 return ExitSuccess;
             case "status":
-                var state = WindowsServiceManager.GetState("SunshineService");
+                var state = WindowsServiceManager.GetState(StreamingHostLocator.FindSunshineServiceName());
                 Console.WriteLine($"Sunshine service: {state}");
                 return state == WindowsServiceState.Running ? ExitSuccess : ExitMissingRequiredComponent;
             default:
@@ -319,6 +319,7 @@ internal static class Program
         {
             Console.WriteLine("Vita Moonlight host diagnostics");
             Console.WriteLine($"Windows:       {Status(report.IsWindows, report.OperatingSystem)}");
+            Console.WriteLine($"Platform:      {Status(report.IsSupportedPlatform, report.Architecture)}");
             Console.WriteLine($"Administrator: {Status(report.IsAdministrator, report.IsAdministrator ? "yes" : "no (required for setup)")}");
             Console.WriteLine($"Host mode:     {report.HostMode}");
             Console.WriteLine($"App coverage:  {(report.IntegrateAllSunshineApps ? "every Sunshine app" : "Vita Moonlight app only")}");
@@ -333,12 +334,19 @@ internal static class Program
             Console.WriteLine($"Virtual display: {Status(report.VirtualDisplayDriverInstalled || report.HostMode == "apollo", report.HostMode == "apollo" ? "provided by Apollo" : report.VirtualDisplayDriverInstalled ? "signed driver installed" : "not detected")}");
             Console.WriteLine($"Recovery:      {Status(!report.RecoveryPending, report.RecoveryPending ? "pending - run session recover" : "none")}");
             Console.WriteLine($"Recovery task: {Status(report.RecoveryTaskInstalled, report.RecoveryTaskInstalled ? "installed" : "not installed")}");
-            Console.WriteLine($"Stream rescue: {Status(report.RescueAgentInstalled && report.RescueAgentRunning, report.RescueAgentRunning ? "installed and running" : report.RescueAgentInstalled ? "installed but not running" : "not installed")}");
+            var rescueDescription = report.RescueAgentInstalled && report.RescueAgentRunning
+                ? "installed and running"
+                : !report.RescueAgentInstalled && report.RescueAgentRunning
+                    ? "orphan agent running; scheduled task missing - repair required"
+                    : report.RescueAgentInstalled
+                        ? "installed but not running"
+                        : "not installed";
+            Console.WriteLine($"Stream rescue: {Status(report.RescueAgentInstalled && report.RescueAgentRunning, rescueDescription)}");
             Console.WriteLine();
             Console.WriteLine(report.Recommendation);
         }
 
-        return report.IsWindows && report.HasSelectedStreamingHost && report.HasDisplaySupport && report.NativeDisplayLifecycleReady &&
+        return report.IsSupportedPlatform && report.HasSelectedStreamingHost && report.HasDisplaySupport && report.NativeDisplayLifecycleReady &&
             report.ViGEmBusInstalled && report.ViGEmBusRunning && !report.SunshineNeedsRestart && !report.RecoveryPending &&
             report.RescueAgentInstalled && report.RescueAgentRunning
             ? ExitSuccess
@@ -432,6 +440,20 @@ internal static class Program
                 "Sunshine disconnect recovery configuration failed.");
             Require(SunshineConfigurator.IsNativeDisplayManagementReady(sunshineTestDirectory),
                 "Sunshine native display lifecycle readiness check failed.");
+            File.WriteAllText(Path.Combine(sunshineTestDirectory, "sunshine-reversed.log"), """
+                [test]: Info: Currently available display devices:
+                [
+                  {
+                    "friendly_name": "VDD by MTT",
+                    "edid": { "product_code": "1337", "manufacturer_id": "MTT" },
+                    "device_id": "{AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE}"
+                  }
+                ]
+                """);
+            Require(SunshineConfigurator.FindManagedDisplayDeviceId(
+                    Path.Combine(sunshineTestDirectory, "sunshine-reversed.log"), null) ==
+                    "{AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE}",
+                "Sunshine display parsing failed when properties were reordered.");
         }
         finally
         {
@@ -455,9 +477,26 @@ internal static class Program
             new DisplayDescriptor(0, "VDD by MTT", @"\\?\DISPLAY#MTT1337#1", true, true)),
             "Signed virtual display identification failed.");
         Require(!DisplayTopologyService.IsManagedVirtualDisplay(
-            new DisplayDescriptor(0, "LG ULTRAGEAR+", @"\\?\DISPLAY#GSM5CDB#1", true, true)),
+            new DisplayDescriptor(0, "Physical Monitor", @"\\?\DISPLAY#ACME123#1", true, true)),
             "Physical display was incorrectly identified as managed virtual display.");
+        var recoveryDisplays = DisplayTopologyService.SelectPhysicalDisplaysForRecovery(new[]
+        {
+            new DisplayDescriptor(0, "Internal Panel", @"\\?\DISPLAY#INTERNAL#1", false, true),
+            new DisplayDescriptor(1, "External Monitor", @"\\?\DISPLAY#EXTERNAL#1", false, true),
+            new DisplayDescriptor(2, "VDD by MTT", @"\\?\DISPLAY#MTT1337#1", true, true),
+        });
+        Require(recoveryDisplays.Length == 2 && recoveryDisplays.All(display => !DisplayTopologyService.IsManagedVirtualDisplay(display)),
+            "Multi-monitor physical display recovery selection failed.");
+        Require(StreamingHostLocator.ExtractExecutablePath(
+                @"""C:\Program Files\Sunshine\sunshinesvc.exe"" --service") ==
+                @"C:\Program Files\Sunshine\sunshinesvc.exe",
+            "Quoted Sunshine service path parsing failed.");
+        Require(StreamingHostLocator.ExtractExecutablePath(
+                @"C:\Sunshine Portable\sunshine.exe --service") ==
+                @"C:\Sunshine Portable\sunshine.exe",
+            "Unquoted Sunshine service path parsing failed.");
         Require(HostRecoveryActions.IsProtectedProcessName("explorer"), "Windows shell protection failed.");
+        Require(HostRecoveryActions.IsProtectedProcessName("StartMenuExperienceHost"), "Windows Start menu protection failed.");
         Require(HostRecoveryActions.IsProtectedProcessName("Sunshine"), "Sunshine process protection failed.");
         Require(!HostRecoveryActions.IsProtectedProcessName("DOOMEternalx64vk"), "Game process was incorrectly protected.");
 
@@ -585,6 +624,8 @@ internal sealed record VitaHostProfile(int Width, int Height, int FramesPerSecon
 internal sealed record HostDiagnosticReport(
     bool IsWindows,
     string OperatingSystem,
+    string Architecture,
+    bool IsSupportedPlatform,
     bool IsAdministrator,
     string HostMode,
     string? SunshinePath,
@@ -614,9 +655,12 @@ internal static class HostDiagnostics
     {
         var settings = HostSettings.Load();
         var isWindows = OperatingSystem.IsWindows();
-        var programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
-        var sunshine = FindExecutable(Environment.GetEnvironmentVariable("SUNSHINE_PATH"), Path.Combine(programFiles, "Sunshine", "sunshine.exe"));
-        var apollo = FindExecutable(Environment.GetEnvironmentVariable("APOLLO_PATH"), Path.Combine(programFiles, "Apollo", "apollo.exe"), Path.Combine(programFiles, "Apollo", "sunshine.exe"));
+        var architecture = $"{RuntimeInformation.OSArchitecture} OS / {RuntimeInformation.ProcessArchitecture} process";
+        var supportedPlatform = isWindows && OperatingSystem.IsWindowsVersionAtLeast(10) &&
+            RuntimeInformation.OSArchitecture == Architecture.X64 &&
+            RuntimeInformation.ProcessArchitecture == Architecture.X64;
+        var sunshine = StreamingHostLocator.FindSunshineExecutable();
+        var apollo = StreamingHostLocator.FindApolloExecutable();
         string? displayWizard = null;
         try
         {
@@ -639,7 +683,9 @@ internal static class HostDiagnostics
                 SunshineConfigurator.ResolveConfigurationDirectory(settings.SunshineConfigDirectory, "sunshine"));
 
         var recommendation = !isWindows
-            ? "Run this companion on the Windows streaming host."
+            ? "Run this companion on a Windows 10/11 x64 streaming host."
+            : !supportedPlatform
+                ? "This package requires Windows 10/11 x64. ARM64 needs architecture-matched Sunshine, companion, and display-driver packages that are not bundled yet."
             : recoveryPending
                 ? "An earlier session did not restore its display topology. Run `session recover` before streaming."
                 : settings.HostMode == "apollo" && apollo is null
@@ -667,6 +713,8 @@ internal static class HostDiagnostics
         return new HostDiagnosticReport(
             isWindows,
             Environment.OSVersion.VersionString,
+            architecture,
+            supportedPlatform,
             IsAdministrator(),
             settings.HostMode,
             sunshine,
@@ -685,9 +733,6 @@ internal static class HostDiagnostics
             nativeDisplayLifecycleReady,
             recommendation);
     }
-
-    private static string? FindExecutable(params string?[] candidates) =>
-        candidates.FirstOrDefault(candidate => !string.IsNullOrWhiteSpace(candidate) && File.Exists(candidate));
 
     private static bool SunshineLogReportsMissingViGEm(HostSettings settings)
     {

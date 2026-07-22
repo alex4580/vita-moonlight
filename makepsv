@@ -11,12 +11,14 @@ if [ -z "$title_id" ]; then
 fi
 
 # Configuración
-# Leer la IP de la PS Vita desde ip_vita.txt
-if [ ! -f ip_vita.txt ]; then
-    echo "[!] No se encontró el archivo ip_vita.txt. Por favor, crea el archivo con la IP de tu PS Vita."
-    exit 1
+# Read the Vita address from VITA_IP or the ignored local ip_vita.txt file.
+if [ -z "$VITA_IP" ]; then
+    if [ ! -f ip_vita.txt ]; then
+        echo "[!] Define VITA_IP or create the ignored local ip_vita.txt file."
+        exit 1
+    fi
+    VITA_IP=$(head -n1 ip_vita.txt | tr -d '\r\n')
 fi
-VITA_IP=$(head -n1 ip_vita.txt | tr -d '\r\n')
 VITA_PORT=1337
 VITA_CONTROL_PORT=1338
 VPK_PATH="build/moonlight.vpk"

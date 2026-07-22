@@ -406,12 +406,51 @@ static int special_keys_menu() {
 static const char* controller_type_names[] = {"Xbox compatibility", "DS4 + motion/touchpad"};
 static int controller_type_values[] = {1, 2}; // 1: Xbox, 2: PS
 #define CONTROLLER_TYPE_COUNT 2
+static const char* touch_mode_names[] = {"Relative mouse", "DS4 Touchpad", "Mouse Absolute", "Tablet (Sunshine)"};
+static const char* stream_preset_names[] = {"Reliable", "Balanced", "High quality", "Custom"};
+
+enum {
+  STREAM_PRESET_RELIABLE,
+  STREAM_PRESET_BALANCED,
+  STREAM_PRESET_QUALITY,
+  STREAM_PRESET_CUSTOM
+};
+
+static int detect_stream_preset(void) {
+  if (config.stream.width != 960 || config.stream.height != 544 ||
+      !config.enable_ref_frame_invalidation || !config.enable_frame_pacer ||
+      config.enable_vita_vblank_wait) {
+    return STREAM_PRESET_CUSTOM;
+  }
+  if (config.stream.fps == 30 && config.stream.bitrate == 5000) return STREAM_PRESET_RELIABLE;
+  if (config.stream.fps == 60 && config.stream.bitrate == 8000) return STREAM_PRESET_BALANCED;
+  if (config.stream.fps == 60 && config.stream.bitrate == 12000) return STREAM_PRESET_QUALITY;
+  return STREAM_PRESET_CUSTOM;
+}
+
+static void apply_stream_preset(int preset) {
+  config.stream.width = 960;
+  config.stream.height = 544;
+  config.enable_ref_frame_invalidation = true;
+  config.enable_frame_pacer = true;
+  config.enable_vita_vblank_wait = false;
+  if (preset == STREAM_PRESET_RELIABLE) {
+    config.stream.fps = 30;
+    config.stream.bitrate = 5000;
+  } else if (preset == STREAM_PRESET_QUALITY) {
+    config.stream.fps = 60;
+    config.stream.bitrate = 12000;
+  } else {
+    config.stream.fps = 60;
+    config.stream.bitrate = 8000;
+  }
+}
 
 static int get_controller_type_index(int value) {
   for (int i = 0; i < CONTROLLER_TYPE_COUNT; ++i) {
     if (controller_type_values[i] == value) return i;
   }
-  return 1; // Default to PlayStation if not found
+  return 0; // Default to the broadest Windows/XInput compatibility
 }
 
 /*
@@ -420,6 +459,9 @@ static int get_controller_type_index(int value) {
 
 enum {
   SETTINGS_RESOLUTION = 100,
+  SETTINGS_STREAM_PRESET,
+  SETTINGS_STREAM_HELP,
+  SETTINGS_INPUT_HELP,
   SETTINGS_FPS,
   SETTINGS_BITRATE,
   SETTINGS_SOPS,
@@ -453,6 +495,7 @@ enum {
 
 enum {
   SETTINGS_VIEW_RESOLUTION,
+  SETTINGS_VIEW_STREAM_PRESET,
   SETTINGS_VIEW_FPS,
   SETTINGS_VIEW_BITRATE,
   SETTINGS_VIEW_SOPS,
@@ -523,15 +566,33 @@ static int settings_loop(int id, void *context, const input_data *input) {
   char current[256];
   int new_idx;
 
+  if (id == SETTINGS_STREAM_HELP &&
+      (input->buttons & config.btn_confirm) != 0 && (input->buttons & SCE_CTRL_HOLD) == 0) {
+    display_alert(
+        "Balanced: 960x544, 60 FPS, 8 Mbps.\n"
+        "Reliable: 30 FPS/5 Mbps for weaker Wi-Fi.\n"
+        "High quality: 12 Mbps reduces compression but needs a clean link.\n"
+        "Frame pacing smooths delivery; vblank can add latency.",
+        NULL, 1, NULL, NULL);
+    return 0;
+  }
+  if (id == SETTINGS_INPUT_HELP &&
+      (input->buttons & config.btn_confirm) != 0 && (input->buttons & SCE_CTRL_HOLD) == 0) {
+    display_alert(
+        "Xbox is the most compatible default.\n"
+        "DS4 adds gyro/touchpad but may need Steam Input.\n"
+        "Relative mouse works broadly. DS4 touchpad needs DS4 mode; tablet needs Sunshine touch support.",
+        NULL, 1, NULL, NULL);
+    return 0;
+  }
+
   if (id == SETTINGS_TOUCH_MODE_SELECT) {
     if ((input->buttons & config.btn_confirm) == 0 || input->buttons & SCE_CTRL_HOLD) {
-      static const char* mode_names[] = {"Off", "DS4 Touchpad", "Mouse Absolute", "Tablet (Sunshine)"};
-      strcpy(menu[SETTINGS_VIEW_IDX[SETTINGS_VIEW_TOUCH_MODE_SELECT]].subname, mode_names[config.touchscreen_mode]);
+      strcpy(menu[SETTINGS_VIEW_IDX[SETTINGS_VIEW_TOUCH_MODE_SELECT]].subname, touch_mode_names[config.touchscreen_mode]);
       return 0;
     }
     config.touchscreen_mode = (config.touchscreen_mode + 1) % 4;
-    static const char* mode_names[] = {"Off", "DS4 Touchpad", "Mouse Absolute", "Tablet (Sunshine)"};
-    strcpy(menu[SETTINGS_VIEW_IDX[SETTINGS_VIEW_TOUCH_MODE_SELECT]].subname, mode_names[config.touchscreen_mode]);
+    strcpy(menu[SETTINGS_VIEW_IDX[SETTINGS_VIEW_TOUCH_MODE_SELECT]].subname, touch_mode_names[config.touchscreen_mode]);
     // Solo activar touchabsolute_enable en modo Mouse Absolute
     touchabsolute_enable(config.touchscreen_mode == 2);
     did_change = 1;
@@ -602,6 +663,15 @@ static int settings_loop(int id, void *context, const input_data *input) {
   }
 
   switch (id) {
+    case SETTINGS_STREAM_PRESET: {
+      int preset = detect_stream_preset();
+      if (!left && !right) break;
+      if (preset == STREAM_PRESET_CUSTOM) preset = STREAM_PRESET_BALANCED;
+      else preset = (preset + (left ? 2 : 1)) % 3;
+      apply_stream_preset(preset);
+      did_change = 1;
+      break;
+    }
     case SETTINGS_CONTROLLER_TYPE: {
       int idx = get_controller_type_index(config.controller_type);
       if (!left && !right) {
@@ -682,11 +752,11 @@ static int settings_loop(int id, void *context, const input_data *input) {
         int ret;
         if ((ret = ime_dialog_number(value, "Enter bitrate: ", "")) == 0) {
           int bitrate = atoi(value);
-          if (bitrate) {
+          if (bitrate >= 1000 && bitrate <= 30000) {
             config.stream.bitrate = bitrate;
             did_change = 1;
           } else {
-            display_error("Incorrect bitrate entered: %s", value);
+            display_error("Bitrate must be 1000-30000 Kbps: %s", value);
           }
         }
       }
@@ -910,6 +980,8 @@ static int settings_loop(int id, void *context, const input_data *input) {
   sprintf(current, "%dx%d", config.stream.width, config.stream.height);
   MENU_REPLACE(SETTINGS_VIEW_RESOLUTION, current);
 
+  MENU_REPLACE(SETTINGS_VIEW_STREAM_PRESET, stream_preset_names[detect_stream_preset()]);
+
   sprintf(current, "%d", config.stream.fps);
   MENU_REPLACE(SETTINGS_VIEW_FPS, current);
 
@@ -986,8 +1058,7 @@ static int settings_loop(int id, void *context, const input_data *input) {
   MENU_REPLACE(SETTINGS_VIEW_MOUSE_ACCEL, current);
 
   // Eliminar subnames antiguos de modos táctiles
-  static const char* mode_names[] = {"Off", "DS4 Touchpad", "Mouse Absolute", "Tablet (Sunshine)"};
-  strcpy(menu[SETTINGS_VIEW_IDX[SETTINGS_VIEW_TOUCH_MODE_SELECT]].subname, mode_names[config.touchscreen_mode]);
+  strcpy(menu[SETTINGS_VIEW_IDX[SETTINGS_VIEW_TOUCH_MODE_SELECT]].subname, touch_mode_names[config.touchscreen_mode]);
   // No actualizar subnames de absolute_mouse ni touchscreen_mode boolean
   // ...resto de actualizaciones de subname...
   return 0;
@@ -1007,7 +1078,7 @@ static int settings_back(void *context) {
 // Eliminado: hotkeys_menu y referencias, ya que los atajos ahora son fijos
 
 int ui_settings_menu() {
-  menu_entry menu[32];
+  menu_entry menu[48];
   int idx = 0;
 #define MENU_CATEGORY(NAME) \
   do { \
@@ -1027,13 +1098,15 @@ int ui_settings_menu() {
   } while(0)
 
   MENU_CATEGORY("Stream");
+  MENU_ENTRY(SETTINGS_STREAM_PRESET, SETTINGS_VIEW_STREAM_PRESET, "Streaming preset", ICON_LEFT_RIGHT_ARROWS);
+  menu[idx++] = (menu_entry) { .name = "What do these settings change?", .id = SETTINGS_STREAM_HELP };
   MENU_ENTRY(SETTINGS_RESOLUTION, SETTINGS_VIEW_RESOLUTION, "Resolution", ICON_LEFT_RIGHT_ARROWS);
   MENU_ENTRY(SETTINGS_FPS, SETTINGS_VIEW_FPS, "FPS", ICON_LEFT_RIGHT_ARROWS);
   MENU_ENTRY(SETTINGS_BITRATE, SETTINGS_VIEW_BITRATE, "Bitrate", "");
-  MENU_ENTRY(SETTINGS_SOPS, SETTINGS_VIEW_SOPS, "Change graphical game settings for performance", "");
-  MENU_ENTRY(SETTINGS_ENABLE_FRAME_INVAL, SETTINGS_VIEW_ENABLE_FRAME_INVAL, "Enable reference frame invalidation", "");
-  MENU_ENTRY(SETTINGS_ENABLE_STREAM_OPTIMIZE, SETTINGS_VIEW_ENABLE_STREAM_OPTIMIZE, "Enable stream optimization", "");
-  MENU_ENTRY(SETTINGS_ENABLE_VITA_VBLANK_WAIT, SETTINGS_VIEW_ENABLE_VITA_VBLANK_WAIT, "Enable VITA vblank", "");
+  MENU_ENTRY(SETTINGS_SOPS, SETTINGS_VIEW_SOPS, "Let host optimize game settings", "");
+  MENU_ENTRY(SETTINGS_ENABLE_FRAME_INVAL, SETTINGS_VIEW_ENABLE_FRAME_INVAL, "Recover after packet loss", "");
+  MENU_ENTRY(SETTINGS_ENABLE_STREAM_OPTIMIZE, SETTINGS_VIEW_ENABLE_STREAM_OPTIMIZE, "Remote-network optimization", "");
+  MENU_ENTRY(SETTINGS_ENABLE_VITA_VBLANK_WAIT, SETTINGS_VIEW_ENABLE_VITA_VBLANK_WAIT, "Wait for display vblank", "");
 
 
   MENU_ENTRY(SETTINGS_ENABLE_FRAME_PACER, SETTINGS_VIEW_ENABLE_FRAME_PACER, "Enable frame pacer", "");
@@ -1046,6 +1119,7 @@ int ui_settings_menu() {
   MENU_ENTRY(SETTINGS_SHOW_FPS, SETTINGS_VIEW_SHOW_FPS, "Display streaming FPS", "");
 
   MENU_CATEGORY("Input");
+  menu[idx++] = (menu_entry) { .name = "Controller and touch guide", .id = SETTINGS_INPUT_HELP };
 
   MENU_ENTRY(SETTINGS_ENABLE_MOTION_CONTROLS, SETTINGS_VIEW_ENABLE_MOTION_CONTROLS, "Enable Gyroscope reporting", "");
   MENU_ENTRY(SETTINGS_ENABLE_DOUBLE_TAP_SPRINT, SETTINGS_VIEW_ENABLE_DOUBLE_TAP_SPRINT, "Enable double tap to sprint", "");
@@ -1076,6 +1150,7 @@ int ui_settings_menu() {
   // Resolution
   sprintf(current, "%dx%d", config.stream.width, config.stream.height);
   strcpy(menu[SETTINGS_VIEW_IDX[SETTINGS_VIEW_RESOLUTION]].subname, current);
+  strcpy(menu[SETTINGS_VIEW_IDX[SETTINGS_VIEW_STREAM_PRESET]].subname, stream_preset_names[detect_stream_preset()]);
   // FPS
   sprintf(current, "%d", config.stream.fps);
   strcpy(menu[SETTINGS_VIEW_IDX[SETTINGS_VIEW_FPS]].subname, current);
@@ -1090,8 +1165,7 @@ int ui_settings_menu() {
   swap_shoulder_buttons = config.swap_shoulder_buttons;
   strcpy(menu[SETTINGS_VIEW_IDX[SETTINGS_VIEW_SWAP_SHOULDER_BUTTONS]].subname, swap_shoulder_buttons ? "yes" : "no");
   // Touchscreen mode
-  static const char* mode_names[] = {"Off", "DS4 Touchpad", "Mouse Absolute", "Tablet (Sunshine)"};
-  strcpy(menu[SETTINGS_VIEW_IDX[SETTINGS_VIEW_TOUCH_MODE_SELECT]].subname, mode_names[config.touchscreen_mode]);
+  strcpy(menu[SETTINGS_VIEW_IDX[SETTINGS_VIEW_TOUCH_MODE_SELECT]].subname, touch_mode_names[config.touchscreen_mode]);
   // Puedes agregar aquí más inicializaciones si quieres que otras opciones también muestren su valor actual al abrir el menú
 
   settings_loop_setup = 1;

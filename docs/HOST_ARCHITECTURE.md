@@ -11,6 +11,14 @@ crash recovery.
 WinForms control panel and an optional CLI. It detects Sunshine or Apollo,
 ViGEmBus, the packaged signed virtual-display driver, and elevation state. Its
 recommended profile is 960x544, 60 FPS, 8000 Kbps, H.264, and SDR.
+The Vita's first-run controller is Xbox/XInput; H.264 reference-frame
+invalidation and client frame pacing are enabled for Wi-Fi resilience.
+
+Host discovery does not require the default installation directory. It checks
+explicit environment overrides, Sunshine's registered Windows service image,
+Program Files variants, and common per-user installation directories. The
+configuration directory follows the discovered executable unless explicitly
+overridden.
 
 For the bundled Sunshine version, the companion selects the virtual display by
 Sunshine's stable `device_id` and enables its native Windows display manager:
@@ -44,7 +52,8 @@ If a manual activation step fails, the saved physical topology is restored
 immediately. `session stop` restores it after the legacy application ends. A
 scheduled highest-privilege logon task invokes recovery after an interrupted
 manual transaction. The saved record is cleared only after a successful
-restore.
+restore. Recovery and rescue tasks allow battery operation and delayed starts,
+so a laptop does not postpone recovery until it is connected to AC power.
 
 The driver is installed or updated explicitly by the installer/control panel;
 stream start never installs a driver. Apollo mode delegates virtual-display
@@ -62,8 +71,8 @@ The close-game action captures the foreground window, refuses Windows shell,
 Steam, Sunshine, companion, and critical-system process names, requests a
 normal window close, then terminates only that process tree if it remains alive
 after 1.5 seconds. The display-recovery action stops Sunshine, restores any
-saved manual transaction, forces an available physical topology, reloads the
-signed VDD, reapplies the physical-only topology after driver enumeration, and
+saved manual transaction, enables every connected physical display when none
+is active, reloads the signed VDD, reapplies the physical-only topology after driver enumeration, and
 starts Sunshine. Results are written beneath `%ProgramData%\VitaMoonlight` for
 the control panel and diagnostics.
 
@@ -72,6 +81,12 @@ the control panel and diagnostics.
 The client advertises a conventional controller in Xbox mode and DS4 motion
 and touchpad capabilities only in the PS4 profile. Sensor samples are converted
 to Moonlight protocol units and rate-limited to the host request.
+
+New installs use the Balanced 960x544/60/8 Mbps preset. Reliable and High
+quality presets adjust frame rate/bitrate without increasing resolution above
+the Vita panel. Configuration values are range-checked before decoder/input
+initialization so an old or damaged INI file cannot select unsafe packet,
+video, motion, controller, or touch values.
 
 The in-stream overlay is rendered by vita2d over decoded video. While open, it
 sends a neutral controller state and consumes Vita input locally. Settings are

@@ -7,6 +7,6 @@ venv/*
 host/**/bin/
 host/**/obj/
 mdns_discovery.py
-.vscode/tasks.json
+.vscode/
+ip_vita.txt
 psp2core_tmp.psp2dmp
-.vscode/settings.json

@@ -267,6 +267,8 @@ internal sealed class HostControlPanel : Form
         AddDocumentButton(actions, "Open setup guide", "README.md");
         AddDocumentButton(actions, "Open acceptance test", "END_TO_END_TEST.md");
         AddDocumentButton(actions, "Open release checklist", "FINAL_RELEASE_CHECKLIST.md");
+        AddDocumentButton(actions, "Compatibility", "COMPATIBILITY.md");
+        AddDocumentButton(actions, "Vita settings guide", "VITA_SETTINGS_GUIDE.md");
         AddPageControl(page, actions);
         AddPageControl(page, CreateInfoCard(
             "Black-screen recovery",

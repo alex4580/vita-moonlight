@@ -18,7 +18,9 @@ arguments launches the control panel and keeps it open.
 6. Click **Run health check**. Resolve any item that is not ready before
    pairing the Vita.
 
-The installer and control panel are safe to rerun after an update. A portable
+The x64 installer supports Windows 10/11 on Intel/AMD CPUs and the control
+panel refuses unsupported platform combinations before declaring the host
+ready. See [COMPATIBILITY.md](COMPATIBILITY.md). The installer and control panel are safe to rerun after an update. A portable
 ZIP is also available: extract the whole folder and double-click
 `VitaMoonlight.Host.exe`.
 
@@ -120,17 +122,19 @@ exclusive-fullscreen, HDR, Vulkan, or capture transition is more likely than a
 dead Vita client. Escalate to **End Sunshine app**, then **Recover display +
 Sunshine** only if the earlier action does not restore video.
 
-For motion-heavy games, begin at 960x544/60 and 8 Mbps. Try 12 Mbps on a strong
-network or 5 Mbps/30 FPS when Wi-Fi is constrained. The Vita client migrates
-old native-resolution 5 Mbps configurations to the new 8 Mbps default once.
+For motion-heavy games, begin with the Vita's **Balanced** preset at
+960x544/60 and 8 Mbps. Try **High quality** (12 Mbps) on a strong network or
+**Reliable** (5 Mbps/30 FPS) when Wi-Fi is constrained. The in-app help and
+`VITA_SETTINGS_GUIDE.md` explain the quality, latency, and compatibility costs.
 
 ## Controller, gyro, touch, and keyboard
 
-- **Xbox** mode provides the conventional XInput-compatible path used by most
-  games and Steam Big Picture.
+- **Xbox** mode is the first-run default and provides the conventional
+  XInput-compatible path used by most games and Steam Big Picture.
 - **PS4 + gyro** provides DS4 motion and touchpad capabilities. Sunshine must
   see ViGEmBus running before it starts.
-- Touch modes are **Off**, **DS4 Touchpad**, **Absolute mouse**, and **Tablet**.
+- Touch modes are **Relative mouse**, **DS4 Touchpad**, **Absolute mouse**, and
+  **Tablet**.
 - **START + Left** opens the floating keyboard.
 
 If Sunshine's web UI reports that ViGEmBus is missing, run **Run health check**.
@@ -169,7 +173,8 @@ Other supported commands include:
 
 Useful overrides are `--config-dir PATH`, `--driver-bundle PATH`, and
 `--display-match TEXT`. Environment overrides include `SUNSHINE_PATH`,
-`APOLLO_PATH`, `DISPLAYWIZARD_PATH`, and `VITA_MOONLIGHT_STATE_DIR`.
+`SUNSHINE_CONFIG_DIR`, `APOLLO_PATH`, `APOLLO_CONFIG_DIR`,
+`DISPLAYWIZARD_PATH`, and `VITA_MOONLIGHT_STATE_DIR`.
 
 Configuration creates `apps.json.vita-moonlight.backup` once, removes obsolete
 prep commands marked `VitaMoonlight.Host`, and preserves unrelated applications
@@ -187,3 +192,5 @@ dotnet run --project host\VitaMoonlight.Host\VitaMoonlight.Host.csproj -c Releas
 
 Use [END_TO_END_TEST.md](END_TO_END_TEST.md) for the functional acceptance pass
 and [FINAL_RELEASE_CHECKLIST.md](FINAL_RELEASE_CHECKLIST.md) for final sign-off.
+Host/platform coverage is in [COMPATIBILITY.md](COMPATIBILITY.md), and Vita-side
+tuning is in `VITA_SETTINGS_GUIDE.md` in the installed package.

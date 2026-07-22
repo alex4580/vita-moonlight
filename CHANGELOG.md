@@ -1,5 +1,20 @@
 ## 0.14.0
 
+* Added Reliable, Balanced, and High quality Vita streaming presets plus
+  on-device explanations for resolution, FPS, bitrate, frame pacing, vblank,
+  controller, and touch tradeoffs.
+* New installations default to the compatibility-first Xbox/XInput controller,
+  H.264 at native 960x544/60 and 8 Mbps, frame pacing, and H.264 packet-loss
+  recovery. Existing explicit controller and video selections are preserved.
+* Hardened legacy configuration parsing and validation so corrupt or obsolete
+  resolution, bitrate, packet-size, controller, touch, and motion values fall
+  back safely instead of destabilizing the Vita client.
+* Improved Windows portability across custom Sunshine locations, reordered
+  display logs, laptops on battery, multiple physical monitors, and stale
+  rescue-agent processes. Doctor now rejects unsupported OS/architecture
+  combinations explicitly.
+* Added Windows 2022/2025 build/self-test coverage and packaged compatibility
+  and Vita tuning guides.
 * Added an in-stream Vita overlay opened with START + L + R. It provides
   resume, disconnect, resolution, bitrate, frame-rate, controller, touch-mode,
   and FPS-counter controls. Double-press PS remains the forced LiveArea escape.

@@ -232,7 +232,7 @@ static const char *touch_mode_name(void) {
     case 1: return "DS4 touchpad";
     case 2: return "Absolute mouse";
     case 3: return "Tablet";
-    default: return "Off";
+    default: return "Relative mouse";
   }
 }
 

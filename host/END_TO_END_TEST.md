@@ -16,7 +16,7 @@ and host installer commit.
 4. On **Overview**, click **Apply recommended setup**.
 5. Click **Run health check**. Sunshine, ViGEmBus, Sunshine gamepad, driver
    bundle, virtual display, recovery task, and **Stream rescue** must report
-   ready. **App
+   ready. **Platform** must report an x64 OS/process. **App
    coverage** must say every Sunshine app, **Display lifecycle** must say native
    disconnect recovery enabled, and **Color mode** must say force SDR.
 
@@ -81,11 +81,15 @@ recovery safeguard.
 7. During another stream, double-press **PS**. The Vita must return to LiveArea
    even while PS capture is enabled. Resume Moonlight and verify PS capture is
    restored without a stuck PS/Xbox button.
-8. Set 960x544, 60 FPS, and 8 Mbps. Reconnect and confirm the values persist.
-9. Run a 20-minute motion-heavy stream. Check fine textures, camera pans,
+8. In the normal Vita settings screen select **Reliable**, **Balanced**, and
+   **High quality** in turn. Verify they set 960x544/30/5 Mbps,
+   960x544/60/8 Mbps, and 960x544/60/12 Mbps respectively. Change bitrate
+   manually and verify the preset reads **Custom** without discarding it.
+9. Select **Balanced**, reconnect, and confirm the values persist.
+10. Run a 20-minute motion-heavy stream. Check fine textures, camera pans,
    frame pacing, audio, reconnect behavior, and the FPS counter. Repeat at 12
    Mbps on a strong network and at 5 Mbps/30 FPS on constrained Wi-Fi.
-10. Confirm the 8 Mbps native profile has materially fewer motion artifacts than
+11. Confirm the 8 Mbps native profile has materially fewer motion artifacts than
    the former 5 Mbps default and does not produce sustained decode errors.
 
 For the reported Doom Eternal case, run one pass in borderless SDR and one in
@@ -109,9 +113,9 @@ on a black game frame alone.
 
 ## 6. Touch, keyboard, and host management
 
-1. Change each touch mode in the overlay: Off, DS4 Touchpad, Absolute mouse,
-   and Tablet. Verify the new mode persists and no confirm/cancel press leaks to
-   the host when the overlay closes.
+1. Change each touch mode in the overlay: Relative mouse, DS4 Touchpad,
+   Absolute mouse, and Tablet. Verify the new mode persists and no
+   confirm/cancel press leaks to the host when the overlay closes.
 2. In DS4 Touchpad mode test click, drag, and two-finger interaction.
 3. In Absolute mouse mode touch all four corners and verify pixel alignment.
 4. In Tablet mode test contact and pressure in a compatible application.
@@ -126,10 +130,19 @@ on a black game frame alone.
    removed, their background process must stop, and the physical display layout
    must remain intact.
 3. Verify the release contains the VPK, Windows installer, portable host ZIP,
-   source archive, licenses, and `THIRD_PARTY_NOTICES.md`.
+   source archive, licenses, `COMPATIBILITY.md`, `VITA_SETTINGS_GUIDE.md`, and
+   `THIRD_PARTY_NOTICES.md`.
 4. Repeat sections 1 through 4 on a second clean PC using only release
    artifacts. No SDK, .NET runtime, PowerShell module, or manual driver download
    may be required.
+5. On a laptop, repeat task installation and sign-in recovery while running on
+   battery. Both recovery tasks must run rather than waiting for AC power.
+6. On a PC with two physical displays, disable both through the controlled test
+   path and run emergency recovery. Every connected physical display must be
+   available again and VDD must be inactive.
+7. If available, test an existing Sunshine installation outside the default
+   Program Files directory. The companion must discover the registered service
+   path and its adjacent `config` directory without installing a second copy.
 
 ## Optional command-line equivalents
 

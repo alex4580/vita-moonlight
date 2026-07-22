@@ -7,12 +7,15 @@
 set -e
 
 # Configuración
-# Leer IP desde ip_vita.txt si existe, si no usar valor por defecto
+# Read the Vita address from VITA_IP or the ignored local ip_vita.txt file.
 IP_FILE="$(dirname "$0")/ip_vita.txt"
-if [ -f "$IP_FILE" ]; then
+if [ -n "$VITA_IP" ]; then
+    FTP_HOST="$VITA_IP"
+elif [ -f "$IP_FILE" ]; then
     FTP_HOST=$(head -n 1 "$IP_FILE" | tr -d '\r\n')
 else
-    FTP_HOST="192.168.0.192"
+    echo "Define VITA_IP or create the ignored local ip_vita.txt file."
+    exit 1
 fi
 FTP_PORT="1337"
 FTP_USER="anonymous"

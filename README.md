@@ -26,9 +26,9 @@ not required for normal setup.
   absolute mouse, and Sunshine tablet touch modes.
 - A real in-stream Vita overlay for resume, disconnect, resolution, bitrate,
   frame rate, controller mode, touch mode, and the FPS counter.
-- A native default profile of 960x544, 60 FPS, H.264, and 8 Mbps. Existing
-  native-resolution installations using the old 5 Mbps default are migrated
-  automatically to reduce motion artifacts.
+- A compatibility-first **Balanced** profile: 960x544, 60 FPS, H.264, 8 Mbps,
+  packet-loss recovery, frame pacing, and an Xbox/XInput controller. Reliable
+  and High quality presets are available without manual bitrate entry.
 
 ## Install
 
@@ -52,7 +52,9 @@ the host activates it at the Vita's requested mode only for a stream.
 See the [Windows host guide](host/README.md) for installation, configuration,
 recovery, and troubleshooting. Release testing is documented in the
 [GUI-first acceptance test](host/END_TO_END_TEST.md); use the
-[final-release checklist](host/FINAL_RELEASE_CHECKLIST.md) for sign-off.
+[final-release checklist](host/FINAL_RELEASE_CHECKLIST.md) for sign-off. See
+[host compatibility](host/COMPATIBILITY.md) and the
+[Vita settings guide](docs/VITA_SETTINGS_GUIDE.md) before changing defaults.
 
 ## Vita controls while streaming
 
@@ -83,10 +85,17 @@ physical display.
 
 ## Recommended streaming settings
 
-Start with **960x544, 60 FPS, 8 Mbps**. It matches the Vita panel, avoids
+Start with the **Balanced** preset: **960x544, 60 FPS, 8 Mbps**. It matches the Vita panel, avoids
 wasting bandwidth on pixels the device cannot display, and gives the H.264
 encoder enough headroom for motion. If Wi-Fi is unstable, try 5 Mbps or 30 FPS.
 On a strong local network, 12 Mbps can reduce artifacts further.
+
+The settings screen explains the tradeoffs and provides **Reliable**
+(960x544/30 at 5 Mbps), **Balanced**, and **High quality** (960x544/60 at
+12 Mbps) presets. Higher bitrate improves compression only while the wireless
+link can sustain it; once packets queue or drop, quality and responsiveness get
+worse together. Resolution above the Vita's native panel usually adds decoder
+and network work with little visible benefit.
 
 The Windows companion forces the Vita virtual display to SDR by default. This
 does not permanently disable HDR on the physical monitor; the saved physical
@@ -94,14 +103,14 @@ layout and color behavior return when the stream ends.
 
 ## Controller and touch profiles
 
-- **Xbox** exposes a conventional XInput controller for broad Windows and
-  Steam Big Picture compatibility.
+- **Xbox** is the first-run default and exposes a conventional XInput
+  controller for broad Windows and Steam Big Picture compatibility.
 - **PS4 + gyro** exposes DS4 motion and touchpad capabilities. Gyroscope values
   are sent in degrees per second and acceleration in metres per second squared,
   at no more than the host-requested rate.
-- **DS4 Touchpad**, **Absolute mouse**, and **Tablet** provide different ways to
-  map the Vita touchscreen. These can be changed from the in-stream overlay or
-  the normal settings screen.
+- **Relative mouse** is the broadest touchscreen default. **DS4 Touchpad**,
+  **Absolute mouse**, and **Tablet** provide specialized mappings. These can be
+  changed from the in-stream overlay or the normal settings screen.
 
 ## If something goes wrong
 
@@ -129,6 +138,10 @@ Vita requirements are VitaSDK plus initialized submodules:
 git submodule update --init --recursive
 ./makepsv
 ```
+
+Developer deploy/debug helpers read the Vita address from `VITA_IP` or a local
+`ip_vita.txt`. The local file is intentionally ignored and must never be
+committed with a tester's private-LAN address.
 
 Build the Windows companion on Windows with .NET 8:
 

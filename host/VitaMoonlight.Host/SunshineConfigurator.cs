@@ -129,14 +129,7 @@ internal static class SunshineConfigurator
 
     internal static string ResolveConfigurationDirectory(string? configuredDirectory, string hostMode)
     {
-        if (!string.IsNullOrWhiteSpace(configuredDirectory))
-        {
-            return Path.GetFullPath(configuredDirectory);
-        }
-
-        var programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
-        var folder = hostMode.Equals("apollo", StringComparison.OrdinalIgnoreCase) ? "Apollo" : "Sunshine";
-        return Path.Combine(programFiles, folder, "config");
+        return StreamingHostLocator.ResolveConfigurationDirectory(configuredDirectory, hostMode);
     }
 
     internal static void UpdateSunshineConfiguration(List<string> lines)
@@ -180,26 +173,119 @@ internal static class SunshineConfigurator
             return null;
         }
 
-        var matches = Regex.Matches(
-            log,
-            "\\\"device_id\\\"\\s*:\\s*\\\"(?<id>\\{[^\\\"]+\\})\\\"(?:(?!\\\"device_id\\\").)*?\\\"friendly_name\\\"\\s*:\\s*\\\"(?<name>[^\\\"]*)\\\"",
-            RegexOptions.Singleline | RegexOptions.CultureInvariant);
-        for (var index = matches.Count - 1; index >= 0; index--)
+        var candidates = ParseDisplayCandidates(log);
+        for (var index = candidates.Count - 1; index >= 0; index--)
         {
-            var id = matches[index].Groups["id"].Value;
-            var name = matches[index].Groups["name"].Value;
-            var identity = $"{name} {id}";
+            var candidate = candidates[index];
+            var identity = $"{candidate.Name} {candidate.Id} {candidate.Raw}";
             if (!string.IsNullOrWhiteSpace(displayMatch)
                 ? identity.Contains(displayMatch, StringComparison.OrdinalIgnoreCase)
-                : identity.Contains("VDD by MTT", StringComparison.OrdinalIgnoreCase) ||
-                  identity.Contains("Virtual Display", StringComparison.OrdinalIgnoreCase) ||
-                  identity.Contains("IddSample", StringComparison.OrdinalIgnoreCase))
+                : IsManagedDisplayIdentity(identity))
             {
-                return id;
+                return candidate.Id;
             }
         }
         return null;
     }
+
+    private static IReadOnlyList<SunshineDisplayCandidate> ParseDisplayCandidates(string log)
+    {
+        var candidates = new List<SunshineDisplayCandidate>();
+        const string marker = "Currently available display devices:";
+        for (var markerIndex = log.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+             markerIndex >= 0;
+             markerIndex = log.IndexOf(marker, markerIndex + marker.Length, StringComparison.OrdinalIgnoreCase))
+        {
+            var arrayStart = log.IndexOf('[', markerIndex + marker.Length);
+            if (arrayStart < 0) continue;
+            var arrayEnd = FindJsonArrayEnd(log, arrayStart);
+            if (arrayEnd < 0) continue;
+            try
+            {
+                using var document = JsonDocument.Parse(log[arrayStart..(arrayEnd + 1)]);
+                foreach (var display in document.RootElement.EnumerateArray())
+                {
+                    if (!display.TryGetProperty("device_id", out var idElement)) continue;
+                    var id = idElement.GetString();
+                    if (string.IsNullOrWhiteSpace(id)) continue;
+                    var name = display.TryGetProperty("friendly_name", out var nameElement)
+                        ? nameElement.GetString() ?? string.Empty
+                        : string.Empty;
+                    candidates.Add(new SunshineDisplayCandidate(id, name, display.GetRawText()));
+                }
+            }
+            catch (JsonException)
+            {
+                // Older or development Sunshine builds may emit non-strict JSON; regex fallback below handles those.
+            }
+        }
+        if (candidates.Count > 0) return candidates;
+
+        var idFirst = Regex.Matches(
+            log,
+            "\\\"device_id\\\"\\s*:\\s*\\\"(?<id>\\{[^\\\"]+\\})\\\"(?:(?!\\\"device_id\\\").)*?\\\"friendly_name\\\"\\s*:\\s*\\\"(?<name>[^\\\"]*)\\\"",
+            RegexOptions.Singleline | RegexOptions.CultureInvariant);
+        foreach (Match match in idFirst)
+        {
+            candidates.Add(new SunshineDisplayCandidate(
+                match.Groups["id"].Value,
+                match.Groups["name"].Value,
+                match.Value));
+        }
+        var nameFirst = Regex.Matches(
+            log,
+            "\\\"friendly_name\\\"\\s*:\\s*\\\"(?<name>[^\\\"]*)\\\"(?:(?!\\\"friendly_name\\\").)*?\\\"device_id\\\"\\s*:\\s*\\\"(?<id>\\{[^\\\"]+\\})\\\"",
+            RegexOptions.Singleline | RegexOptions.CultureInvariant);
+        foreach (Match match in nameFirst)
+        {
+            if (candidates.Any(candidate => candidate.Id.Equals(match.Groups["id"].Value, StringComparison.OrdinalIgnoreCase))) continue;
+            candidates.Add(new SunshineDisplayCandidate(
+                match.Groups["id"].Value,
+                match.Groups["name"].Value,
+                match.Value));
+        }
+        return candidates;
+    }
+
+    private static int FindJsonArrayEnd(string text, int start)
+    {
+        var depth = 0;
+        var inString = false;
+        var escaped = false;
+        for (var index = start; index < text.Length; index++)
+        {
+            var character = text[index];
+            if (inString)
+            {
+                if (escaped)
+                {
+                    escaped = false;
+                }
+                else if (character == '\\')
+                {
+                    escaped = true;
+                }
+                else if (character == '"')
+                {
+                    inString = false;
+                }
+                continue;
+            }
+            if (character == '"') inString = true;
+            else if (character == '[') depth++;
+            else if (character == ']' && --depth == 0) return index;
+        }
+        return -1;
+    }
+
+    private static bool IsManagedDisplayIdentity(string identity) =>
+        identity.Contains("VDD by MTT", StringComparison.OrdinalIgnoreCase) ||
+        identity.Contains("Virtual Display", StringComparison.OrdinalIgnoreCase) ||
+        identity.Contains("IddSample", StringComparison.OrdinalIgnoreCase) ||
+        (identity.Contains("MTT", StringComparison.OrdinalIgnoreCase) &&
+         identity.Contains("1337", StringComparison.OrdinalIgnoreCase));
+
+    private sealed record SunshineDisplayCandidate(string Id, string Name, string Raw);
 
     internal static bool IsNativeDisplayManagementReady(string configDirectory)
     {

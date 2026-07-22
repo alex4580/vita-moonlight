@@ -2,6 +2,9 @@
 <changeinfo>
 <changes app_ver="00.14"><![CDATA[
 ## 0.14.0<br>
+* Add Reliable, Balanced, and High quality streaming presets with on-device help.<br>
+* Default new installs to Xbox compatibility, H.264 packet-loss recovery, 960x544/60, and 8 Mbps.<br>
+* Validate old configuration values and improve Windows host portability.<br>
 * Add an in-stream settings and disconnect overlay.<br>
 * Use the Vita virtual display for every Sunshine app, including Steam Big Picture.<br>
 * Force SDR during Vita virtual-display sessions.<br>

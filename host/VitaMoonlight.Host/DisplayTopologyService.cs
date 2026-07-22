@@ -145,15 +145,7 @@ internal sealed class DisplayTopologyService
     {
         var configuration = WindowsDisplayNative.Query(WindowsDisplayNative.QueryAllPaths);
         var displays = Describe(configuration);
-        var activePhysical = displays
-            .Where(display => display.IsActive && !IsManagedVirtualDisplay(display))
-            .ToArray();
-        var selected = activePhysical.Length > 0
-            ? activePhysical
-            : displays
-                .Where(display => display.IsAvailable && !IsManagedVirtualDisplay(display))
-                .Take(1)
-                .ToArray();
+        var selected = SelectPhysicalDisplaysForRecovery(displays);
         if (selected.Length == 0)
         {
             throw new InvalidOperationException("No available physical display was found for emergency recovery.");
@@ -166,6 +158,15 @@ internal sealed class DisplayTopologyService
         return selected
             .Select(display => string.IsNullOrWhiteSpace(display.FriendlyName) ? display.DevicePath : display.FriendlyName)
             .ToArray();
+    }
+
+    internal static DisplayDescriptor[] SelectPhysicalDisplaysForRecovery(IEnumerable<DisplayDescriptor> displays)
+    {
+        var availablePhysical = displays
+            .Where(display => display.IsAvailable && !IsManagedVirtualDisplay(display))
+            .ToArray();
+        var activePhysical = availablePhysical.Where(display => display.IsActive).ToArray();
+        return activePhysical.Length > 0 ? activePhysical : availablePhysical;
     }
 
     internal void SaveRecovery(DisplayRecoveryRecord recovery)

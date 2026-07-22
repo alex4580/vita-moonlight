@@ -14,6 +14,8 @@ internal static class HostRecoveryAgentManager
 {
     internal const string TaskName = "Vita Moonlight stream rescue agent";
     internal const string MutexName = @"Local\VitaMoonlight.StreamRescueAgent";
+    internal const string WindowCaption = "Vita Moonlight stream rescue agent";
+    private const int WmClose = 0x0010;
 
     internal static int Run(bool hideConsole)
     {
@@ -67,8 +69,8 @@ internal static class HostRecoveryAgentManager
         if (IsInstalled())
         {
             RunTask("/End", "/TN", TaskName);
-            for (var attempt = 0; attempt < 20 && IsRunning(); attempt++) Thread.Sleep(100);
         }
+        StopCurrentSessionAgent();
         var taskCommand = $"\"{Path.GetFullPath(executablePath)}\" agent run --background";
         var createExitCode = RunTask(
             "/Create", "/F",
@@ -94,10 +96,10 @@ internal static class HostRecoveryAgentManager
 
     internal static void Uninstall()
     {
-        if (!IsInstalled()) return;
-        RunTask("/End", "/TN", TaskName);
-        for (var attempt = 0; attempt < 20 && IsRunning(); attempt++) Thread.Sleep(100);
-        if (RunTask("/Delete", "/F", "/TN", TaskName) != 0)
+        var installed = IsInstalled();
+        if (installed) RunTask("/End", "/TN", TaskName);
+        StopCurrentSessionAgent();
+        if (installed && RunTask("/Delete", "/F", "/TN", TaskName) != 0)
         {
             throw new InvalidOperationException("Windows could not remove the stream rescue agent task.");
         }
@@ -151,6 +153,37 @@ internal static class HostRecoveryAgentManager
         }
     }
 
+    private static void StopCurrentSessionAgent()
+    {
+        var window = FindWindow(null, WindowCaption);
+        uint processId = 0;
+        if (window != IntPtr.Zero) GetWindowThreadProcessId(window, out processId);
+        if (window != IntPtr.Zero) PostMessage(window, WmClose, IntPtr.Zero, IntPtr.Zero);
+        for (var attempt = 0; attempt < 10 && IsRunning(); attempt++) Thread.Sleep(100);
+        if (IsRunning() && processId > 4 && processId != Environment.ProcessId)
+        {
+            try
+            {
+                using var process = Process.GetProcessById(checked((int)processId));
+                if (process.ProcessName.Equals("VitaMoonlight.Host", StringComparison.OrdinalIgnoreCase))
+                {
+                    process.Kill(entireProcessTree: false);
+                    process.WaitForExit(5000);
+                }
+            }
+            catch (Exception error) when (error is ArgumentException or InvalidOperationException or System.ComponentModel.Win32Exception)
+            {
+                // The final mutex check below reports a persistent agent with actionable guidance.
+            }
+        }
+        for (var attempt = 0; attempt < 20 && IsRunning(); attempt++) Thread.Sleep(100);
+        if (IsRunning())
+        {
+            throw new InvalidOperationException(
+                "An earlier stream rescue agent is still running. Sign out once, then repair the agent from the control panel.");
+        }
+    }
+
     private static void ConfigurePersistentTask()
     {
         var windows = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
@@ -160,6 +193,7 @@ internal static class HostRecoveryAgentManager
             "$task.Settings.ExecutionTimeLimit = 'PT0S'; " +
             "$task.Settings.DisallowStartIfOnBatteries = $false; " +
             "$task.Settings.StopIfGoingOnBatteries = $false; " +
+            "$task.Settings.StartWhenAvailable = $true; " +
             "Set-ScheduledTask -InputObject $task | Out-Null";
         using var process = new Process
         {
@@ -199,6 +233,16 @@ internal static class HostRecoveryAgentManager
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool ShowWindow(IntPtr window, int command);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern IntPtr FindWindow(string? className, string windowName);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool PostMessage(IntPtr window, int message, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
 }
 
 internal sealed class HostRecoveryAgentContext : ApplicationContext
@@ -219,6 +263,7 @@ internal sealed class HostRecoveryAgentContext : ApplicationContext
 
 internal sealed class HostRecoveryHotkeyWindow : NativeWindow, IDisposable
 {
+    private const int WmClose = 0x0010;
     private const int WmHotkey = 0x0312;
     private const int CloseForegroundHotkeyId = 1;
     private const int RecoverDisplayHotkeyId = 2;
@@ -232,7 +277,7 @@ internal sealed class HostRecoveryHotkeyWindow : NativeWindow, IDisposable
 
     internal HostRecoveryHotkeyWindow()
     {
-        CreateHandle(new CreateParams { Caption = "Vita Moonlight stream rescue agent" });
+        CreateHandle(new CreateParams { Caption = HostRecoveryAgentManager.WindowCaption });
         var modifiers = ModAlt | ModControl | ModShift | ModNoRepeat;
         if (!RegisterHotKey(Handle, CloseForegroundHotkeyId, modifiers, VkF12) ||
             !RegisterHotKey(Handle, RecoverDisplayHotkeyId, modifiers, VkF11))
@@ -244,6 +289,11 @@ internal sealed class HostRecoveryHotkeyWindow : NativeWindow, IDisposable
 
     protected override void WndProc(ref Message message)
     {
+        if (message.Msg == WmClose)
+        {
+            Application.ExitThread();
+            return;
+        }
         if (message.Msg == WmHotkey && Interlocked.CompareExchange(ref actionRunning, 1, 0) == 0)
         {
             var hotkeyId = message.WParam.ToInt32();
@@ -291,9 +341,12 @@ internal static class HostRecoveryActions
 {
     private static readonly HashSet<string> ProtectedProcessNames = new(StringComparer.OrdinalIgnoreCase)
     {
-        "csrss", "dwm", "explorer", "fontdrvhost", "lsass", "services", "sihost",
-        "smss", "steam", "sunshine", "sunshinesvc", "svchost", "system",
-        "taskhostw", "VitaMoonlight.Host", "wininit", "winlogon",
+        "applicationframehost", "apollo", "apollosvc", "audiodg", "csrss", "ctfmon",
+        "dwm", "explorer", "fontdrvhost", "lockapp", "logonui", "lsass", "runtimebroker",
+        "searchhost", "searchindexer", "securityhealthservice", "securityhealthsystray",
+        "services", "shellexperiencehost", "sihost", "smss", "startmenuexperiencehost",
+        "steam", "sunshine", "sunshinesvc", "svchost", "system", "taskhostw", "taskmgr",
+        "textinputhost", "userinit", "VitaMoonlight.Host", "wininit", "winlogon",
     };
 
     internal static bool IsProtectedProcessName(string processName) => ProtectedProcessNames.Contains(processName);
@@ -348,12 +401,13 @@ internal static class HostRecoveryActions
         var completed = new List<string>();
         var settings = HostSettings.Load();
         var sunshine = settings.HostMode.Equals("sunshine", StringComparison.OrdinalIgnoreCase);
+        var sunshineServiceName = StreamingHostLocator.FindSunshineServiceName();
 
         if (sunshine)
         {
             try
             {
-                WindowsServiceManager.Stop("SunshineService", "Sunshine");
+                WindowsServiceManager.Stop(sunshineServiceName, "Sunshine");
                 completed.Add("stopped Sunshine");
             }
             catch (Exception error)
@@ -411,7 +465,7 @@ internal static class HostRecoveryActions
         {
             try
             {
-                WindowsServiceManager.Start("SunshineService", "Sunshine");
+                WindowsServiceManager.Start(sunshineServiceName, "Sunshine");
                 completed.Add("started Sunshine");
             }
             catch (Exception error)

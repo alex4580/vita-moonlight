@@ -32,6 +32,7 @@ internal static class RecoveryTaskManager
         {
             throw new InvalidOperationException("Windows could not create the display-recovery task.");
         }
+        ConfigurePortableTaskSettings();
     }
 
     internal static void Uninstall()
@@ -68,5 +69,49 @@ internal static class RecoveryTaskManager
         }
         Task.WaitAll(output, error);
         return process.ExitCode;
+    }
+
+    private static void ConfigurePortableTaskSettings()
+    {
+        var powerShell = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.Windows),
+            "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+        var script =
+            $"$task = Get-ScheduledTask -TaskName '{TaskName}'; " +
+            "$task.Settings.ExecutionTimeLimit = 'PT5M'; " +
+            "$task.Settings.DisallowStartIfOnBatteries = $false; " +
+            "$task.Settings.StopIfGoingOnBatteries = $false; " +
+            "$task.Settings.StartWhenAvailable = $true; " +
+            "Set-ScheduledTask -InputObject $task | Out-Null";
+        using var process = new Process
+        {
+            StartInfo = new ProcessStartInfo
+            {
+                FileName = powerShell,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+            },
+        };
+        process.StartInfo.ArgumentList.Add("-NoProfile");
+        process.StartInfo.ArgumentList.Add("-NonInteractive");
+        process.StartInfo.ArgumentList.Add("-ExecutionPolicy");
+        process.StartInfo.ArgumentList.Add("Bypass");
+        process.StartInfo.ArgumentList.Add("-Command");
+        process.StartInfo.ArgumentList.Add(script);
+        process.Start();
+        var output = process.StandardOutput.ReadToEndAsync();
+        var error = process.StandardError.ReadToEndAsync();
+        if (!process.WaitForExit(30000))
+        {
+            process.Kill(true);
+            throw new TimeoutException("Windows did not finish configuring the display-recovery task.");
+        }
+        Task.WaitAll(output, error);
+        if (process.ExitCode != 0)
+        {
+            throw new InvalidOperationException("Windows could not configure display recovery for laptops and delayed logons.");
+        }
     }
 }

@@ -37,7 +37,13 @@ extern char* strdup(const char*);
 #define USER_PATHS "."
 #define DEFAULT_CONFIG_DIR "/.config"
 #define DEFAULT_CACHE_DIR "/.cache"
-#define CURRENT_CONFIG_VERSION 2
+#define CURRENT_CONFIG_VERSION 3
+#define DEFAULT_STREAM_WIDTH 960
+#define DEFAULT_STREAM_HEIGHT 544
+#define DEFAULT_STREAM_FPS 60
+#define DEFAULT_PACKET_SIZE 1024
+#define MIN_BITRATE_KBPS 1000
+#define MAX_BITRATE_KBPS 30000
 
 #define write_config_string(fd, key, value) fprintf(fd, "%s = %s\n", key, value)
 #define write_config_int(fd, key, value) fprintf(fd, "%s = %d\n", key, value)
@@ -56,12 +62,12 @@ int config_recommended_bitrate(int width, int height, int fps) {
     return fps >= 60 ? 8000 : 5000;
   }
   if (height <= 720) {
-    return fps >= 60 ? 7000 : 4500;
+    return fps >= 60 ? 10000 : 6000;
   }
   if (height < 1080) {
-    return fps >= 60 ? 9000 : 6000;
+    return fps >= 60 ? 12000 : 8000;
   }
-  return fps >= 60 ? 15000 : 10000;
+  return fps >= 60 ? 16000 : 10000;
 }
 
 bool inputAdded = false;
@@ -114,6 +120,8 @@ static int ini_handle(void *out, const char *section, const char *name,
       config->config_version = INT(value);
     } else if (strcmp(name, "address") == 0) {
       config->address = STR(value);
+    } else if (strcmp(name, "app") == 0) {
+      config->app = STR(value);
     } else if (strcmp(name, "width") == 0) {
       config->stream.width = INT(value);
     } else if (strcmp(name, "height") == 0) {
@@ -122,6 +130,8 @@ static int ini_handle(void *out, const char *section, const char *name,
       config->stream.fps = INT(value);
     } else if (strcmp(name, "bitrate") == 0) {
       config->stream.bitrate = INT(value);
+    } else if (strcmp(name, "packetsize") == 0) {
+      config->stream.packetSize = INT(value);
     } else if (strcmp(name, "sops") == 0) {
       config->sops = BOOL(value);
     } else if (strcmp(name, "localaudio") == 0) {
@@ -176,7 +186,44 @@ static int ini_handle(void *out, const char *section, const char *name,
 }
 
 bool config_file_parse(char* filename, PCONFIGURATION config) {
-  return ini_parse(filename, ini_handle, config);
+  return ini_parse(filename, ini_handle, config) == 0;
+}
+
+static void config_sanitize(PCONFIGURATION config) {
+  if (config->stream.width < 64 || config->stream.width > 1920 ||
+      config->stream.height < 64 || config->stream.height > 1080) {
+    config->stream.width = DEFAULT_STREAM_WIDTH;
+    config->stream.height = DEFAULT_STREAM_HEIGHT;
+  }
+  if (config->stream.fps < 24 || config->stream.fps > 60) {
+    config->stream.fps = DEFAULT_STREAM_FPS;
+  }
+  if (config->stream.bitrate != -1 &&
+      (config->stream.bitrate < MIN_BITRATE_KBPS || config->stream.bitrate > MAX_BITRATE_KBPS)) {
+    config->stream.bitrate = -1;
+  }
+  if (config->stream.packetSize < 512 || config->stream.packetSize > 1400) {
+    config->stream.packetSize = DEFAULT_PACKET_SIZE;
+  }
+  config->stream.streamingRemotely = config->stream.streamingRemotely ? 1 : 0;
+  if (config->controller_type != 1 && config->controller_type != 2) {
+    config->controller_type = 1;
+  }
+  if (config->touchscreen_mode < 0 || config->touchscreen_mode > 3) {
+    config->touchscreen_mode = 0;
+  }
+  if (config->mouse_acceleration < 15 || config->mouse_acceleration > 300) {
+    config->mouse_acceleration = 150;
+  }
+  if (!(config->motion_controls_scalar_x >= 0.1f && config->motion_controls_scalar_x <= 5.0f)) {
+    config->motion_controls_scalar_x = 1.2f;
+  }
+  if (!(config->motion_controls_scalar_y >= 0.1f && config->motion_controls_scalar_y <= 5.0f)) {
+    config->motion_controls_scalar_y = 0.8f;
+  }
+  if (config->double_tap_sprint_step_time < 50 || config->double_tap_sprint_step_time > 1000) {
+    config->double_tap_sprint_step_time = 200;
+  }
 }
 
 void config_save(const char* filename, PCONFIGURATION config) {
@@ -270,11 +317,11 @@ void config_parse(int argc, char* argv[], PCONFIGURATION config) {
   LiInitializeStreamConfiguration(&config->stream);
 
   config->config_version = 0;
-  config->stream.width = 960;
-  config->stream.height = 544;
-  config->stream.fps = 60;
+  config->stream.width = DEFAULT_STREAM_WIDTH;
+  config->stream.height = DEFAULT_STREAM_HEIGHT;
+  config->stream.fps = DEFAULT_STREAM_FPS;
   config->stream.bitrate = -1;
-  config->stream.packetSize = 1024;
+  config->stream.packetSize = DEFAULT_PACKET_SIZE;
   config->stream.streamingRemotely = 0;
   config->stream.audioConfiguration = AUDIO_CONFIGURATION_STEREO;
   config->stream.supportedVideoFormats = VIDEO_FORMAT_H264;
@@ -303,11 +350,14 @@ void config_parse(int argc, char* argv[], PCONFIGURATION config) {
   config->special_keys.size = 150;
 
   config->mouse_acceleration = 150;
-  config->enable_ref_frame_invalidation = false;
+  config->enable_ref_frame_invalidation = true;
   config->enable_vita_vblank_wait = false;
   config->enable_motion_controls = true;
   config->enable_psbutton_capture = true;
   config->enable_double_tap_sprint = false;
+  config->touchscreen_mode = 0;
+  config->controller_type = 1;
+  config->keyboard_layout = 0;
 
   config->double_tap_sprint_step_time = 200;
 
@@ -318,13 +368,8 @@ void config_parse(int argc, char* argv[], PCONFIGURATION config) {
   config->mapping = NULL;
   // No sobrescribir key_dir si ya fue asignado por main.c
   // config->key_dir[0] = 0;
-  // Valor por defecto: PS si no está asignado
-  if (config->controller_type < 1 || config->controller_type > 4) {
-    config->controller_type = 2;
-  }
-  // Valor por defecto: swap desactivado
-  // (si no está presente en config, será false por defecto)
-  // No es necesario forzar nada aquí
+  // Xbox/XInput is the compatibility-first controller default. Explicit saved
+  // selections are loaded below and preserved.
 
   char* config_file = config_path;
   if (config_file) {
@@ -332,8 +377,11 @@ void config_parse(int argc, char* argv[], PCONFIGURATION config) {
     vita_debug_log("[DEBUG] Configuración cargada: key_dir = %s, touchscreen_mode = %d, show_fps = %d", config->key_dir, config->touchscreen_mode, config->show_fps);
   }
 
+  config_sanitize(config);
+
   if (config->config_version < CURRENT_CONFIG_VERSION) {
-    if (config->stream.width <= 960 && config->stream.height <= 544 &&
+    if (config->config_version < 2 &&
+        config->stream.width <= 960 && config->stream.height <= 544 &&
         config->stream.bitrate > 0 && config->stream.bitrate <= 5000) {
       config->stream.bitrate = 8000;
     }

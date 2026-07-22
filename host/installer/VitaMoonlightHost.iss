@@ -24,8 +24,8 @@ DefaultDirName={autopf}\Vita Moonlight Host
 DefaultGroupName=Vita Moonlight Host
 DisableProgramGroupPage=yes
 LicenseFile=..\..\LICENSE
-ArchitecturesAllowed=x64compatible
-ArchitecturesInstallIn64BitMode=x64compatible
+ArchitecturesAllowed=x64os
+ArchitecturesInstallIn64BitMode=x64os
 PrivilegesRequired=admin
 Compression=lzma2/ultra64
 SolidCompression=yes
@@ -52,6 +52,8 @@ Source: "{#SunshineDir}\*"; DestDir: "{app}\tools\Sunshine"; Flags: ignoreversio
 Source: "..\README.md"; DestDir: "{app}"; DestName: "README.md"; Flags: ignoreversion
 Source: "..\END_TO_END_TEST.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\FINAL_RELEASE_CHECKLIST.md"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\COMPATIBILITY.md"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\..\docs\VITA_SETTINGS_GUIDE.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\LICENSE"; DestDir: "{app}"; DestName: "LICENSE-VitaMoonlight.txt"; Flags: ignoreversion
 
@@ -86,6 +88,38 @@ begin
 end;
 
 function SunshineMissing: Boolean;
+var
+  ServiceNames: TArrayOfString;
+  ServiceImagePath: String;
+  SunshinePath: String;
+  I: Integer;
 begin
-  Result := not FileExists(ExpandConstant('{autopf}\Sunshine\sunshine.exe'));
+  SunshinePath := ExpandConstant('{%SUNSHINE_PATH}');
+  if (SunshinePath <> '') and
+     (FileExists(SunshinePath) or FileExists(AddBackslash(SunshinePath) + 'sunshine.exe')) then
+  begin
+    Result := False;
+    Exit;
+  end;
+
+  Result := not FileExists(ExpandConstant('{autopf}\Sunshine\sunshine.exe')) and
+            not FileExists(ExpandConstant('{pf32}\Sunshine\sunshine.exe')) and
+            not FileExists(ExpandConstant('{localappdata}\Programs\Sunshine\sunshine.exe'));
+  if not Result then
+    Exit;
+
+  if RegGetSubkeyNames(HKLM64, 'SYSTEM\CurrentControlSet\Services', ServiceNames) then
+  begin
+    for I := 0 to GetArrayLength(ServiceNames) - 1 do
+    begin
+      if RegQueryStringValue(HKLM64,
+           'SYSTEM\CurrentControlSet\Services\' + ServiceNames[I],
+           'ImagePath', ServiceImagePath) and
+         (Pos('sunshine', Lowercase(ServiceImagePath)) > 0) then
+      begin
+        Result := False;
+        Exit;
+      end;
+    end;
+  end;
 end;

@@ -27,6 +27,8 @@ release notes.
       and a physical Vita.
 - [ ] Repeat install, Steam Big Picture launch, normal disconnect, and
       emergency display recovery on a second clean Windows 10/11 PC.
+- [ ] Cover both Windows 10 and Windows 11 if testers are available; include a
+      laptop/on-battery recovery pass and a multi-monitor recovery pass.
 - [ ] Cover at least two GPU/encoder families when testers are available (AMD,
       NVIDIA, or Intel); record GPU and driver versions.
 - [ ] Test at least one Vita 1000 and one Vita 2000 when available. If only one
@@ -69,6 +71,10 @@ release notes.
       and **O** cancels it.
 - [ ] A non-technical tester completes install, health check, pairing, normal
       play, game close, and recovery using only the GUI documentation.
+- [ ] A first-run Vita shows Balanced 960x544/60/8 Mbps, H.264, packet-loss
+      recovery, frame pacing, Xbox controller, and Relative mouse behavior.
+- [ ] Reliable, Balanced, High quality, and Custom preset detection pass and
+      the on-device help accurately describes their tradeoffs.
 
 ## Host safety and packaging gates
 
@@ -84,7 +90,8 @@ release notes.
 - [ ] Uninstall removes both scheduled tasks and the background agent and does
       not leave the physical display disabled.
 - [ ] Installer and portable ZIP contain the same companion build, current
-      guides, licenses, and `THIRD_PARTY_NOTICES.md`.
+      guides (including compatibility and Vita tuning), licenses, and
+      `THIRD_PARTY_NOTICES.md`.
 - [ ] Scan release assets with Microsoft Defender and VirusTotal or document
       why an external scan was not used.
 - [ ] Decide the Authenticode policy. For a polished public release, configure
