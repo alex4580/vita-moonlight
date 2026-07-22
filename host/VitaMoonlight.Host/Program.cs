@@ -1,7 +1,6 @@
 using System.Runtime.InteropServices;
 using System.Security.Principal;
 using System.Text.Json;
-using Microsoft.Win32;
 
 namespace VitaMoonlight.Host;
 
@@ -25,6 +24,7 @@ internal static class Program
                 "doctor" => RunDoctor(HasFlag(remaining, "--json")),
                 "profile" => PrintProfile(HasFlag(remaining, "--json")),
                 "configure" => Configure(remaining),
+                "host" => HostCommand(remaining),
                 "driver" => DriverCommand(remaining),
                 "display" => DisplayCommand(remaining),
                 "session" => SessionCommand(remaining),
@@ -113,6 +113,32 @@ internal static class Program
             Console.WriteLine($"    {display.DevicePath}");
         }
         return ExitSuccess;
+    }
+
+    private static int HostCommand(string[] args)
+    {
+        EnsureWindows();
+        var action = args.FirstOrDefault()?.ToLowerInvariant() ?? "status";
+        var hostMode = GetOption(args, "--host") ?? HostSettings.Load().HostMode;
+        if (!hostMode.Equals("sunshine", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ArgumentException("Automatic host restart currently supports Sunshine. Restart Apollo from its tray icon.");
+        }
+
+        switch (action)
+        {
+            case "restart":
+                EnsureAdministrator("Restarting Sunshine");
+                WindowsServiceManager.Restart("SunshineService", "Sunshine");
+                Console.WriteLine("Sunshine restarted. It will now detect the installed ViGEmBus driver and the updated Vita configuration.");
+                return ExitSuccess;
+            case "status":
+                var state = WindowsServiceManager.GetState("SunshineService");
+                Console.WriteLine($"Sunshine service: {state}");
+                return state == WindowsServiceState.Running ? ExitSuccess : ExitMissingRequiredComponent;
+            default:
+                return InvalidCommand($"host {action}");
+        }
     }
 
     private static int DriverCommand(string[] args)
@@ -234,6 +260,8 @@ internal static class Program
             Console.WriteLine($"Sunshine:      {Status(report.SunshinePath is not null, report.SunshinePath ?? "not found")}");
             Console.WriteLine($"Apollo:        {Status(report.ApolloPath is not null, report.ApolloPath ?? "not found")}");
             Console.WriteLine($"ViGEmBus:      {Status(report.ViGEmBusInstalled, report.ViGEmBusInstalled ? "installed" : "not detected")}");
+            Console.WriteLine($"ViGEmBus state:{Status(report.ViGEmBusRunning, report.ViGEmBusRunning ? "running" : report.ViGEmBusInstalled ? "installed but not running" : "unavailable")}");
+            Console.WriteLine($"Sunshine gamepad: {Status(!report.SunshineNeedsRestart, report.SunshineNeedsRestart ? "restart required - startup did not see ViGEmBus" : "ready")}");
             Console.WriteLine($"Driver bundle: {Status(report.DisplayWizardPath is not null, report.DisplayWizardPath ?? "not found (not needed for Apollo)")}");
             Console.WriteLine($"Virtual display: {Status(report.VirtualDisplayDriverInstalled || report.HostMode == "apollo", report.HostMode == "apollo" ? "provided by Apollo" : report.VirtualDisplayDriverInstalled ? "signed driver installed" : "not detected")}");
             Console.WriteLine($"Recovery:      {Status(!report.RecoveryPending, report.RecoveryPending ? "pending - run session recover" : "none")}");
@@ -243,7 +271,7 @@ internal static class Program
         }
 
         return report.IsWindows && report.HasSelectedStreamingHost && report.HasDisplaySupport &&
-            report.ViGEmBusInstalled && !report.RecoveryPending
+            report.ViGEmBusInstalled && report.ViGEmBusRunning && !report.SunshineNeedsRestart && !report.RecoveryPending
             ? ExitSuccess
             : ExitMissingRequiredComponent;
     }
@@ -313,6 +341,7 @@ internal static class Program
         Console.WriteLine("VitaMoonlight.Host doctor [--json]");
         Console.WriteLine("VitaMoonlight.Host profile [--json]");
         Console.WriteLine("VitaMoonlight.Host configure [--host sunshine|apollo] [--config-dir PATH] [--driver-bundle PATH] [--display-match TEXT]");
+        Console.WriteLine("VitaMoonlight.Host host status|restart [--host sunshine]");
         Console.WriteLine("VitaMoonlight.Host driver install|reload [--driver-bundle PATH]");
         Console.WriteLine("VitaMoonlight.Host display list");
         Console.WriteLine("VitaMoonlight.Host display disable-virtual");
@@ -421,6 +450,8 @@ internal sealed record HostDiagnosticReport(
     string? SunshinePath,
     string? ApolloPath,
     bool ViGEmBusInstalled,
+    bool ViGEmBusRunning,
+    bool SunshineNeedsRestart,
     string? DisplayWizardPath,
     bool VirtualDisplayDriverInstalled,
     bool RecoveryPending,
@@ -449,7 +480,10 @@ internal static class HostDiagnostics
             displayWizard = wizard.ExecutablePath;
         }
         catch (Exception error) when (error is FileNotFoundException or InvalidDataException) { }
-        var vigem = IsViGEmBusInstalled();
+        var vigemState = WindowsServiceManager.GetState("ViGEmBus");
+        var vigem = vigemState != WindowsServiceState.NotInstalled;
+        var vigemRunning = vigemState == WindowsServiceState.Running;
+        var sunshineNeedsRestart = settings.HostMode == "sunshine" && vigemRunning && SunshineLogReportsMissingViGEm(settings);
         var virtualDisplay = DisplayWizardAdapter.IsDriverInstalled();
         var recoveryPending = File.Exists(HostStatePaths.RecoveryFile);
         var recoveryTaskInstalled = RecoveryTaskManager.IsInstalled();
@@ -464,6 +498,10 @@ internal static class HostDiagnostics
                         ? "Install Sunshine or configure Apollo mode, then run this check again."
                     : !vigem
                         ? "Install ViGEmBus from the host's troubleshooting page, reboot, and run this check again."
+                        : !vigemRunning
+                            ? "ViGEmBus is installed but is not running. Reboot Windows; if it remains stopped, repair the ViGEmBus installation."
+                            : sunshineNeedsRestart
+                                ? "ViGEmBus is running, but Sunshine started before it was available. Click Restart Sunshine in the control panel."
                         : settings.HostMode == "sunshine" && displayWizard is null
                             ? "Reinstall the host companion's signed display-driver bundle or switch to Apollo."
                             : settings.HostMode == "sunshine" && !virtualDisplay
@@ -480,6 +518,8 @@ internal static class HostDiagnostics
             sunshine,
             apollo,
             vigem,
+            vigemRunning,
+            sunshineNeedsRestart,
             displayWizard,
             virtualDisplay,
             recoveryPending,
@@ -490,11 +530,21 @@ internal static class HostDiagnostics
     private static string? FindExecutable(params string?[] candidates) =>
         candidates.FirstOrDefault(candidate => !string.IsNullOrWhiteSpace(candidate) && File.Exists(candidate));
 
-    private static bool IsViGEmBusInstalled()
+    private static bool SunshineLogReportsMissingViGEm(HostSettings settings)
     {
-        if (!OperatingSystem.IsWindows()) return false;
-        using var key = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Services\ViGEmBus");
-        return key is not null;
+        var configDirectory = SunshineConfigurator.ResolveConfigurationDirectory(settings.SunshineConfigDirectory, "sunshine");
+        var logPath = Path.Combine(configDirectory, "sunshine.log");
+        if (!File.Exists(logPath)) return false;
+        try
+        {
+            return File.ReadLines(logPath).Any(line => line.Contains(
+                "Fatal: ViGEmBus is not installed or running",
+                StringComparison.OrdinalIgnoreCase));
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
     }
 
     private static bool IsAdministrator()

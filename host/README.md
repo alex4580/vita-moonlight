@@ -30,14 +30,21 @@ as Administrator** before using any setup, test, or recovery button.
 4. In the control panel, click **Restart as Administrator** if that button is
    visible, then click **Run diagnostics**. Sunshine, ViGEmBus, the driver
    bundle, and the virtual display should report `OK`.
-5. Click **Configure Sunshine**, then restart Sunshine. For Apollo, click
-   **Configure Apollo** and restart Apollo.
+5. Click **Configure Sunshine**, then **Restart Sunshine**. For Apollo, click
+   **Configure Apollo** and restart Apollo from its tray icon.
 6. Install the VPK from the same release on the Vita, pair with the PC, and
    launch **Vita Moonlight**.
 
 The installer normally performs the driver and host-configuration steps for
 the selected host. The control-panel buttons make them easy to repeat after an
 upgrade or repair.
+
+If Sunshine's web UI says that ViGEmBus is not installed or running, open the
+control panel as Administrator and click **Run diagnostics**. When ViGEmBus is
+reported as installed and running but **Sunshine gamepad** says restart is
+required, click **Restart Sunshine** and refresh the web UI. If ViGEmBus itself
+is not running, reboot Windows once and run diagnostics again before repairing
+the driver.
 
 ## About the extra 800x600 display
 
@@ -116,6 +123,7 @@ Other commands are:
 ```powershell
 .\VitaMoonlight.Host.exe profile
 .\VitaMoonlight.Host.exe configure --host sunshine
+.\VitaMoonlight.Host.exe host restart --host sunshine
 .\VitaMoonlight.Host.exe configure --host apollo
 .\VitaMoonlight.Host.exe driver install
 .\VitaMoonlight.Host.exe driver reload

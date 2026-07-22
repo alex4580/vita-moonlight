@@ -96,7 +96,9 @@ internal sealed class HostControlPanel : Form
         AddCommandButton(actions, "Stop test / restore displays", new[] { "session", "stop" },
             "Stop the test or streaming session and restore the display layout saved before it started?");
         AddCommandButton(actions, "Configure Sunshine", new[] { "configure", "--host", "sunshine" },
-            "This updates Sunshine's Vita Moonlight application. Restart Sunshine afterward.");
+            "This updates Sunshine's Vita Moonlight application. Click Restart Sunshine afterward.");
+        AddCommandButton(actions, "Restart Sunshine", new[] { "host", "restart", "--host", "sunshine" },
+            "Restart Sunshine now? Any active Sunshine stream will disconnect.");
         AddCommandButton(actions, "Configure Apollo", new[] { "configure", "--host", "apollo" },
             "Use this only if Apollo is already installed. Restart Apollo afterward.");
         AddCommandButton(actions, "Install/update display driver", new[] { "driver", "install" },

@@ -18,7 +18,8 @@ virtual.
 1. Run `Vita-Moonlight-Host-Setup-win-x64.exe` as Administrator with the
    default Sunshine options. Setup must not ask you to install a private root
    certificate.
-2. Reboot if Windows requests it, then restart Sunshine.
+2. Reboot if Windows requests it. Setup now installs ViGEmBus before Sunshine
+   and restarts Sunshine after configuration.
 3. Open **Start > Vita Moonlight Host > Vita Moonlight Host Control Panel**.
    The installer also offers to open it on the final page.
 4. Click **Restart as Administrator** if shown.
@@ -72,7 +73,8 @@ display, so the separate signed Sunshine display driver is not required.
 
 ## 4. Pair and stream
 
-1. Click **Configure Sunshine**, then restart Sunshine.
+1. Click **Configure Sunshine**, then **Restart Sunshine**. Run diagnostics
+   again; **Sunshine gamepad** must report `OK ready`.
 2. Install the release VPK, pair the Vita with the PC, and launch **Vita
    Moonlight**.
 3. Confirm the host switches to 960x544 at 60 Hz and restores the physical
