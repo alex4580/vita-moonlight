@@ -1117,6 +1117,8 @@ void vitainput_start(void) {
   memset(&pad_old, 0, sizeof(pad_old));
   memset(&shortcut_pad_old, 0, sizeof(shortcut_pad_old));
   memset(&old, 0, sizeof(old));
+  circle_press_count = 0;
+  circle_release_count = 0;
   circle_held = false;
   reset_physical_shortcuts();
   uint16_t gamepadMask = 1;
