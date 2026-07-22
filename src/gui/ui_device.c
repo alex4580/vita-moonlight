@@ -129,6 +129,7 @@ int mdns_discovery_main(SceSize args, void *argp) {
 }
 
 static SceUID search_thread_id = -1;
+static int end_search_thread(SceUID thid);
 
 void stop_search_thread_if_running() {
   vita_debug_log("[mDNS] stop_search_thread_if_running: status=%d, thid=%d\n", search_thread_status, search_thread_id);
@@ -160,10 +161,7 @@ SceUID start_search_thread() {
   return thid;
 }
 
-// Prototipo adelantado para evitar warning
-int end_search_thread(SceUID thid);
-
-int end_search_thread(SceUID thid) {
+static int end_search_thread(SceUID thid) {
   vita_debug_log("[mDNS] end_search_thread: solicitando parada de hilo %d\n", thid);
   search_thread_status = SEARCH_THREAD_REQ_STOP;
 
