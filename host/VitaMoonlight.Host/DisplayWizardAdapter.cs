@@ -25,6 +25,13 @@ internal sealed class DisplayWizardAdapter
         "PRPlanIT.com-VirtualDisplayDrv_Wiz.exe",
         "VirtualDisplayDrv.exe",
     };
+    private static readonly (int Width, int Height)[] VitaResolutions =
+    {
+        (960, 540),
+        (960, 544),
+        (1280, 720),
+    };
+    private const int VitaDisplayRefreshRate = 60;
 
     private readonly string executablePath;
 
@@ -77,9 +84,10 @@ internal sealed class DisplayWizardAdapter
     internal void InstallDriver()
     {
         ValidateDriverBundle();
-        EnsureDriverConfiguration();
+        EnsureVitaCompatibilityModes();
         var workingDirectory = Path.GetDirectoryName(executablePath)!;
-        if (!IsDriverInstalled())
+        var driverAlreadyInstalled = IsDriverInstalled();
+        if (!driverAlreadyInstalled)
         {
             RunProcess(
                 Path.Combine(workingDirectory, "nefconw.exe"),
@@ -89,12 +97,38 @@ internal sealed class DisplayWizardAdapter
                 "--hardware-id", DriverHardwareId,
                 "--class-name", "Display",
                 "--class-guid", DriverClassGuid);
+            RunProcess(
+                "pnputil.exe",
+                workingDirectory,
+                60000,
+                "/add-driver", Path.Combine(workingDirectory, "MttVDD.inf"), "/install");
         }
-        RunProcess(
-            "pnputil.exe",
-            workingDirectory,
-            60000,
-            "/add-driver", Path.Combine(workingDirectory, "MttVDD.inf"), "/install");
+        ReloadDriver();
+    }
+
+    internal bool EnsureVitaCompatibilityModes()
+    {
+        ValidateDriverBundle();
+        var configurationPath = EnsureDriverConfiguration();
+        var original = File.ReadAllText(configurationPath);
+        var updated = AddVitaCompatibilityModesToConfiguration(original);
+        if (string.Equals(original, updated, StringComparison.Ordinal)) return false;
+        DisplayTopologyService.AtomicWrite(configurationPath, updated);
+        return true;
+    }
+
+    internal static bool HasVitaCompatibilityModes()
+    {
+        var path = Path.Combine(DriverConfigurationDirectory, "vdd_settings.xml");
+        if (!File.Exists(path)) return false;
+        try
+        {
+            return HasVitaCompatibilityModesInConfiguration(File.ReadAllText(path));
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or System.Xml.XmlException)
+        {
+            return false;
+        }
     }
 
     internal void ReloadDriver()
@@ -103,11 +137,19 @@ internal sealed class DisplayWizardAdapter
         {
             throw new InvalidOperationException("The signed virtual display driver is not installed.");
         }
-        RunProcess(
-            "pnputil.exe",
-            Path.GetDirectoryName(executablePath)!,
-            45000,
-            "/restart-device", "/deviceid", DriverHardwareId);
+        var instanceIds = FindDriverInstanceIds();
+        if (instanceIds.Count == 0)
+        {
+            throw new InvalidOperationException("The virtual display driver is installed, but its PnP instance could not be resolved.");
+        }
+        foreach (var instanceId in instanceIds)
+        {
+            RunProcess(
+                "pnputil.exe",
+                Path.GetDirectoryName(executablePath)!,
+                45000,
+                "/restart-device", instanceId);
+        }
     }
 
     internal static bool IsDriverInstalled()
@@ -152,6 +194,24 @@ internal sealed class DisplayWizardAdapter
             }
         }
         return false;
+    }
+
+    private static IReadOnlyList<string> FindDriverInstanceIds()
+    {
+        var instanceIds = new List<string>();
+        if (!OperatingSystem.IsWindows()) return instanceIds;
+        using var displayDevices = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Enum\ROOT\DISPLAY");
+        if (displayDevices is null) return instanceIds;
+        foreach (var instanceName in displayDevices.GetSubKeyNames())
+        {
+            using var instance = displayDevices.OpenSubKey(instanceName);
+            var hardwareIds = instance?.GetValue("HardwareID") as string[];
+            if (hardwareIds?.Any(value => value.Equals(DriverHardwareId, StringComparison.OrdinalIgnoreCase)) == true)
+            {
+                instanceIds.Add($@"ROOT\DISPLAY\{instanceName}");
+            }
+        }
+        return instanceIds;
     }
 
     private string EnsureDriverConfiguration()
@@ -200,6 +260,28 @@ internal sealed class DisplayWizardAdapter
         }
 
         return document.ToString(SaveOptions.None);
+    }
+
+    internal static string AddVitaCompatibilityModesToConfiguration(string configuration)
+    {
+        var updated = configuration;
+        foreach (var (width, height) in VitaResolutions)
+        {
+            updated = AddModeToConfiguration(updated, width, height, VitaDisplayRefreshRate);
+        }
+        return updated;
+    }
+
+    internal static bool HasVitaCompatibilityModesInConfiguration(string configuration)
+    {
+        var document = XDocument.Parse(configuration);
+        var resolutions = document.Root?.Element("resolutions")?.Elements("resolution").ToArray();
+        if (resolutions is null) return false;
+        return VitaResolutions.All(mode => resolutions.Any(resolution =>
+            resolution.Element("width")?.Value == mode.Width.ToString() &&
+            resolution.Element("height")?.Value == mode.Height.ToString() &&
+            resolution.Elements("refresh_rate")
+                .Any(rate => rate.Value == VitaDisplayRefreshRate.ToString())));
     }
 
     private static void RunProcess(string fileName, string workingDirectory, int timeoutMilliseconds, params string[] arguments)

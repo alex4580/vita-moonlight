@@ -14,6 +14,12 @@ internal sealed record SunshineConfigurationResult(
 internal static class SunshineConfigurator
 {
     private const string HookMarker = "VitaMoonlight.Host";
+    private const string VitaDisplayModeRemapping =
+        "{\"mixed\":[],\"resolution_only\":[" +
+        "{\"requested_resolution\":\"960x540\",\"final_resolution\":\"960x540\"}," +
+        "{\"requested_resolution\":\"960x544\",\"final_resolution\":\"960x544\"}," +
+        "{\"requested_resolution\":\"1280x720\",\"final_resolution\":\"1280x720\"}," +
+        "{\"final_resolution\":\"960x540\"}],\"refresh_rate_only\":[]}";
 
     internal static SunshineConfigurationResult Configure(HostSettings settings, string companionPath)
     {
@@ -148,7 +154,11 @@ internal static class SunshineConfigurator
         SetConfigurationValue(lines, "output_name", displayDeviceId);
         SetConfigurationValue(lines, "dd_configuration_option", "ensure_only_display");
         SetConfigurationValue(lines, "dd_resolution_option", "auto");
-        SetConfigurationValue(lines, "dd_refresh_rate_option", "auto");
+        // Keep the Windows desktop at a driver-safe 60 Hz. The client encoder
+        // can still stream at 24/30/40/50/60 FPS independently.
+        SetConfigurationValue(lines, "dd_refresh_rate_option", "manual");
+        SetConfigurationValue(lines, "dd_manual_refresh_rate", "60");
+        SetConfigurationValue(lines, "dd_mode_remapping", VitaDisplayModeRemapping);
         SetConfigurationValue(lines, "dd_hdr_option", forceSdr ? "auto" : "disabled");
         SetConfigurationValue(lines, "dd_config_revert_delay", "500");
         SetConfigurationValue(lines, "dd_config_revert_on_disconnect", "enabled");

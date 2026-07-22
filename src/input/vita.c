@@ -157,6 +157,7 @@ inline void move_wheel(TouchData old, TouchData cur) {
 }
 
 SceCtrlData pad, pad_old;
+static SceCtrlData shortcut_pad_old;
 TouchData touch;
 TouchData touch_old, swipe;
 SceTouchData front, back;
@@ -779,6 +780,8 @@ inline void vitainput_process(void) {
   memset(&curr, 0, sizeof(input_data));
   sceCtrlSetSamplingModeExt(SCE_CTRL_MODE_ANALOG_WIDE);
   sceCtrlPeekBufferPositiveExt2(controller_port, &pad, 1);
+  SceCtrlData raw_pad;
+  memcpy(&raw_pad, &pad, sizeof(SceCtrlData));
   sceTouchPeek(SCE_TOUCH_PORT_FRONT, &front, 1);
   sceTouchPeek(SCE_TOUCH_PORT_BACK, &back, 1);
   // Siempre actualizar los puntos táctiles del frente
@@ -789,9 +792,10 @@ inline void vitainput_process(void) {
   sceRtcGetCurrentTick(&current);
   bool overlay_was_open = stream_overlay_is_open();
   if (!overlay_was_open) {
-    process_physical_shortcuts(&pad, &pad_old);
+    process_physical_shortcuts(&pad, &shortcut_pad_old);
     overlay_was_open = stream_overlay_is_open();
   }
+  memcpy(&shortcut_pad_old, &raw_pad, sizeof(SceCtrlData));
   if (overlay_was_open) {
     stream_overlay_handle_input(&pad, &pad_old);
     memcpy(&pad_old, &pad, sizeof(SceCtrlData));
@@ -995,6 +999,9 @@ void vitainput_config(CONFIGURATION config) {
 }
 
 void vitainput_start(void) {
+  memset(&pad_old, 0, sizeof(pad_old));
+  memset(&shortcut_pad_old, 0, sizeof(shortcut_pad_old));
+  reset_physical_shortcuts();
   uint16_t gamepadMask = 1;
   uint16_t gamepadCapabilities = LI_CCAP_BATTERY_STATE;
   uint32_t gamepadSupportedButtonFlags = 0xffff;
@@ -1044,5 +1051,6 @@ void vitainput_start(void) {
 void vitainput_stop(void) {
   unlock_psbutton();
   active_input_thread = false;
+  reset_physical_shortcuts();
   vita_motion_end_stream();
 }

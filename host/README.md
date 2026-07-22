@@ -99,7 +99,9 @@ After pairing, you may launch any Sunshine application, including its built-in
 5. restores the physical layout 500 ms after all clients disconnect, even if
    Steam remains open for a later session.
 
-Open the Vita overlay with **START + L + R**. The overlay can resume or
+Open the Vita overlay by holding **START**, then pressing **L + R** within
+300 ms. The client consumes the complete chord instead of forwarding those
+buttons to Windows. The overlay can resume or
 disconnect and change resolution, video quality, frame rate, controller
 profile, touch mode, and the FPS counter. Stream-negotiation changes are saved
 for the next connection. **Double-press PS** remains the forced system escape:
@@ -126,6 +128,16 @@ For motion-heavy games, begin with the Vita's **Balanced** preset at
 960x544/60 and 8 Mbps. Try **High quality** (12 Mbps) on a strong network or
 **Reliable** (5 Mbps/30 FPS) when Wi-Fi is constrained. The in-app help and
 `VITA_SETTINGS_GUIDE.md` explain the quality, latency, and compatibility costs.
+
+The host provisions safe 960x540, 960x544, and 1280x720 desktop modes at 60 Hz
+in the virtual-display driver. Vita stream FPS remains independently
+configurable, which avoids overloading drivers that cap the total advertised
+mode count. Other client-selected stream resolutions are safely captured from
+the nearest Vita host mode instead of asking Windows for an unsupported mode.
+If Sunshine logs `Failed to set display mode` and continues capturing the
+physical monitor, click **Install/update display driver**, then **Apply
+recommended setup**. Health check must report **Vita display modes:
+compatibility modes provisioned**.
 
 ## Controller, gyro, touch, and keyboard
 

@@ -80,6 +80,10 @@ internal static class Program
         {
             var wizard = DisplayWizardAdapter.Locate(settings.DisplayWizardPath);
             wizard.ValidateDriverBundle();
+            if (DisplayWizardAdapter.IsDriverInstalled() && wizard.EnsureVitaCompatibilityModes())
+            {
+                wizard.ReloadDriver();
+            }
             settings = settings with { DisplayWizardPath = wizard.ExecutablePath };
         }
 
@@ -169,6 +173,7 @@ internal static class Program
                 Console.WriteLine("Virtual display driver installed. A reboot may be required before it appears.");
                 return ExitSuccess;
             case "reload":
+                wizard.EnsureVitaCompatibilityModes();
                 wizard.ReloadDriver();
                 Console.WriteLine("Virtual display driver reloaded.");
                 return ExitSuccess;
@@ -332,6 +337,7 @@ internal static class Program
             Console.WriteLine($"Sunshine gamepad: {Status(!report.SunshineNeedsRestart, report.SunshineNeedsRestart ? "restart required - startup did not see ViGEmBus" : "ready")}");
             Console.WriteLine($"Driver bundle: {Status(report.DisplayWizardPath is not null, report.DisplayWizardPath ?? "not found (not needed for Apollo)")}");
             Console.WriteLine($"Virtual display: {Status(report.VirtualDisplayDriverInstalled || report.HostMode == "apollo", report.HostMode == "apollo" ? "provided by Apollo" : report.VirtualDisplayDriverInstalled ? "signed driver installed" : "not detected")}");
+            Console.WriteLine($"Vita display modes: {Status(report.VirtualDisplayModesReady || report.HostMode == "apollo", report.HostMode == "apollo" ? "provided by Apollo" : report.VirtualDisplayModesReady ? "compatibility modes provisioned" : "missing - repair display driver")}");
             Console.WriteLine($"Recovery:      {Status(!report.RecoveryPending, report.RecoveryPending ? "pending - run session recover" : "none")}");
             Console.WriteLine($"Recovery task: {Status(report.RecoveryTaskInstalled, report.RecoveryTaskInstalled ? "installed" : "not installed")}");
             var rescueDescription = report.RescueAgentInstalled && report.RescueAgentRunning
@@ -436,6 +442,12 @@ internal static class Program
                 "Sunshine virtual-display selection failed.");
             Require(nativeConfiguration.Contains("dd_configuration_option = ensure_only_display"),
                 "Sunshine exclusive-display configuration failed.");
+            Require(nativeConfiguration.Contains("dd_refresh_rate_option = manual"),
+                "Sunshine fixed virtual-display refresh configuration failed.");
+            Require(nativeConfiguration.Contains("dd_manual_refresh_rate = 60"),
+                "Sunshine virtual-display refresh rate failed.");
+            Require(nativeConfiguration.Any(line => line.Contains("\"final_resolution\":\"960x540\"", StringComparison.Ordinal)),
+                "Sunshine unsupported-resolution fallback failed.");
             Require(nativeConfiguration.Contains("dd_config_revert_on_disconnect = enabled"),
                 "Sunshine disconnect recovery configuration failed.");
             Require(SunshineConfigurator.IsNativeDisplayManagementReady(sunshineTestDirectory),
@@ -473,6 +485,15 @@ internal static class Program
         Require(updatedDriverConfiguration.Contains("<height>544</height>", StringComparison.Ordinal), "Virtual display height configuration failed.");
         Require(updatedDriverConfiguration.Contains("<refresh_rate>60</refresh_rate>", StringComparison.Ordinal), "Virtual display refresh configuration failed.");
         Require(updatedDriverConfiguration.Contains("<HardwareCursor>true</HardwareCursor>", StringComparison.Ordinal), "Virtual display option preservation failed.");
+        var compatibleDriverConfiguration = DisplayWizardAdapter.AddVitaCompatibilityModesToConfiguration(driverConfiguration);
+        Require(DisplayWizardAdapter.HasVitaCompatibilityModesInConfiguration(compatibleDriverConfiguration),
+            "Vita virtual display mode provisioning failed.");
+        Require(compatibleDriverConfiguration.Contains("<height>540</height>", StringComparison.Ordinal),
+            "Vita 960x540 compatibility mode was not provisioned.");
+        Require(!compatibleDriverConfiguration.Contains("<height>576</height>", StringComparison.Ordinal),
+            "Vita mode provisioning added an unsafe nonessential mode.");
+        Require(DisplayWizardAdapter.AddVitaCompatibilityModesToConfiguration(compatibleDriverConfiguration) == compatibleDriverConfiguration,
+            "Vita virtual display mode provisioning was not idempotent.");
         Require(DisplayTopologyService.IsManagedVirtualDisplay(
             new DisplayDescriptor(0, "VDD by MTT", @"\\?\DISPLAY#MTT1337#1", true, true)),
             "Signed virtual display identification failed.");
@@ -635,6 +656,7 @@ internal sealed record HostDiagnosticReport(
     bool SunshineNeedsRestart,
     string? DisplayWizardPath,
     bool VirtualDisplayDriverInstalled,
+    bool VirtualDisplayModesReady,
     bool RecoveryPending,
     bool RecoveryTaskInstalled,
     bool RescueAgentInstalled,
@@ -646,7 +668,8 @@ internal sealed record HostDiagnosticReport(
 {
     public bool HasStreamingHost => SunshinePath is not null || ApolloPath is not null;
     public bool HasSelectedStreamingHost => HostMode == "apollo" ? ApolloPath is not null : SunshinePath is not null;
-    public bool HasDisplaySupport => HostMode == "apollo" || (DisplayWizardPath is not null && VirtualDisplayDriverInstalled);
+    public bool HasDisplaySupport => HostMode == "apollo" ||
+        (DisplayWizardPath is not null && VirtualDisplayDriverInstalled && VirtualDisplayModesReady);
 }
 
 internal static class HostDiagnostics
@@ -674,6 +697,7 @@ internal static class HostDiagnostics
         var vigemRunning = vigemState == WindowsServiceState.Running;
         var sunshineNeedsRestart = settings.HostMode == "sunshine" && vigemRunning && SunshineLogReportsMissingViGEm(settings);
         var virtualDisplay = DisplayWizardAdapter.IsDriverInstalled();
+        var virtualDisplayModesReady = settings.HostMode == "apollo" || DisplayWizardAdapter.HasVitaCompatibilityModes();
         var recoveryPending = File.Exists(HostStatePaths.RecoveryFile);
         var recoveryTaskInstalled = RecoveryTaskManager.IsInstalled();
         var rescueAgentInstalled = HostRecoveryAgentManager.IsInstalled();
@@ -704,6 +728,8 @@ internal static class HostDiagnostics
                             ? "Reinstall the host companion's signed display-driver bundle or switch to Apollo."
                             : settings.HostMode == "sunshine" && !virtualDisplay
                                 ? "Install the signed virtual display driver, reboot if requested, and run this check again."
+                                : settings.HostMode == "sunshine" && !virtualDisplayModesReady
+                                    ? "The virtual display is missing one or more Vita modes. Click Install/update display driver, then Apply recommended setup."
                                 : !recoveryTaskInstalled
                                     ? "The host is ready, but automatic logon recovery is not installed. In the Administrator control panel, click Install recovery safeguard."
                                 : !rescueAgentInstalled || !rescueAgentRunning
@@ -724,6 +750,7 @@ internal static class HostDiagnostics
             sunshineNeedsRestart,
             displayWizard,
             virtualDisplay,
+            virtualDisplayModesReady,
             recoveryPending,
             recoveryTaskInstalled,
             rescueAgentInstalled,

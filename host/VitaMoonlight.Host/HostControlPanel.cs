@@ -172,7 +172,7 @@ internal sealed class HostControlPanel : Form
             "Choose any Sunshine application—including Steam Big Picture. The host switches to the virtual display before capture and restores your desktop afterward."));
         AddPageControl(page, CreateInfoCard(
             "In-stream controls",
-            "Open the Vita overlay with START + L + R. It can force-close the foreground Windows game, end the Sunshine app, or recover a failed display/host in addition to the normal stream controls. Double-press PS remains the forced escape to Vita LiveArea."));
+            "Hold START, then press L + R within 300 ms. The chord is consumed by the Vita and is not sent to Windows. The overlay can force-close the foreground game, end the Sunshine app, or recover a failed display/host. Double-press PS remains the forced escape to Vita LiveArea."));
         return page;
     }
 

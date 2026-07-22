@@ -59,9 +59,10 @@ recovery safeguard.
 
 ## 4. Overlay and video quality
 
-1. During a stream, press **START + L + R**. The overlay must appear over live
-   video and host input must be neutral while it is open.
-2. Close it with **O**, reopen it with **START + L + R**, and select **Close
+1. During a stream, hold **START**, then press **L + R** within 300 ms. The
+   overlay must appear over live video. Use a Windows controller-input viewer
+   to confirm START, L, and R are never forwarded.
+2. Close it with **O**, reopen it with the same chord, and select **Close
    Windows game**. The first **X** must show a confirmation; **O** must cancel.
 3. Launch a normal game from Steam Big Picture, reopen the overlay, select
    **Close Windows game**, and press **X** twice. The foreground game must exit
