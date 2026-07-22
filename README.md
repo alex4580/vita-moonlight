@@ -60,8 +60,9 @@ recovery, and troubleshooting. Release testing is documented in the
 
 ## Vita controls while streaming
 
-- Hold **START**, then press **L + R** within 300 ms: open the stream overlay.
-  The complete chord is consumed locally and is never sent to the PC.
+- Hold **START**, then press **L + R** within one second: open the stream
+  overlay. Pressing all three together or in another order also works. Using
+  START first lets the complete chord be consumed before it reaches the PC.
 - **PS (default)**: a single press stays on the Vita and is not sent to
   Windows. Double-press it to return to LiveArea; this remains the forced
   system-level escape from a stream.

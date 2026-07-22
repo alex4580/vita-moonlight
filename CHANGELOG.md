@@ -1,5 +1,8 @@
 ## 0.14.0
 
+* Fixed START + L + R failing when a shoulder was sampled before START or the
+  original 300 ms window expired. The overlay now accepts any button order and
+  gives the non-leaking START-led sequence a one-second window.
 * Changed the default PS-button policy so single presses remain local and can
   no longer trigger Windows/Steam Guide shortcuts such as media play/pause.
   Double-PS still provides the forced LiveArea escape. Added delayed Safe PC
@@ -10,8 +13,8 @@
   client FPS remains independently configurable. Doctor verifies the runtime
   mode set and rejects an incomplete Sunshine display mapping.
 * The START, L, and R overlay chord is now captured locally. Holding START and
-  pressing L + R within 300 ms opens the overlay without sending any of those
-  buttons to the Windows game; ordinary START and shoulder inputs still pass.
+  pressing L + R within one second opens the overlay without sending any of
+  those buttons to the Windows game; other button orders also open it.
 * Added Reliable, Balanced, and High quality Vita streaming presets plus
   on-device explanations for resolution, FPS, bitrate, frame pacing, vblank,
   controller, and touch tradeoffs.

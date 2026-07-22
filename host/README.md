@@ -99,10 +99,10 @@ After pairing, you may launch any Sunshine application, including its built-in
 5. restores the physical layout 500 ms after all clients disconnect, even if
    Steam remains open for a later session.
 
-Open the Vita overlay by holding **START**, then pressing **L + R** within
-300 ms. The client consumes the complete chord instead of forwarding those
-buttons to Windows. The overlay can resume or
-disconnect and change resolution, video quality, frame rate, controller
+Open the Vita overlay by holding **START**, then pressing **L + R** within one
+second. Pressing all three together or in another order also works; START first
+allows the client to consume the complete chord before it reaches Windows. The
+overlay can resume or disconnect and change resolution, video quality, frame rate, controller
 profile, touch mode, and the FPS counter. Stream-negotiation changes are saved
 for the next connection. The default **Local double-tap** PS policy never sends
 PS to Windows: a single press is ignored and double-PS remains the forced

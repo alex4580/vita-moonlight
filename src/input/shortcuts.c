@@ -11,7 +11,7 @@
 #include "../gui/ui_stream_overlay.h"
 
 #define OVERLAY_CHORD_MASK (SCE_CTRL_START | SCE_CTRL_L1 | SCE_CTRL_R1)
-#define OVERLAY_CHORD_WINDOW_US 300000
+#define OVERLAY_CHORD_WINDOW_US 1000000
 
 enum overlay_chord_state {
     OVERLAY_CHORD_IDLE,
@@ -30,14 +30,31 @@ void reset_physical_shortcuts(void) {
     overlay_pending_buttons = 0;
 }
 
+static bool open_stream_overlay(SceCtrlData* pad) {
+    pad->buttons &= ~OVERLAY_CHORD_MASK;
+    overlay_state = OVERLAY_CHORD_CONSUMED;
+    overlay_pending_buttons = 0;
+    vita_debug_log("Shortcut: START+L1+R1 opened the stream overlay");
+    stream_overlay_open();
+    return true;
+}
+
 static bool process_overlay_shortcut(SceCtrlData* pad, const SceCtrlData* pad_old) {
     uint64_t now = sceKernelGetSystemTimeWide();
     uint32_t chord_buttons = pad->buttons & OVERLAY_CHORD_MASK;
     bool start_pressed = (chord_buttons & SCE_CTRL_START) != 0;
 
+    // Always accept the complete chord, regardless of which physical button
+    // the controller sampled first. The START-led path below still buffers the
+    // chord so none of it reaches the host; this fallback keeps the overlay
+    // accessible when L/R was already down or the one-second window elapsed.
+    if (overlay_state != OVERLAY_CHORD_CONSUMED &&
+        chord_buttons == OVERLAY_CHORD_MASK) {
+        return open_stream_overlay(pad);
+    }
+
     if (overlay_state == OVERLAY_CHORD_IDLE && start_pressed &&
-        (pad_old->buttons & SCE_CTRL_START) == 0 &&
-        (pad_old->buttons & (SCE_CTRL_L1 | SCE_CTRL_R1)) == 0) {
+        (pad_old->buttons & SCE_CTRL_START) == 0) {
         overlay_state = OVERLAY_CHORD_PENDING;
         overlay_started_at = now;
         overlay_pending_buttons = chord_buttons;
@@ -46,12 +63,7 @@ static bool process_overlay_shortcut(SceCtrlData* pad, const SceCtrlData* pad_ol
     if (overlay_state == OVERLAY_CHORD_PENDING) {
         overlay_pending_buttons |= chord_buttons;
         if (chord_buttons == OVERLAY_CHORD_MASK) {
-            pad->buttons &= ~OVERLAY_CHORD_MASK;
-            overlay_state = OVERLAY_CHORD_CONSUMED;
-            overlay_pending_buttons = 0;
-            vita_debug_log("Shortcut: START+L1+R1 opened the stream overlay without forwarding the chord");
-            stream_overlay_open();
-            return true;
+            return open_stream_overlay(pad);
         }
         if (!start_pressed) {
             // Replay a normal short START press if it was not an overlay chord.
