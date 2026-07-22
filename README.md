@@ -52,7 +52,9 @@ recovery, and troubleshooting. Release testing is documented in the
 
 ## Vita controls while streaming
 
-- **START + L + R** or **double-press PS**: open the stream overlay.
+- **START + L + R**: open the stream overlay.
+- **Double-press PS**: temporarily release PS capture and return to the Vita
+  LiveArea. This remains the forced system-level escape from a stream.
 - **D-pad Up/Down**: select an overlay item.
 - **D-pad Left/Right**: change a setting.
 - **X**: activate the selected item.

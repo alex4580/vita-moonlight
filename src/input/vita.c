@@ -571,8 +571,7 @@ void handle_psbutton() {
   if(is_pressed(SCE_CTRL_PSBUTTON | INPUT_TYPE_GAMEPAD)) {
     if(!is_old_pressed(SCE_CTRL_PSBUTTON | INPUT_TYPE_GAMEPAD)) {
       if(time - psbutton_pressed_time < PSBTN_DOUBLETAP_DELAY) {
-        stream_overlay_open();
-        psbutton_pressed_time = 0;
+        unlock_psbutton();
       } else {
         special(SPECIAL_FLAG | INPUT_TYPE_GAMEPAD, 1, 0);
       }

@@ -172,7 +172,7 @@ internal sealed class HostControlPanel : Form
             "Choose any Sunshine application—including Steam Big Picture. The host switches to the virtual display before capture and restores your desktop afterward."));
         AddPageControl(page, CreateInfoCard(
             "In-stream controls",
-            "Open the Vita overlay with START + L + R or a double press of PS. Use it to resume, disconnect, change quality for the next connection, select controller/touch modes, or toggle the FPS counter."));
+            "Open the Vita overlay with START + L + R. Use it to resume, disconnect, change quality for the next connection, select controller/touch modes, or toggle the FPS counter. Double-press PS remains the forced escape to Vita LiveArea."));
         return page;
     }
 

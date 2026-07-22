@@ -1,8 +1,8 @@
 ## 0.14.0
 
-* Added an in-stream Vita overlay opened with START + L + R or a double press
-  of PS. It provides resume, disconnect, resolution, bitrate, frame-rate,
-  controller, touch-mode, and FPS-counter controls.
+* Added an in-stream Vita overlay opened with START + L + R. It provides
+  resume, disconnect, resolution, bitrate, frame-rate, controller, touch-mode,
+  and FPS-counter controls. Double-press PS remains the forced LiveArea escape.
 * Sunshine display preparation is now applied to every application by default,
   including Desktop and Steam Big Picture, while preserving existing prep
   commands.

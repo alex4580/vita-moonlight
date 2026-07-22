@@ -59,13 +59,16 @@ recovery safeguard.
 
 1. During a stream, press **START + L + R**. The overlay must appear over live
    video and host input must be neutral while it is open.
-2. Close it with **O**, reopen it by double-pressing **PS**, and choose
-   **Disconnect stream**. The stream must end without using the Vita shell.
-3. Set 960x544, 60 FPS, and 8 Mbps. Reconnect and confirm the values persist.
-4. Run a 20-minute motion-heavy stream. Check fine textures, camera pans,
+2. Close it with **O**, reopen it with **START + L + R**, and choose
+   **Disconnect stream**. The stream must end cleanly and restore Windows.
+3. During another stream, double-press **PS**. The Vita must return to LiveArea
+   even while PS capture is enabled. Resume Moonlight and verify PS capture is
+   restored without a stuck PS/Xbox button.
+4. Set 960x544, 60 FPS, and 8 Mbps. Reconnect and confirm the values persist.
+5. Run a 20-minute motion-heavy stream. Check fine textures, camera pans,
    frame pacing, audio, reconnect behavior, and the FPS counter. Repeat at 12
    Mbps on a strong network and at 5 Mbps/30 FPS on constrained Wi-Fi.
-5. Confirm the 8 Mbps native profile has materially fewer motion artifacts than
+6. Confirm the 8 Mbps native profile has materially fewer motion artifacts than
    the former 5 Mbps default and does not produce sustained decode errors.
 
 ## 5. Controller and motion

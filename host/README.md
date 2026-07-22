@@ -86,10 +86,11 @@ After pairing, you may launch any Sunshine application, including its built-in
 4. lets Sunshine start capture; and
 5. restores the saved layout when the application ends.
 
-Open the Vita overlay with **START + L + R** or a **double press of PS**. The
-overlay can resume or disconnect and change resolution, video quality, frame
-rate, controller profile, touch mode, and the FPS counter. Stream-negotiation
-changes are saved for the next connection.
+Open the Vita overlay with **START + L + R**. The overlay can resume or
+disconnect and change resolution, video quality, frame rate, controller
+profile, touch mode, and the FPS counter. Stream-negotiation changes are saved
+for the next connection. **Double-press PS** remains the forced system escape:
+it temporarily releases PS capture and returns to the Vita LiveArea.
 
 For motion-heavy games, begin at 960x544/60 and 8 Mbps. Try 12 Mbps on a strong
 network or 5 Mbps/30 FPS when Wi-Fi is constrained. The Vita client migrates
