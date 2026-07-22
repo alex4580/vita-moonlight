@@ -4,7 +4,7 @@
   Vita-selectable mode such as 960x540/60. Existing and new installations now
   provision the safe 960x540, 960x544, and 1280x720 desktop modes at 60 Hz;
   client FPS remains independently configurable. Doctor verifies the runtime
-  mode set.
+  mode set and rejects an incomplete Sunshine display mapping.
 * The START, L, and R overlay chord is now captured locally. Holding START and
   pressing L + R within 300 ms opens the overlay without sending any of those
   buttons to the Windows game; ordinary START and shoulder inputs still pass.

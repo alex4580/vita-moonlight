@@ -452,6 +452,12 @@ internal static class Program
                 "Sunshine disconnect recovery configuration failed.");
             Require(SunshineConfigurator.IsNativeDisplayManagementReady(sunshineTestDirectory),
                 "Sunshine native display lifecycle readiness check failed.");
+            File.WriteAllLines(
+                Path.Combine(sunshineTestDirectory, "sunshine.conf"),
+                nativeConfiguration.Where(line => !line.StartsWith("dd_mode_remapping =", StringComparison.OrdinalIgnoreCase)));
+            Require(!SunshineConfigurator.IsNativeDisplayManagementReady(sunshineTestDirectory),
+                "Sunshine readiness accepted a missing safe-resolution mapping.");
+            File.WriteAllLines(Path.Combine(sunshineTestDirectory, "sunshine.conf"), nativeConfiguration);
             File.WriteAllText(Path.Combine(sunshineTestDirectory, "sunshine-reversed.log"), """
                 [test]: Info: Currently available display devices:
                 [

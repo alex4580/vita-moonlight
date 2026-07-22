@@ -305,6 +305,10 @@ internal static class SunshineConfigurator
         {
             var lines = File.ReadAllLines(path);
             return HasConfigurationValue(lines, "dd_configuration_option", "ensure_only_display") &&
+                   HasConfigurationValue(lines, "dd_resolution_option", "auto") &&
+                   HasConfigurationValue(lines, "dd_refresh_rate_option", "manual") &&
+                   HasConfigurationValue(lines, "dd_manual_refresh_rate", "60") &&
+                   HasConfigurationValue(lines, "dd_mode_remapping", VitaDisplayModeRemapping) &&
                    HasConfigurationValue(lines, "dd_config_revert_on_disconnect", "enabled") &&
                    lines.Any(line => line.TrimStart().StartsWith("output_name =", StringComparison.OrdinalIgnoreCase) &&
                                      !string.IsNullOrWhiteSpace(line[(line.IndexOf('=') + 1)..]));
