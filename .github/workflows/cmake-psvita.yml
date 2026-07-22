@@ -44,7 +44,7 @@ jobs:
           # Install only the libraries linked by this project. vdpm resolves
           # their transitive package dependencies.
           git clone https://github.com/vitasdk/vdpm.git
-          for p in zlib bzip2 libpng libjpeg-turbo freetype libvita2d openssl curl expat opus; do
+          for p in zlib bzip2 zstd libpng libjpeg-turbo freetype libvita2d openssl curl expat opus; do
             ./vdpm/vdpm -f $p
           done
           echo "Contents of $VITASDK after installing packages:"

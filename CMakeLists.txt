@@ -149,6 +149,7 @@ target_compile_definitions(${PROJECT_NAME}.elf PRIVATE _POSIX_C_SOURCE=200809L)
 target_link_libraries(${PROJECT_NAME}.elf
 	-lexpat
 	-lcurl
+	-lzstd
 	moonlight-common-c
 	enet
 	h264bitstream
