@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 
@@ -243,6 +244,122 @@ internal sealed class DisplayTopologyService
         }
         return selected;
     }
+
+    internal DisplayDescriptor VerifyVirtualDisplayModeSafely(
+        string? nameMatch,
+        int width,
+        int height,
+        int fps,
+        bool forceSdr = true,
+        bool persistMode = true,
+        int modeAttempts = 40)
+    {
+        if (modeAttempts < 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(modeAttempts));
+        }
+
+        var availableConfiguration = WindowsDisplayNative.Query(WindowsDisplayNative.QueryAllPaths);
+        var selected = SelectVirtualDisplayForActivation(Describe(availableConfiguration), nameMatch);
+        if (selected is null)
+        {
+            throw new InvalidOperationException(
+                "No virtual display was found. Run `display list` and configure its name with `configure --display-match <text>`."
+            );
+        }
+
+        var activeConfiguration = WindowsDisplayNative.Query(WindowsDisplayNative.QueryOnlyActivePaths);
+        var physicalDisplays = SelectActivePhysicalDisplaysForVerification(Describe(activeConfiguration));
+        if (physicalDisplays.Length == 0)
+        {
+            throw new InvalidOperationException(
+                "No active physical display was found. Refusing to verify the virtual display without a visible recovery screen.");
+        }
+
+        var physicalIndexes = physicalDisplays.Select(display => display.PathIndex).ToHashSet();
+        var verificationPaths = activeConfiguration.Paths
+            .Where((_, index) => physicalIndexes.Contains(index))
+            .Append(availableConfiguration.Paths[selected.PathIndex])
+            .ToArray();
+
+        // Verification must never make the VDD the machine's only active
+        // display. Keep every active physical path in the supplied topology,
+        // add the VDD as an extended display, and let SessionManager restore
+        // the exact original topology after the native mode is confirmed.
+        WindowsDisplayNative.ApplyPaths(verificationPaths, forceModeEnumeration: true);
+
+        Exception? lastError = null;
+        for (var attempt = 0; attempt < modeAttempts; attempt++)
+        {
+            try
+            {
+                var currentConfiguration = WindowsDisplayNative.Query(WindowsDisplayNative.QueryOnlyActivePaths);
+                var activePath = FindPathByDevicePath(currentConfiguration, selected.DevicePath)
+                    ?? throw new InvalidOperationException(
+                        "The selected virtual display did not become active beside the physical display.");
+                var sourceName = WindowsDisplayNative.GetSourceNameFor(activePath);
+                WindowsDisplayNative.ChangeSourceMode(
+                    sourceName.ViewGdiDeviceName,
+                    width,
+                    height,
+                    fps,
+                    persistMode);
+                if (forceSdr)
+                {
+                    WindowsDisplayNative.TrySetAdvancedColorState(activePath, false);
+                }
+                return selected;
+            }
+            catch (Exception error) when (error is InvalidOperationException or Win32Exception)
+            {
+                lastError = error;
+                if (attempt < modeAttempts - 1)
+                {
+                    Thread.Sleep(500);
+                }
+            }
+        }
+
+        throw new InvalidOperationException(
+            $"Windows did not accept {width}x{height}@{fps} for the virtual display within " +
+            $"{modeAttempts * 0.5:0.#} seconds. The original display layout will be restored. " +
+            $"Last Windows response: {lastError?.Message ?? "no mode response was returned"}.",
+            lastError);
+    }
+
+    private static DisplayPathInfo? FindPathByDevicePath(
+        DisplayConfiguration configuration,
+        string devicePath)
+    {
+        foreach (var candidate in configuration.Paths)
+        {
+            try
+            {
+                var targetName = WindowsDisplayNative.GetTargetNameFor(candidate);
+                if (string.Equals(
+                    targetName.MonitorDevicePath,
+                    devicePath,
+                    StringComparison.OrdinalIgnoreCase))
+                {
+                    return candidate;
+                }
+            }
+            catch
+            {
+                // A transient/unnamed target is not the selected display.
+            }
+        }
+        return null;
+    }
+
+    internal static DisplayDescriptor[] SelectActivePhysicalDisplaysForVerification(
+        IEnumerable<DisplayDescriptor> displays) =>
+        displays
+            .Where(display =>
+                display.IsActive &&
+                display.IsAvailable &&
+                !IsLikelyVirtualDisplay(display))
+            .ToArray();
 
     internal static DisplayDescriptor? SelectVirtualDisplayForActivation(
         IEnumerable<DisplayDescriptor> displays,

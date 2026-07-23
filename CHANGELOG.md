@@ -1,3 +1,14 @@
+## 0.14.2
+
+* Fixed driver setup and repair temporarily making the Vita virtual display
+  the only active screen while checking 960x544. Verification now preserves
+  every active physical monitor, adds VDD as an extended display, retries the
+  native mode in place with a fresh driver mode enumeration, and restores the
+  exact original topology once.
+* Replaced the generic ten-second enumeration failure and repeated restart
+  advice with the final Windows mode error. A failed native-mode check now
+  stops setup as a real error after restoring the physical desktop.
+
 ## 0.14.1
 
 * Added a dedicated real-time diagnostics screen and optional append-only Vita

@@ -31,39 +31,72 @@ internal sealed class SessionManager
             DisplayMatch = "MTT1337",
             ForceSdr = true,
         };
-        Exception? lastError = null;
-        for (var attempt = 0; attempt < 20; attempt++)
+
+        ValidateStreamMode(mode.Width, mode.Height, mode.Fps);
+        using var sessionLock = AcquireLock();
+        if (File.Exists(HostStatePaths.RecoveryFile))
+        {
+            throw new InvalidOperationException(
+                $"A pending display recovery record already exists at {HostStatePaths.RecoveryFile}. Run `session recover` first."
+            );
+        }
+
+        var recovery = displays.CaptureRecovery(mode.Width, mode.Height, mode.Fps);
+        displays.SaveRecovery(recovery);
+        DisplayDescriptor selected;
+        try
+        {
+            selected = displays.VerifyVirtualDisplayModeSafely(
+                settings.DisplayMatch,
+                mode.Width,
+                mode.Height,
+                mode.Fps,
+                settings.ForceSdr,
+                persistMode: true,
+                modeAttempts: 40);
+            displays.SaveRecovery(recovery with { SelectedDisplay = selected.FriendlyName });
+        }
+        catch (Exception verificationError)
         {
             try
             {
-                var result = StartCore(
-                    mode.Width,
-                    mode.Height,
-                    mode.Fps,
-                    settings,
-                    prepareDriverMode: false,
-                    persistMode: true,
-                    activationAttempts: 1);
-                RestoreIfPending();
-                DriverNativeModeVerification.RecordCurrent();
-                return result;
+                displays.Restore();
+                DisplayTopologyService.ClearRecovery();
             }
-            catch (Exception error) when (
-                !File.Exists(HostStatePaths.RecoveryFile) &&
-                error is InvalidOperationException or Win32Exception)
+            catch (Exception restoreError)
             {
-                lastError = error;
-                if (attempt < 19)
-                {
-                    Thread.Sleep(500);
-                }
+                throw new AggregateException(
+                    "Native-mode verification failed and automatic display restoration also failed. " +
+                    "The recovery record has been retained.",
+                    verificationError,
+                    restoreError);
             }
+            throw new InvalidOperationException(
+                $"Native-mode verification failed, and the original physical display layout was restored. " +
+                $"{verificationError.Message}",
+                verificationError);
         }
 
-        throw new InvalidOperationException(
-            "The virtual display driver did not finish enumerating within 10 seconds. " +
-            "Restart Windows, then run Install/update display driver again.",
-            lastError);
+        try
+        {
+            displays.Restore();
+            DisplayTopologyService.ClearRecovery();
+        }
+        catch (Exception restoreError)
+        {
+            throw new InvalidOperationException(
+                "Native mode was verified, but the original physical display layout could not be restored. " +
+                "The recovery record has been retained.",
+                restoreError);
+        }
+
+        DriverNativeModeVerification.RecordCurrent();
+        return new SessionStartResult(
+            selected.FriendlyName,
+            mode.Width,
+            mode.Height,
+            mode.Fps,
+            HostStatePaths.RecoveryFile);
     }
 
     private SessionStartResult StartCore(

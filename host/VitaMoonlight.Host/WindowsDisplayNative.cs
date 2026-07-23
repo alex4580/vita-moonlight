@@ -16,6 +16,7 @@ internal static class WindowsDisplayNative
     private const uint SetValidate = 0x00000040;
     private const uint SetApply = 0x00000080;
     private const uint SetAllowChanges = 0x00000400;
+    private const uint SetForceModeEnumeration = 0x00001000;
     private const int ErrorInsufficientBuffer = 122;
     private const int GetTargetName = 2;
     private const int GetSourceName = 1;
@@ -161,7 +162,9 @@ internal static class WindowsDisplayNative
         ApplyPaths(new[] { path });
     }
 
-    internal static void ApplyPaths(DisplayPathInfo[] suppliedPaths)
+    internal static void ApplyPaths(
+        DisplayPathInfo[] suppliedPaths,
+        bool forceModeEnumeration = false)
     {
         EnsureWindows();
         if (suppliedPaths.Length == 0)
@@ -181,7 +184,10 @@ internal static class WindowsDisplayNative
             paths,
             0,
             null,
-            SetApply | SetUseSuppliedDisplayConfig | SetAllowChanges);
+            SetApply |
+            SetUseSuppliedDisplayConfig |
+            SetAllowChanges |
+            (forceModeEnumeration ? SetForceModeEnumeration : 0));
         ThrowIfFailed(result, "SetDisplayConfig apply");
     }
 

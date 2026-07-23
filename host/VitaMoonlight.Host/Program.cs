@@ -327,12 +327,11 @@ internal static class Program
         catch (Exception error) when (error is InvalidOperationException or Win32Exception)
         {
             DriverNativeModeVerification.Invalidate();
-            Console.Error.WriteLine(
-                $"Virtual display driver {action}, but native 960x544 verification did not complete: {error.Message}");
-            Console.Error.WriteLine(
-                "Restart Windows, open the Vita Moonlight Host control panel as Administrator, " +
-                "then click Install/update display driver and Apply recommended setup.");
-            return ExitRestartRequired;
+            throw new InvalidOperationException(
+                $"Virtual display driver {action}, but safe native 960x544 verification failed. " +
+                $"The host kept or restored the physical display layout and stopped before configuring Sunshine. " +
+                $"{error.Message}",
+                error);
         }
     }
 
@@ -917,6 +916,17 @@ internal static class Program
         }, "MTT");
         Require(safeVirtualSelection?.FriendlyName == "VDD by MTT",
             "A configured virtual-display match was allowed to select a physical monitor.");
+        var verificationDisplays = DisplayTopologyService.SelectActivePhysicalDisplaysForVerification(new[]
+        {
+            new DisplayDescriptor(0, "Internal Panel", @"\\?\DISPLAY#INTERNAL#1", true, true),
+            new DisplayDescriptor(1, "External Monitor", @"\\?\DISPLAY#EXTERNAL#1", true, true),
+            new DisplayDescriptor(2, "VDD by MTT", @"\\?\DISPLAY#MTT1337#1", true, true),
+            new DisplayDescriptor(3, "Dock Monitor", @"\\?\DISPLAY#DOCK#1", false, true),
+        });
+        Require(
+            verificationDisplays.Length == 2 &&
+            verificationDisplays.All(display => display.IsActive && !DisplayTopologyService.IsLikelyVirtualDisplay(display)),
+            "Safe native-mode verification did not preserve every active physical display.");
         var recoveryDisplays = DisplayTopologyService.SelectPhysicalDisplaysForRecovery(new[]
         {
             new DisplayDescriptor(0, "Internal Panel", @"\\?\DISPLAY#INTERNAL#1", false, true),

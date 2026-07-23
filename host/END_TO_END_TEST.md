@@ -22,11 +22,17 @@ commit.
    On a repair pass, this single action must restore a missing/stopped
    ViGEmBus service, update an unsupported Sunshine build, reinstall and
    verify the VDD at native mode, and reinstall both safeguards. A requested
-   reboot must stop the workflow and explain how to resume it.
+   reboot must stop the workflow and explain how to resume it. During native
+   verification, every active physical monitor must remain part of the
+   topology. A brief display-mode flicker is acceptable; a sustained black
+   physical screen or VDD-only topology is a failure.
 5. Run **Apply recommended setup** again while the VDD is already installed,
    started, and enabled. A PnPUtil code 50 from the enable-device step must be
    treated as a verified no-op; setup must continue through restart and
-   960x544 verification instead of showing a generic exit-code failure.
+   960x544 verification instead of showing a generic exit-code failure. If
+   Windows rejects the mode, setup must restore the original topology, show
+   the final Windows response as an error, and must not request another reboot
+   merely because the mode check failed.
 6. Click **Run health check**. Sunshine, its supported version, ViGEmBus,
    Sunshine gamepad, Microsoft Visual C++ runtime, driver bundle, virtual
    display, recovery task, and

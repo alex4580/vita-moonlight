@@ -42,7 +42,11 @@ or repairs packaged Sunshine, ViGEmBus, the Microsoft Visual C++ runtime, and
 the signed display driver before
 writing configuration, installing recovery safeguards, and restarting
 Sunshine. If Windows requests a reboot, it stops safely and tells you to repeat
-the action after sign-in. The default Vita client profile is **Recommended**:
+the action after sign-in. The native-mode readiness check keeps all active
+physical monitors in the topology, temporarily adds VDD as an extended
+display, requests a fresh driver mode enumeration, and restores the exact
+original layout after one verification pass. It must not leave the VDD as the
+only visible screen. The default Vita client profile is **Recommended**:
 960x544, 60 FPS, 8 Mbps, H.264, and SDR. **Run health check** shows the
 installed host, ViGEmBus state, virtual display, app coverage, SDR policy,
 recovery state, and stream rescue agent.
@@ -187,6 +191,10 @@ If Sunshine logs `Failed to set display mode` and continues capturing the
 physical monitor, click **Install/update display driver**, then **Apply
 recommended setup**. Health check must report **Vita display modes:
 compatibility modes provisioned**.
+If setup instead reports that safe native-mode verification failed, the
+physical layout has already been restored. Do not repeat a restart loop: keep
+the complete error shown by the control panel and report its final Windows
+response together with **Displays > List displays**.
 
 ## Controller, gyro, touch, and keyboard
 

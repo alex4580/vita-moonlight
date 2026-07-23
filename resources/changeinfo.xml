@@ -1,6 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <changeinfo>
 <changes app_ver="00.14"><![CDATA[
+## 0.14.2<br>
+* Keep every active physical monitor visible while setup verifies the Vita virtual display at native 960x544/60.<br>
+* Restore the original display topology once and report the actual Windows mode error instead of repeatedly requesting a reboot.<br>
+<br>
 ## 0.14.1<br>
 * Add native 960x544/60 virtual-display provisioning and controlled in-stream switching between 960x544, 960x540, and 1280x720.<br>
 * Add top-right Frame rate, Frame rate + network, and Advanced overlays with a translucent background.<br>
