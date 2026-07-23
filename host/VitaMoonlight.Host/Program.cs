@@ -16,6 +16,7 @@ internal static class Program
     [STAThread]
     public static int Main(string[] args)
     {
+        TryClearLastCommandError();
         try
         {
             var command = args.FirstOrDefault()?.ToLowerInvariant() ?? "gui";
@@ -47,7 +48,9 @@ internal static class Program
         }
         catch (Exception error)
         {
-            Console.Error.WriteLine($"Error: {error.Message}");
+            var errorDetails = FormatErrorDetails(error);
+            Console.Error.WriteLine($"Error: {errorDetails}");
+            TryWriteLastCommandError(errorDetails);
             if (Environment.GetEnvironmentVariable("VITA_MOONLIGHT_DEBUG") == "1")
             {
                 Console.Error.WriteLine(error);
@@ -643,10 +646,21 @@ internal static class Program
         Require(
             DisplayWizardAdapter.ClassifyPnPUtilExitCode(0) == PnPUtilExitDisposition.Success &&
             DisplayWizardAdapter.ClassifyPnPUtilExitCode(259) == PnPUtilExitDisposition.ContinueToVerification &&
+            DisplayWizardAdapter.ClassifyPnPUtilExitCode(50) == PnPUtilExitDisposition.Failure &&
+            DisplayWizardAdapter.ClassifyPnPUtilExitCode(50, allowAlreadyEnabledNoOp: true) ==
+                PnPUtilExitDisposition.ContinueToVerification &&
             DisplayWizardAdapter.ClassifyPnPUtilExitCode(3010) == PnPUtilExitDisposition.RestartRequired &&
             DisplayWizardAdapter.ClassifyPnPUtilExitCode(1641) == PnPUtilExitDisposition.RestartRequired &&
             DisplayWizardAdapter.ClassifyPnPUtilExitCode(5) == PnPUtilExitDisposition.Failure,
             "PnPUtil exit-code classification failed.");
+        var formattedError = FormatErrorDetails(
+            new InvalidOperationException(
+                "outer setup failure",
+                new Win32Exception(50, "already-enabled device no-op")));
+        Require(
+            formattedError.Contains("outer setup failure", StringComparison.Ordinal) &&
+            formattedError.Contains("already-enabled device no-op", StringComparison.Ordinal),
+            "Host error breadcrumb formatting lost an inner failure.");
         Require(
             !RequiresNativeModeVerification(modesChanged: false, verificationCurrent: true) &&
             RequiresNativeModeVerification(modesChanged: true, verificationCurrent: true) &&
@@ -1037,6 +1051,68 @@ internal static class Program
         if (!condition)
         {
             throw new InvalidOperationException(message);
+        }
+    }
+
+    private static string FormatErrorDetails(Exception error)
+    {
+        var messages = new List<string>();
+
+        void AddError(Exception current)
+        {
+            var message = current.Message.Trim();
+            if (message.Length > 0 &&
+                !messages.Contains(message, StringComparer.Ordinal))
+            {
+                messages.Add(message);
+            }
+
+            if (current is AggregateException aggregate)
+            {
+                foreach (var inner in aggregate.Flatten().InnerExceptions)
+                {
+                    AddError(inner);
+                }
+            }
+            else if (current.InnerException is not null)
+            {
+                AddError(current.InnerException);
+            }
+        }
+
+        AddError(error);
+        return string.Join(Environment.NewLine, messages);
+    }
+
+    private static void TryClearLastCommandError()
+    {
+        try
+        {
+            if (File.Exists(HostStatePaths.LastErrorFile))
+            {
+                File.Delete(HostStatePaths.LastErrorFile);
+            }
+        }
+        catch (Exception error) when (
+            error is IOException or UnauthorizedAccessException)
+        {
+            // A stale diagnostic breadcrumb must never block the requested command.
+        }
+    }
+
+    private static void TryWriteLastCommandError(string details)
+    {
+        try
+        {
+            Directory.CreateDirectory(HostStatePaths.Root);
+            File.WriteAllText(
+                HostStatePaths.LastErrorFile,
+                $"Vita Moonlight Host command failed at {DateTimeOffset.Now:O}{Environment.NewLine}{details}{Environment.NewLine}");
+        }
+        catch (Exception error) when (
+            error is IOException or UnauthorizedAccessException)
+        {
+            // The original command failure remains authoritative.
         }
     }
 

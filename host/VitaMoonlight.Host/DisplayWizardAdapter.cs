@@ -154,11 +154,13 @@ internal sealed class DisplayWizardAdapter
         }
         foreach (var instanceId in instanceIds)
         {
-            EnsurePnPUtilSucceeded(RunProcess(
-                "pnputil.exe",
-                Path.GetDirectoryName(executablePath)!,
-                45000,
-                "/enable-device", instanceId));
+            EnsurePnPUtilSucceeded(
+                RunProcess(
+                    "pnputil.exe",
+                    Path.GetDirectoryName(executablePath)!,
+                    45000,
+                    "/enable-device", instanceId),
+                allowAlreadyEnabledNoOp: true);
             EnsurePnPUtilSucceeded(RunProcess(
                 "pnputil.exe",
                 Path.GetDirectoryName(executablePath)!,
@@ -330,11 +332,14 @@ internal sealed class DisplayWizardAdapter
                 .Any(rate => rate.Value == mode.Fps.ToString())));
     }
 
-    internal static PnPUtilExitDisposition ClassifyPnPUtilExitCode(int exitCode) =>
+    internal static PnPUtilExitDisposition ClassifyPnPUtilExitCode(
+        int exitCode,
+        bool allowAlreadyEnabledNoOp = false) =>
         exitCode switch
         {
             0 => PnPUtilExitDisposition.Success,
             259 => PnPUtilExitDisposition.ContinueToVerification,
+            50 when allowAlreadyEnabledNoOp => PnPUtilExitDisposition.ContinueToVerification,
             1641 or 3010 => PnPUtilExitDisposition.RestartRequired,
             _ => PnPUtilExitDisposition.Failure,
         };
@@ -392,16 +397,20 @@ internal sealed class DisplayWizardAdapter
         }
     }
 
-    private static void EnsurePnPUtilSucceeded(ProcessExecutionResult result)
+    private static void EnsurePnPUtilSucceeded(
+        ProcessExecutionResult result,
+        bool allowAlreadyEnabledNoOp = false)
     {
-        switch (ClassifyPnPUtilExitCode(result.ExitCode))
+        switch (ClassifyPnPUtilExitCode(result.ExitCode, allowAlreadyEnabledNoOp))
         {
             case PnPUtilExitDisposition.Success:
                 return;
             case PnPUtilExitDisposition.ContinueToVerification:
-                Console.WriteLine(
-                    "PnPUtil made no device change because no target matched or Windows already has an equal/newer driver. " +
-                    "Continuing to explicit display enumeration and native-mode verification.");
+                Console.WriteLine(result.ExitCode == 50
+                    ? "PnPUtil reports that enabling the already-enabled display device is unsupported on this Windows build. " +
+                      "Continuing to device restart and explicit native-mode verification."
+                    : "PnPUtil made no device change because no target matched or Windows already has an equal/newer driver. " +
+                      "Continuing to explicit display enumeration and native-mode verification.");
                 return;
             case PnPUtilExitDisposition.RestartRequired:
                 DriverNativeModeVerification.Invalidate();

@@ -128,6 +128,10 @@ release notes.
       3010/reboot-required result and verify no Sunshine display configuration
       or active-display change runs until after the reboot and the user resumes
       from the GUI.
+- [ ] Repeat setup with an already-enabled VDD on Windows 11. PnPUtil error 50
+      is accepted only for enable-device, native 960x544 is still verified, and
+      any genuine failure is shown with the host error rather than only an exit
+      code.
 - [ ] The installer and portable companion reject Windows Server, ARM64, x86,
       and Windows builds older than 19041 before setup actions. `doctor` must
       report the unsupported platform and remain non-mutating.

@@ -19,6 +19,11 @@
 * Made the Windows installer and **Apply recommended setup** verify or repair
   Sunshine, ViGEmBus, and native VDD readiness with checked failures and an
   explicit stop-and-resume path when Windows requires a reboot.
+* Fixed repair installs failing on Windows builds where PnPUtil reports error
+  50 for an already-enabled VDD. That result is accepted only for the
+  enable-device step and is followed by device restart and native-mode
+  verification. Installer failures now include the host's concrete error
+  breadcrumb instead of only a numeric exit code.
 
 ## 0.14.0
 

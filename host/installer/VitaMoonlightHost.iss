@@ -100,6 +100,10 @@ function RunHostCommand(
   const Description: String;
   const Parameters: String;
   var ResultCode: Integer): Boolean;
+var
+  ErrorDetails: AnsiString;
+  ErrorPath: String;
+  ErrorText: String;
 begin
   WizardForm.StatusLabel.Caption := Description;
   WizardForm.StatusLabel.Update;
@@ -132,9 +136,24 @@ begin
 
   if ResultCode <> 0 then
   begin
-    RaiseException(
-      Description + ' failed with exit code ' + IntToStr(ResultCode) + '.' + #13#10 +
-      'No later host-configuration steps were run.');
+    ErrorPath := ExpandConstant(
+      '{commonappdata}\VitaMoonlight\last-command-error.txt');
+    ErrorText := '';
+    if LoadStringFromFile(ErrorPath, ErrorDetails) then
+      ErrorText := Trim(ErrorDetails);
+    if ErrorText <> '' then
+    begin
+      RaiseException(
+        Description + ' failed with exit code ' + IntToStr(ResultCode) + '.' + #13#10 + #13#10 +
+        ErrorText + #13#10 + #13#10 +
+        'No later host-configuration steps were run.');
+    end
+    else
+    begin
+      RaiseException(
+        Description + ' failed with exit code ' + IntToStr(ResultCode) + '.' + #13#10 +
+        'No later host-configuration steps were run.');
+    end;
   end;
   Result := True;
 end;

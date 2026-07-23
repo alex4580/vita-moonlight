@@ -23,7 +23,11 @@ commit.
    ViGEmBus service, update an unsupported Sunshine build, reinstall and
    verify the VDD at native mode, and reinstall both safeguards. A requested
    reboot must stop the workflow and explain how to resume it.
-5. Click **Run health check**. Sunshine, its supported version, ViGEmBus,
+5. Run **Apply recommended setup** again while the VDD is already installed,
+   started, and enabled. A PnPUtil code 50 from the enable-device step must be
+   treated as a verified no-op; setup must continue through restart and
+   960x544 verification instead of showing a generic exit-code failure.
+6. Click **Run health check**. Sunshine, its supported version, ViGEmBus,
    Sunshine gamepad, Microsoft Visual C++ runtime, driver bundle, virtual
    display, recovery task, and
    **Stream rescue** must report ready. **Vita display modes** must say the

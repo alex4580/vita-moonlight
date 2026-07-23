@@ -45,6 +45,7 @@ internal static class HostStatePaths
     internal static string LockFile => Path.Combine(Root, "session.lock");
     internal static string RescueStatusFile => Path.Combine(Root, "stream-rescue-status.json");
     internal static string RescueLogFile => Path.Combine(Root, "stream-rescue.log");
+    internal static string LastErrorFile => Path.Combine(Root, "last-command-error.txt");
 }
 
 internal sealed class DisplayTopologyService
