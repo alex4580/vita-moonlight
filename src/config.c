@@ -37,7 +37,7 @@ extern char* strdup(const char*);
 #define USER_PATHS "."
 #define DEFAULT_CONFIG_DIR "/.config"
 #define DEFAULT_CACHE_DIR "/.cache"
-#define CURRENT_CONFIG_VERSION 4
+#define CURRENT_CONFIG_VERSION 5
 #define DEFAULT_STREAM_WIDTH 960
 #define DEFAULT_STREAM_HEIGHT 544
 #define DEFAULT_STREAM_FPS 60
@@ -68,6 +68,153 @@ int config_recommended_bitrate(int width, int height, int fps) {
     return fps >= 60 ? 12000 : 8000;
   }
   return fps >= 60 ? 16000 : 10000;
+}
+
+static bool stream_preset_base_matches(void) {
+  return config.stream.width == 960 &&
+         config.stream.height == 544 &&
+         config.stream.packetSize == 1024 &&
+         config.stream.audioConfiguration == AUDIO_CONFIGURATION_STEREO &&
+         config.stream.supportedVideoFormats == VIDEO_FORMAT_H264 &&
+         config.stream.clientRefreshRateX100 == 6000 &&
+         config.stream.colorSpace == COLORSPACE_REC_709 &&
+         config.stream.colorRange == COLOR_RANGE_LIMITED &&
+         config.sops &&
+         !config.localaudio &&
+         config.enable_ref_frame_invalidation &&
+         config.enable_frame_pacer &&
+         !config.enable_vita_vblank_wait &&
+         !config.center_region_only &&
+         config.disable_powersave;
+}
+
+int config_detect_stream_preset(void) {
+  if (!stream_preset_base_matches()) return STREAM_PRESET_CUSTOM;
+
+  if (config.stream.fps == 30 &&
+      config.stream.bitrate == 5000 &&
+      config.stream.streamingRemotely == STREAM_CFG_AUTO) {
+    return STREAM_PRESET_RELIABLE;
+  }
+  if (config.stream.fps == 60 &&
+      config.stream.bitrate == 8000 &&
+      config.stream.streamingRemotely == STREAM_CFG_AUTO) {
+    return STREAM_PRESET_RECOMMENDED;
+  }
+  if (config.stream.fps == 60 &&
+      config.stream.bitrate == 12000 &&
+      config.stream.streamingRemotely == STREAM_CFG_AUTO) {
+    return STREAM_PRESET_QUALITY;
+  }
+  if (config.stream.fps == 30 &&
+      config.stream.bitrate == 4000 &&
+      config.stream.streamingRemotely == STREAM_CFG_REMOTE) {
+    return STREAM_PRESET_REMOTE;
+  }
+  return STREAM_PRESET_CUSTOM;
+}
+
+void config_apply_stream_preset(int preset) {
+  if (preset < STREAM_PRESET_RELIABLE || preset > STREAM_PRESET_REMOTE) {
+    preset = STREAM_PRESET_RECOMMENDED;
+  }
+
+  config.stream.width = 960;
+  config.stream.height = 544;
+  config.stream.packetSize = 1024;
+  config.stream.streamingRemotely =
+      preset == STREAM_PRESET_REMOTE ? STREAM_CFG_REMOTE : STREAM_CFG_AUTO;
+  config.stream.audioConfiguration = AUDIO_CONFIGURATION_STEREO;
+  config.stream.supportedVideoFormats = VIDEO_FORMAT_H264;
+  config.stream.clientRefreshRateX100 = 6000;
+  config.stream.colorSpace = COLORSPACE_REC_709;
+  config.stream.colorRange = COLOR_RANGE_LIMITED;
+  config.sops = true;
+  config.localaudio = false;
+  config.enable_ref_frame_invalidation = true;
+  config.enable_frame_pacer = true;
+  config.enable_vita_vblank_wait = false;
+  config.center_region_only = false;
+  config.disable_powersave = true;
+
+  switch (preset) {
+    case STREAM_PRESET_RELIABLE:
+      config.stream.fps = 30;
+      config.stream.bitrate = 5000;
+      break;
+    case STREAM_PRESET_QUALITY:
+      config.stream.fps = 60;
+      config.stream.bitrate = 12000;
+      break;
+    case STREAM_PRESET_REMOTE:
+      config.stream.fps = 30;
+      config.stream.bitrate = 4000;
+      break;
+    default:
+      config.stream.fps = 60;
+      config.stream.bitrate = 8000;
+      break;
+  }
+}
+
+const char *config_stream_preset_name(int preset) {
+  switch (preset) {
+    case STREAM_PRESET_RELIABLE: return "Reliable";
+    case STREAM_PRESET_RECOMMENDED: return "Recommended";
+    case STREAM_PRESET_QUALITY: return "High quality";
+    case STREAM_PRESET_REMOTE: return "Remote / VPN";
+    default: return "Custom";
+  }
+}
+
+int config_detect_controller_profile(void) {
+  bool common = !config.swap_shoulder_buttons &&
+                config.mapping == NULL &&
+                !config.enable_double_tap_sprint;
+  if (common &&
+      config.controller_type == 1 &&
+      !config.enable_motion_controls &&
+      config.touchscreen_mode == 0 &&
+      config.psbutton_mode == PSBUTTON_MODE_LOCAL_ESCAPE) {
+    return CONTROLLER_PROFILE_COMPATIBILITY;
+  }
+  if (common &&
+      config.controller_type == 2 &&
+      config.enable_motion_controls &&
+      config.touchscreen_mode == 1 &&
+      config.psbutton_mode == PSBUTTON_MODE_SAFE_GUIDE) {
+    return CONTROLLER_PROFILE_STEAM;
+  }
+  return CONTROLLER_PROFILE_CUSTOM;
+}
+
+void config_apply_controller_profile(int profile) {
+  if (config.mapping) {
+    free(config.mapping);
+    config.mapping = NULL;
+  }
+  config.swap_shoulder_buttons = false;
+  config.enable_double_tap_sprint = false;
+
+  if (profile == CONTROLLER_PROFILE_STEAM) {
+    config.controller_type = 2;
+    config.enable_motion_controls = true;
+    config.touchscreen_mode = 1;
+    config.psbutton_mode = PSBUTTON_MODE_SAFE_GUIDE;
+  } else {
+    config.controller_type = 1;
+    config.enable_motion_controls = false;
+    config.touchscreen_mode = 0;
+    config.psbutton_mode = PSBUTTON_MODE_LOCAL_ESCAPE;
+  }
+}
+
+const char *config_controller_profile_name(int profile) {
+  switch (profile) {
+    case CONTROLLER_PROFILE_COMPATIBILITY: return "Maximum compatibility";
+    case CONTROLLER_PROFILE_STEAM: return "Steam / DS4 + gyro";
+    default: return "Custom";
+  }
 }
 
 bool inputAdded = false;
@@ -146,6 +293,8 @@ static int ini_handle(void *out, const char *section, const char *name,
       config->jp_layout = BOOL(value);
     } else if (strcmp(name, "show_fps") == 0) {
       config->show_fps = BOOL(value);
+    } else if (strcmp(name, "performance_overlay_mode") == 0) {
+      config->performance_overlay_mode = INT(value);
     } else if (strcmp(name, "save_debug_log") == 0) {
       config->save_debug_log = BOOL(value);
     } else if (strcmp(name, "mapping") == 0) {
@@ -209,7 +358,14 @@ static void config_sanitize(PCONFIGURATION config) {
   if (config->stream.packetSize < 512 || config->stream.packetSize > 1400) {
     config->stream.packetSize = DEFAULT_PACKET_SIZE;
   }
-  config->stream.streamingRemotely = config->stream.streamingRemotely ? 1 : 0;
+  if (config->performance_overlay_mode < 0 ||
+      config->performance_overlay_mode > 3) {
+    config->performance_overlay_mode = 0;
+  }
+  if (config->stream.streamingRemotely < STREAM_CFG_LOCAL ||
+      config->stream.streamingRemotely > STREAM_CFG_AUTO) {
+    config->stream.streamingRemotely = STREAM_CFG_AUTO;
+  }
   if (config->controller_type != 1 && config->controller_type != 2) {
     config->controller_type = 1;
   }
@@ -273,6 +429,7 @@ void config_save(const char* filename, PCONFIGURATION config) {
   write_config_bool(fd, "disable_powersave", config->disable_powersave);
   write_config_bool(fd, "jp_layout", config->jp_layout);
   write_config_bool(fd, "show_fps", config->show_fps);
+  write_config_int(fd, "performance_overlay_mode", config->performance_overlay_mode);
   write_config_bool(fd, "save_debug_log", config->save_debug_log);
   write_config_bool(fd, "enable_front_touchzones", config->enable_front_touchzones);
 
@@ -329,9 +486,12 @@ void config_parse(int argc, char* argv[], PCONFIGURATION config) {
   config->stream.fps = DEFAULT_STREAM_FPS;
   config->stream.bitrate = -1;
   config->stream.packetSize = DEFAULT_PACKET_SIZE;
-  config->stream.streamingRemotely = 0;
+  config->stream.streamingRemotely = STREAM_CFG_AUTO;
   config->stream.audioConfiguration = AUDIO_CONFIGURATION_STEREO;
   config->stream.supportedVideoFormats = VIDEO_FORMAT_H264;
+  config->stream.clientRefreshRateX100 = 6000;
+  config->stream.colorSpace = COLORSPACE_REC_709;
+  config->stream.colorRange = COLOR_RANGE_LIMITED;
 
   config->platform = "vita";
   config->model = sceKernelGetModelForCDialog();
@@ -347,6 +507,7 @@ void config_parse(int argc, char* argv[], PCONFIGURATION config) {
   config->disable_powersave = true;
   config->jp_layout = false;
   config->show_fps = false;
+  config->performance_overlay_mode = 0;
   config->enable_frame_pacer = true;
   config->center_region_only = false;
 
@@ -359,7 +520,7 @@ void config_parse(int argc, char* argv[], PCONFIGURATION config) {
   config->mouse_acceleration = 150;
   config->enable_ref_frame_invalidation = true;
   config->enable_vita_vblank_wait = false;
-  config->enable_motion_controls = true;
+  config->enable_motion_controls = false;
   config->psbutton_mode = PSBUTTON_MODE_LOCAL_ESCAPE;
   config->enable_double_tap_sprint = false;
   config->touchscreen_mode = 0;
@@ -384,9 +545,35 @@ void config_parse(int argc, char* argv[], PCONFIGURATION config) {
     vita_debug_log("[DEBUG] Configuración cargada: key_dir = %s, touchscreen_mode = %d, show_fps = %d", config->key_dir, config->touchscreen_mode, config->show_fps);
   }
 
+  // Preserve the old FPS-counter preference without drawing both overlays.
+  if (config->show_fps && config->performance_overlay_mode == 0) {
+    config->performance_overlay_mode = 1;
+    config->show_fps = false;
+  }
+
   config_sanitize(config);
 
   if (config->config_version < CURRENT_CONFIG_VERSION) {
+    // Version 4 exposed network routing as a boolean. Migrate configurations
+    // matching the old built-in profiles to the safer automatic route without
+    // changing genuinely custom or explicit remote configurations.
+    if (config->config_version < 5 &&
+        config->stream.streamingRemotely == STREAM_CFG_LOCAL &&
+        stream_preset_base_matches() &&
+        ((config->stream.fps == 30 && config->stream.bitrate == 5000) ||
+         (config->stream.fps == 60 && config->stream.bitrate == 8000) ||
+         (config->stream.fps == 60 && config->stream.bitrate == 12000))) {
+      config->stream.streamingRemotely = STREAM_CFG_AUTO;
+    }
+    if (config->config_version < 5 &&
+        config->controller_type == 1 &&
+        config->touchscreen_mode == 0 &&
+        config->psbutton_mode == PSBUTTON_MODE_LOCAL_ESCAPE &&
+        !config->swap_shoulder_buttons &&
+        config->mapping == NULL &&
+        !config->enable_double_tap_sprint) {
+      config->enable_motion_controls = false;
+    }
     if (config->config_version < 2 &&
         config->stream.width <= 960 && config->stream.height <= 544 &&
         config->stream.bitrate > 0 && config->stream.bitrate <= 5000) {

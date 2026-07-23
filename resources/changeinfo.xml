@@ -1,6 +1,15 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <changeinfo>
 <changes app_ver="00.14"><![CDATA[
+## 0.14.1<br>
+* Add native 960x544/60 virtual-display provisioning and controlled in-stream switching between 960x544, 960x540, and 1280x720.<br>
+* Add top-right Frame rate, Frame rate + network, and Advanced overlays with a translucent background.<br>
+* Move live diagnostics to a dedicated screen and make append-only file logging optional and off by default.<br>
+* Add complete Reliable, Recommended, High quality, and Remote / VPN presets with matching pre-stream and in-stream controls.<br>
+* Separate stream-resolution and input reconnect actions so controller changes do not reset the virtual display.<br>
+* Harden stalled-video rendering, reconnect cleanup, input suppression, Sunshine compatibility checks, and physical-display recovery.<br>
+* Expand the Windows GUI companion, installer, documentation, and release acceptance tests.<br>
+<br>
 ## 0.14.0<br>
 * Make START + L + R reliable in any button order with a longer START-led window.<br>
 * Keep single PS presses local by default while preserving double-PS LiveArea escape; add Safe Guide, Immediate Guide, and System modes.<br>

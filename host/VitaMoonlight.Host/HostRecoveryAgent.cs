@@ -10,10 +10,15 @@ internal sealed record HostRescueStatus(
     bool Success,
     string Message);
 
+internal sealed record HostModeHotkeyStatus(
+    VitaDisplayMode Mode,
+    bool Ready);
+
 internal static class HostRecoveryAgentManager
 {
     internal const string TaskName = "Vita Moonlight stream rescue agent";
     internal const string MutexName = @"Local\VitaMoonlight.StreamRescueAgent";
+    internal const string ReadyEventName = @"Local\VitaMoonlight.StreamRescueAgent.Ready";
     internal const string WindowCaption = "Vita Moonlight stream rescue agent";
     private const int WmClose = 0x0010;
 
@@ -34,21 +39,42 @@ internal static class HostRecoveryAgentManager
             // The previous agent stopped unexpectedly; this process owns the mutex now.
         }
 
+        using var ready = new EventWaitHandle(false, EventResetMode.ManualReset, ReadyEventName);
+        ready.Reset();
         try
         {
-            Application.Run(new HostRecoveryAgentContext());
+            using var context = new HostRecoveryAgentContext();
+            ready.Set();
+            Application.Run(context);
             return 0;
         }
         finally
         {
+            ready.Reset();
             mutex.ReleaseMutex();
         }
     }
 
     internal static bool IsInstalled() => RunTask("/Query", "/TN", TaskName) == 0;
 
-    internal static bool IsRunning()
+    internal static bool IsRunning() => IsProcessPresent() && IsEventSignaled(ReadyEventName);
+
+    internal static IReadOnlyList<HostModeHotkeyStatus> GetModeHotkeyReadiness()
     {
+        var agentReady = IsRunning();
+        return VitaDisplayModes.Supported
+            .Select(mode => new HostModeHotkeyStatus(
+                mode,
+                agentReady && IsEventSignaled(ModeHotkeyReadyEventName(mode))))
+            .ToArray();
+    }
+
+    internal static string ModeHotkeyReadyEventName(VitaDisplayMode mode) =>
+        $@"Local\VitaMoonlight.StreamRescueAgent.Mode.{mode.Width}x{mode.Height}x{mode.Fps}";
+
+    private static bool IsProcessPresent()
+    {
+        if (!OperatingSystem.IsWindows()) return false;
         try
         {
             using var mutex = Mutex.OpenExisting(MutexName);
@@ -61,6 +87,24 @@ internal static class HostRecoveryAgentManager
         catch (UnauthorizedAccessException)
         {
             return true;
+        }
+    }
+
+    private static bool IsEventSignaled(string name)
+    {
+        if (!OperatingSystem.IsWindows()) return false;
+        try
+        {
+            using var ready = EventWaitHandle.OpenExisting(name);
+            return ready.WaitOne(0);
+        }
+        catch (WaitHandleCannotBeOpenedException)
+        {
+            return false;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return false;
         }
     }
 
@@ -87,10 +131,11 @@ internal static class HostRecoveryAgentManager
         {
             throw new InvalidOperationException("Windows created the stream rescue agent but could not start it.");
         }
-        for (var attempt = 0; attempt < 30 && !IsRunning(); attempt++) Thread.Sleep(100);
+        for (var attempt = 0; attempt < 100 && !IsRunning(); attempt++) Thread.Sleep(100);
         if (!IsRunning())
         {
-            throw new InvalidOperationException("Windows started the stream rescue task, but its hotkey agent did not remain running.");
+            throw new InvalidOperationException(
+                "Windows started the stream rescue task, but its mandatory close-game and display-recovery hotkeys did not become ready.");
         }
     }
 
@@ -159,8 +204,8 @@ internal static class HostRecoveryAgentManager
         uint processId = 0;
         if (window != IntPtr.Zero) GetWindowThreadProcessId(window, out processId);
         if (window != IntPtr.Zero) PostMessage(window, WmClose, IntPtr.Zero, IntPtr.Zero);
-        for (var attempt = 0; attempt < 10 && IsRunning(); attempt++) Thread.Sleep(100);
-        if (IsRunning() && processId > 4 && processId != Environment.ProcessId)
+        for (var attempt = 0; attempt < 10 && IsProcessPresent(); attempt++) Thread.Sleep(100);
+        if (IsProcessPresent() && processId > 4 && processId != Environment.ProcessId)
         {
             try
             {
@@ -176,8 +221,8 @@ internal static class HostRecoveryAgentManager
                 // The final mutex check below reports a persistent agent with actionable guidance.
             }
         }
-        for (var attempt = 0; attempt < 20 && IsRunning(); attempt++) Thread.Sleep(100);
-        if (IsRunning())
+        for (var attempt = 0; attempt < 20 && IsProcessPresent(); attempt++) Thread.Sleep(100);
+        if (IsProcessPresent())
         {
             throw new InvalidOperationException(
                 "An earlier stream rescue agent is still running. Sign out once, then repair the agent from the control panel.");
@@ -267,23 +312,51 @@ internal sealed class HostRecoveryHotkeyWindow : NativeWindow, IDisposable
     private const int WmHotkey = 0x0312;
     private const int CloseForegroundHotkeyId = 1;
     private const int RecoverDisplayHotkeyId = 2;
+    private const int Mode960x540HotkeyId = 3;
+    private const int Mode960x544HotkeyId = 4;
+    private const int Mode1280x720HotkeyId = 5;
     private const uint ModAlt = 0x0001;
     private const uint ModControl = 0x0002;
     private const uint ModShift = 0x0004;
     private const uint ModNoRepeat = 0x4000;
     private const uint VkF11 = 0x7A;
     private const uint VkF12 = 0x7B;
+    private const uint VkF8 = 0x77;
+    private const uint VkF9 = 0x78;
+    private const uint VkF10 = 0x79;
+    private readonly HashSet<int> registeredHotkeys = new();
+    private readonly List<EventWaitHandle> modeReadinessEvents = new();
     private int actionRunning;
+    private bool disposed;
 
     internal HostRecoveryHotkeyWindow()
     {
         CreateHandle(new CreateParams { Caption = HostRecoveryAgentManager.WindowCaption });
         var modifiers = ModAlt | ModControl | ModShift | ModNoRepeat;
-        if (!RegisterHotKey(Handle, CloseForegroundHotkeyId, modifiers, VkF12) ||
-            !RegisterHotKey(Handle, RecoverDisplayHotkeyId, modifiers, VkF11))
+        try
+        {
+            RegisterRequiredHotkey(CloseForegroundHotkeyId, modifiers, VkF12, "close-game");
+            RegisterRequiredHotkey(RecoverDisplayHotkeyId, modifiers, VkF11, "display-recovery");
+            RegisterOptionalModeHotkey(
+                Mode960x540HotkeyId,
+                modifiers,
+                VkF8,
+                new VitaDisplayMode(960, 540, 60));
+            RegisterOptionalModeHotkey(
+                Mode960x544HotkeyId,
+                modifiers,
+                VkF9,
+                VitaDisplayModes.Native);
+            RegisterOptionalModeHotkey(
+                Mode1280x720HotkeyId,
+                modifiers,
+                VkF10,
+                new VitaDisplayMode(1280, 720, 60));
+        }
+        catch
         {
             Dispose();
-            throw new InvalidOperationException("The Vita Moonlight rescue hotkeys could not be registered.");
+            throw;
         }
     }
 
@@ -309,6 +382,10 @@ internal sealed class HostRecoveryHotkeyWindow : NativeWindow, IDisposable
                     {
                         HostRecoveryActions.RecoverDisplayAndStreamingHost();
                     }
+                    else if (ModeForHotkeyId(hotkeyId) is { } mode)
+                    {
+                        HostRecoveryActions.ChangeVirtualDisplayMode(mode);
+                    }
                 }
                 finally
                 {
@@ -322,10 +399,71 @@ internal sealed class HostRecoveryHotkeyWindow : NativeWindow, IDisposable
 
     public void Dispose()
     {
-        if (Handle == IntPtr.Zero) return;
-        UnregisterHotKey(Handle, CloseForegroundHotkeyId);
-        UnregisterHotKey(Handle, RecoverDisplayHotkeyId);
-        DestroyHandle();
+        if (disposed) return;
+        disposed = true;
+        if (Handle != IntPtr.Zero)
+        {
+            foreach (var hotkeyId in registeredHotkeys)
+            {
+                UnregisterHotKey(Handle, hotkeyId);
+            }
+            registeredHotkeys.Clear();
+            DestroyHandle();
+        }
+        foreach (var readiness in modeReadinessEvents)
+        {
+            readiness.Reset();
+            readiness.Dispose();
+        }
+        modeReadinessEvents.Clear();
+    }
+
+    internal static VitaDisplayMode? ModeForHotkeyId(int hotkeyId) => hotkeyId switch
+    {
+        Mode960x540HotkeyId => new VitaDisplayMode(960, 540, 60),
+        Mode960x544HotkeyId => VitaDisplayModes.Native,
+        Mode1280x720HotkeyId => new VitaDisplayMode(1280, 720, 60),
+        _ => null,
+    };
+
+    private void RegisterRequiredHotkey(int hotkeyId, uint modifiers, uint virtualKey, string action)
+    {
+        if (!RegisterHotKey(Handle, hotkeyId, modifiers, virtualKey))
+        {
+            var error = Marshal.GetLastWin32Error();
+            throw new InvalidOperationException(
+                $"The mandatory Vita Moonlight {action} hotkey could not be registered (Windows error {error}).");
+        }
+        registeredHotkeys.Add(hotkeyId);
+    }
+
+    private void RegisterOptionalModeHotkey(
+        int hotkeyId,
+        uint modifiers,
+        uint virtualKey,
+        VitaDisplayMode mode)
+    {
+        EventWaitHandle readiness;
+        try
+        {
+            readiness = new EventWaitHandle(
+                false,
+                EventResetMode.ManualReset,
+                HostRecoveryAgentManager.ModeHotkeyReadyEventName(mode));
+            readiness.Reset();
+            modeReadinessEvents.Add(readiness);
+        }
+        catch (Exception error) when (error is UnauthorizedAccessException or IOException)
+        {
+            return;
+        }
+
+        if (!RegisterHotKey(Handle, hotkeyId, modifiers, virtualKey))
+        {
+            return;
+        }
+        registeredHotkeys.Add(hotkeyId);
+        readiness.Set();
     }
 
     [DllImport("user32.dll", SetLastError = true)]
@@ -392,6 +530,22 @@ internal static class HostRecoveryActions
         catch (Exception error)
         {
             return Record("close-foreground", false, error.Message);
+        }
+    }
+
+    internal static HostRescueStatus ChangeVirtualDisplayMode(VitaDisplayMode mode)
+    {
+        try
+        {
+            var result = new SessionManager().ChangeMode(mode.Width, mode.Height, mode.Fps);
+            return Record(
+                $"display-mode-{mode.Width}x{mode.Height}",
+                true,
+                $"Changed {result.DisplayName} to {result.Mode}.");
+        }
+        catch (Exception error)
+        {
+            return Record($"display-mode-{mode.Width}x{mode.Height}", false, error.Message);
         }
     }
 

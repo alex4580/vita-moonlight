@@ -1,3 +1,25 @@
+## 0.14.1
+
+* Added a dedicated real-time diagnostics screen and optional append-only Vita
+  log. Logging is off by default, opens no file until enabled, and can be
+  toggled before or during a stream.
+* Added top-right performance overlays for frame rate, frame rate plus network,
+  and advanced stream/decode statistics. The overlays use a 50%-alpha
+  background and avoid extended metric collection when it is not needed.
+* Replaced partial bitrate-only choices with complete Reliable, Recommended,
+  High quality, and Remote / VPN streaming presets. Added matching preset and
+  input controls before and during a stream, clearer tradeoff explanations, and
+  a full recommended-settings reset.
+* Made native 960x544/60 the first-run client and virtual-display mode. Added
+  managed 960x540 and 1280x720 compatibility modes and a controlled in-stream
+  display change that updates the active VDD, reconnects Moonlight, and leaves
+  the Windows game running.
+* Hardened virtual-display provisioning, verification, rescue hotkeys, and
+  physical-display recovery across clean installs and repair installs.
+* Made the Windows installer and **Apply recommended setup** verify or repair
+  Sunshine, ViGEmBus, and native VDD readiness with checked failures and an
+  explicit stop-and-resume path when Windows requires a reboot.
+
 ## 0.14.0
 
 * Added a Steam / DS4 controller preset that enables Vita gyro, DS4 touchpad,

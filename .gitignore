@@ -1,7 +1,10 @@
 build/*
+/artifacts/
 .DS_Store
 .cache/*
 .tools/
+__pycache__/
+*.py[cod]
 compile_commands.json
 venv/*
 host/**/bin/

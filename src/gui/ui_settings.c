@@ -2,6 +2,7 @@
 
 #include "guilib.h"
 #include "ime.h"
+#include "ui_diagnostics.h"
 #include "ui_keyboard.h"
 
 #include "../config.h"
@@ -79,24 +80,17 @@ char *settings_special_names[] = {
   "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12"
 };
 
-#define MAX_RESOLUTION 9
+#define MAX_RESOLUTION 3
 static int RESOLUTIONS[MAX_RESOLUTION][2] = {
-  {960, 540},   // 16:9, QHD
   {960, 544},   // VITA original
-  {1024, 576},  // 16:9
-  {1152, 648},  // 16:9
-  {1280, 540},  // 21:9
+  {960, 540},   // strict 16:9 compatibility
   {1280, 720},  // 16:9, 720p HD
-  {1366, 768},  // 16:9, WXGA
-  {1600, 900},  // 16:9, 900p HD+
-  //{1720, 720},  // 21:9
-  {1920, 1080}, // 16:9, FHD
-  //{1920, 1200}, // 16:10
 };
 
 int support_resolution_idx[MAX_RESOLUTION] = {-1};
 char *support_resolutions[MAX_RESOLUTION] = {0};
 int support_resolution_count = 0;
+static bool support_resolution_probe_complete = false;
 
 static bool settings_loop_setup = 1;
 
@@ -402,75 +396,18 @@ static int special_keys_menu() {
 
 
 
-// --- Controller Type Selection ---
-static const char* controller_type_names[] = {"Xbox / local PS", "Steam / DS4 + gyro"};
-static int controller_type_values[] = {1, 2}; // 1: Xbox, 2: PS
-#define CONTROLLER_TYPE_COUNT 2
 static const char* touch_mode_names[] = {"Relative mouse", "DS4 Touchpad", "Mouse Absolute", "Tablet (Sunshine)"};
-static const char* stream_preset_names[] = {"Reliable", "Balanced", "High quality", "Custom"};
 static const char* psbutton_mode_names[] = {
   "Local double-tap",
   "Safe PC Guide",
   "Immediate PC Guide",
   "System / LiveArea"
 };
-
-enum {
-  STREAM_PRESET_RELIABLE,
-  STREAM_PRESET_BALANCED,
-  STREAM_PRESET_QUALITY,
-  STREAM_PRESET_CUSTOM
+static const char* network_mode_names[] = {
+  "Local only",
+  "Remote / VPN",
+  "Auto detect"
 };
-
-static int detect_stream_preset(void) {
-  if (config.stream.width != 960 || config.stream.height != 544 ||
-      !config.enable_ref_frame_invalidation || !config.enable_frame_pacer ||
-      config.enable_vita_vblank_wait) {
-    return STREAM_PRESET_CUSTOM;
-  }
-  if (config.stream.fps == 30 && config.stream.bitrate == 5000) return STREAM_PRESET_RELIABLE;
-  if (config.stream.fps == 60 && config.stream.bitrate == 8000) return STREAM_PRESET_BALANCED;
-  if (config.stream.fps == 60 && config.stream.bitrate == 12000) return STREAM_PRESET_QUALITY;
-  return STREAM_PRESET_CUSTOM;
-}
-
-static void apply_stream_preset(int preset) {
-  config.stream.width = 960;
-  config.stream.height = 544;
-  config.enable_ref_frame_invalidation = true;
-  config.enable_frame_pacer = true;
-  config.enable_vita_vblank_wait = false;
-  if (preset == STREAM_PRESET_RELIABLE) {
-    config.stream.fps = 30;
-    config.stream.bitrate = 5000;
-  } else if (preset == STREAM_PRESET_QUALITY) {
-    config.stream.fps = 60;
-    config.stream.bitrate = 12000;
-  } else {
-    config.stream.fps = 60;
-    config.stream.bitrate = 8000;
-  }
-}
-
-static int get_controller_type_index(int value) {
-  for (int i = 0; i < CONTROLLER_TYPE_COUNT; ++i) {
-    if (controller_type_values[i] == value) return i;
-  }
-  return 0; // Default to the broadest Windows/XInput compatibility
-}
-
-static void apply_controller_profile(int controller_type) {
-  config.controller_type = controller_type;
-  if (controller_type == 2) {
-    config.enable_motion_controls = true;
-    config.touchscreen_mode = 1;
-    config.psbutton_mode = PSBUTTON_MODE_SAFE_GUIDE;
-  } else {
-    config.touchscreen_mode = 0;
-    config.psbutton_mode = PSBUTTON_MODE_LOCAL_ESCAPE;
-  }
-  touchabsolute_enable(config.touchscreen_mode == 2);
-}
 
 /*
  * Main menu
@@ -480,6 +417,9 @@ enum {
   SETTINGS_RESOLUTION = 100,
   SETTINGS_STREAM_PRESET,
   SETTINGS_STREAM_HELP,
+  SETTINGS_RESOLUTION_HELP,
+  SETTINGS_ADVANCED_STREAM_HELP,
+  SETTINGS_RESET_RECOMMENDED,
   SETTINGS_INPUT_HELP,
   SETTINGS_FPS,
   SETTINGS_BITRATE,
@@ -588,19 +528,61 @@ static int settings_loop(int id, void *context, const input_data *input) {
   if (id == SETTINGS_STREAM_HELP &&
       (input->buttons & config.btn_confirm) != 0 && (input->buttons & SCE_CTRL_HOLD) == 0) {
     display_alert(
-        "Balanced: 960x544, 60 FPS, 8 Mbps.\n"
-        "Reliable: 30 FPS/5 Mbps for weaker Wi-Fi.\n"
-        "High quality: 12 Mbps reduces compression but needs a clean link.\n"
-        "Frame pacing smooths delivery; vblank can add latency.",
+        "Presets reset the complete stream path: resolution, FPS, bitrate, "
+        "packet size, network detection, H.264/SDR color, stereo audio, "
+        "host optimization, loss recovery, pacing, scaling, and power behavior.\n\n"
+        "Recommended: native 960x544, 60 FPS, 8 Mbps.\n"
+        "Reliable: 30 FPS/5 Mbps for unstable Wi-Fi.\n"
+        "High quality: 12 Mbps for cleaner motion on a strong link.\n"
+        "Remote/VPN: 30 FPS/4 Mbps plus remote-network handling.",
         NULL, 1, NULL, NULL);
     return 0;
+  }
+  if (id == SETTINGS_RESOLUTION_HELP &&
+      (input->buttons & config.btn_confirm) != 0 && (input->buttons & SCE_CTRL_HOLD) == 0) {
+    display_alert(
+        "960x544 is the Vita panel's native resolution and the recommended default.\n\n"
+        "960x540 is strict 16:9 compatibility and may leave a two-pixel border. "
+        "1280x720 can help games with tiny interfaces, but costs more bandwidth "
+        "and decoder work without adding panel detail.\n\n"
+        "Resolution, FPS, and bitrate are negotiated when a stream starts. "
+        "Use Apply + reconnect in the in-stream menu to change both Sunshine's "
+        "encoder and the Windows virtual display.",
+        NULL, 1, NULL, NULL);
+    return 0;
+  }
+  if (id == SETTINGS_ADVANCED_STREAM_HELP &&
+      (input->buttons & config.btn_confirm) != 0 && (input->buttons & SCE_CTRL_HOLD) == 0) {
+    display_alert(
+        "Bitrate improves detail during movement, but a value your Wi-Fi cannot "
+        "sustain creates queues, delay, and packet loss. FPS 60 feels smoother "
+        "and more responsive; FPS 30 halves the frame cadence and is easier to carry.\n\n"
+        "Frame pacing evens delivery. Packet-loss recovery requests clean reference "
+        "frames. Fit shows the whole desktop; Crop fills the panel by trimming edges. "
+        "Vblank can reduce tearing but may add latency. Auto network mode is safest "
+        "unless you know the host is local or reached through a VPN.",
+        NULL, 1, NULL, NULL);
+    return 0;
+  }
+  if (id == SETTINGS_RESET_RECOMMENDED &&
+      (input->buttons & config.btn_confirm) != 0 && (input->buttons & SCE_CTRL_HOLD) == 0) {
+    config_apply_stream_preset(STREAM_PRESET_RECOMMENDED);
+    config_apply_controller_profile(CONTROLLER_PROFILE_COMPATIBILITY);
+    ui_diagnostics_set_overlay_mode(UI_DIAGNOSTICS_OVERLAY_OFF);
+    vita_debug_set_logging_enabled(false);
+    touchabsolute_enable(false);
+    did_change = 1;
   }
   if (id == SETTINGS_INPUT_HELP &&
       (input->buttons & config.btn_confirm) != 0 && (input->buttons & SCE_CTRL_HOLD) == 0) {
     display_alert(
-        "Xbox/local PS is the most compatible default.\n"
-        "Steam/DS4 enables gyro, touchpad, and Safe Guide together. Reconnect after changing.\n"
-        "PS Local double-tap never reaches the PC. Safe Guide delays Guide so double-PS stays local. Immediate Guide may trigger PC shortcuts.",
+        "Maximum compatibility presents an Xbox controller, uses relative mouse "
+        "touch, keeps PS local, and disables gyro/mappings/sprint helpers.\n\n"
+        "Steam/DS4 + gyro presents a DualShock 4, enables raw gyro and DS4 touchpad, "
+        "and uses Safe Guide. Configure gyro sensitivity inside Steam Input; the Vita "
+        "sends raw motion. Reconnect after changing profiles.\n\n"
+        "Safe Guide delays the PC Guide press so double-PS can remain a reliable "
+        "local escape. Immediate Guide can trigger Windows or media shortcuts.",
         NULL, 1, NULL, NULL);
     return 0;
   }
@@ -659,9 +641,9 @@ static int settings_loop(int id, void *context, const input_data *input) {
   }
 
 
-  if (!vitavideo_initialized() && !support_resolution_count) {
+  if (!vitavideo_initialized() && !support_resolution_probe_complete) {
     for (int i = 0; i < MAX_RESOLUTION; i++) {
-      SceVideodecQueryInitInfoHwAvcdec dec;
+      SceVideodecQueryInitInfoHwAvcdec dec = {0};
       dec.size = sizeof(SceVideodecQueryInitInfoHwAvcdec);
       dec.horizontal = VITA_DECODER_RESOLUTION(RESOLUTIONS[i][0]);
       dec.vertical = VITA_DECODER_RESOLUTION(RESOLUTIONS[i][1]);
@@ -679,42 +661,39 @@ static int settings_loop(int id, void *context, const input_data *input) {
       vita_debug_log("%s\n", support_resolutions[support_resolution_count]);
       support_resolution_idx[support_resolution_count++] = i;
     }
+    support_resolution_probe_complete = true;
   }
 
   switch (id) {
     case SETTINGS_STREAM_PRESET: {
-      int preset = detect_stream_preset();
+      int preset = config_detect_stream_preset();
       if (!left && !right) break;
-      if (preset == STREAM_PRESET_CUSTOM) preset = STREAM_PRESET_BALANCED;
-      else preset = (preset + (left ? 2 : 1)) % 3;
-      apply_stream_preset(preset);
+      if (preset == STREAM_PRESET_CUSTOM) {
+        preset = STREAM_PRESET_RECOMMENDED;
+      } else {
+        preset = (preset + (left ? 3 : 1)) % 4;
+      }
+      config_apply_stream_preset(preset);
       did_change = 1;
       break;
     }
     case SETTINGS_CONTROLLER_TYPE: {
-      int idx = get_controller_type_index(config.controller_type);
+      int profile = config_detect_controller_profile();
       if (!left && !right) {
-        // Solo refresca el subname
-        char options[64];
-        int current_idx = get_controller_type_index(config.controller_type);
-        snprintf(options, sizeof(options), "%s", controller_type_names[current_idx]);
-        strcpy(menu[SETTINGS_VIEW_IDX[SETTINGS_VIEW_CONTROLLER_TYPE]].subname, options);
         break;
       }
-      if (left) {
-        idx = (idx - 1 + CONTROLLER_TYPE_COUNT) % CONTROLLER_TYPE_COUNT;
-        apply_controller_profile(controller_type_values[idx]);
-        did_change = 1;
-      } else if (right) {
-        idx = (idx + 1) % CONTROLLER_TYPE_COUNT;
-        apply_controller_profile(controller_type_values[idx]);
-        did_change = 1;
+      if (profile == CONTROLLER_PROFILE_CUSTOM) {
+        profile = left ? CONTROLLER_PROFILE_STEAM
+                       : CONTROLLER_PROFILE_COMPATIBILITY;
+      } else {
+        profile = profile == CONTROLLER_PROFILE_COMPATIBILITY
+            ? CONTROLLER_PROFILE_STEAM
+            : CONTROLLER_PROFILE_COMPATIBILITY;
       }
+      config_apply_controller_profile(profile);
+      touchabsolute_enable(config.touchscreen_mode == 2);
+      did_change = 1;
       // Actualiza el subname
-      char options[64];
-      int current_idx = get_controller_type_index(config.controller_type);
-      snprintf(options, sizeof(options), "%s", controller_type_names[current_idx]);
-      strcpy(menu[SETTINGS_VIEW_IDX[SETTINGS_VIEW_CONTROLLER_TYPE]].subname, options);
       // Guarda la configuración inmediatamente
       ui_settings_save_config();
       break;
@@ -724,6 +703,10 @@ static int settings_loop(int id, void *context, const input_data *input) {
         break;
       }
       if (vitavideo_initialized()) {
+        break;
+      }
+      if (support_resolution_count <= 0) {
+        display_error("No supported Vita video modes were detected.");
         break;
       }
       //char *resolutions[] = {"960x540", "960x544", "1280x540", "1280x720", "1920x1080"};
@@ -795,11 +778,12 @@ static int settings_loop(int id, void *context, const input_data *input) {
       config.enable_ref_frame_invalidation = !config.enable_ref_frame_invalidation;
       break;
     case SETTINGS_ENABLE_STREAM_OPTIMIZE:
-      if ((input->buttons & config.btn_confirm) == 0 || input->buttons & SCE_CTRL_HOLD) {
+      if (!left && !right) {
         break;
       }
       did_change = 1;
-      config.stream.streamingRemotely = config.stream.streamingRemotely ? 0 : 1;
+      config.stream.streamingRemotely =
+          (config.stream.streamingRemotely + (left ? 2 : 1)) % 3;
       break;
     case SETTINGS_ENABLE_VITA_VBLANK_WAIT:
       if ((input->buttons & config.btn_confirm) == 0 || input->buttons & SCE_CTRL_HOLD) {
@@ -883,7 +867,7 @@ static int settings_loop(int id, void *context, const input_data *input) {
         break;
       }
       did_change = 1;
-      config.save_debug_log = !config.save_debug_log;
+      vita_debug_set_logging_enabled(!vita_debug_is_logging_enabled());
       break;
     case SETTINGS_DISABLE_POWERSAVE:
       if ((input->buttons & config.btn_confirm) == 0 || input->buttons & SCE_CTRL_HOLD) {
@@ -904,7 +888,7 @@ static int settings_loop(int id, void *context, const input_data *input) {
         break;
       }
       did_change = 1;
-      config.show_fps = !config.show_fps;
+      ui_diagnostics_cycle_overlay_mode(1);
       break;
     case SETTINGS_LOCAL_AUDIO:
       if ((input->buttons & config.btn_confirm) == 0 || input->buttons & SCE_CTRL_HOLD) {
@@ -998,7 +982,8 @@ static int settings_loop(int id, void *context, const input_data *input) {
   sprintf(current, "%dx%d", config.stream.width, config.stream.height);
   MENU_REPLACE(SETTINGS_VIEW_RESOLUTION, current);
 
-  MENU_REPLACE(SETTINGS_VIEW_STREAM_PRESET, stream_preset_names[detect_stream_preset()]);
+  MENU_REPLACE(SETTINGS_VIEW_STREAM_PRESET,
+               config_stream_preset_name(config_detect_stream_preset()));
 
   sprintf(current, "%d", config.stream.fps);
   MENU_REPLACE(SETTINGS_VIEW_FPS, current);
@@ -1012,7 +997,7 @@ static int settings_loop(int id, void *context, const input_data *input) {
   sprintf(current, "%s", config.enable_ref_frame_invalidation ? "yes" : "no");
   MENU_REPLACE(SETTINGS_VIEW_ENABLE_FRAME_INVAL, current);
 
-  sprintf(current, "%s", config.stream.streamingRemotely ? "yes" : "no");
+  sprintf(current, "%s", network_mode_names[config.stream.streamingRemotely]);
   MENU_REPLACE(SETTINGS_VIEW_ENABLE_STREAM_OPTIMIZE, current);
 
   sprintf(current, "%s", config.enable_vita_vblank_wait ? "yes" : "no");
@@ -1021,12 +1006,6 @@ static int settings_loop(int id, void *context, const input_data *input) {
   //Metalface
   sprintf(current, "%s", config.enable_motion_controls ? "yes" : "no");
   MENU_REPLACE(SETTINGS_VIEW_ENABLE_MOTION_CONTROLS, current);
-
-  sprintf(current, "%f", config.motion_controls_scalar_x);
-  MENU_REPLACE(SETTINGS_VIEW_MOTION_CONTROLS_SCALAR_X, current);
-
-  sprintf(current, "%f", config.motion_controls_scalar_y);
-  MENU_REPLACE(SETTINGS_VIEW_MOTION_CONTROLS_SCALAR_Y, current);
 
   sprintf(current, "%s", config.enable_double_tap_sprint ? "yes" : "no");
   MENU_REPLACE(SETTINGS_VIEW_ENABLE_DOUBLE_TAP_SPRINT, current);
@@ -1041,7 +1020,8 @@ static int settings_loop(int id, void *context, const input_data *input) {
   sprintf(current, "%s", config.jp_layout ? "yes" : "no");
   MENU_REPLACE(SETTINGS_VIEW_JP_LAYOUT, current);
 
-  sprintf(current, "%s", config.show_fps ? "yes" : "no");
+  sprintf(current, "%s", ui_diagnostics_overlay_mode_name(
+      ui_diagnostics_get_overlay_mode()));
   MENU_REPLACE(SETTINGS_VIEW_SHOW_FPS, current);
 
   sprintf(current, "%s", config.localaudio ? "yes" : "no");
@@ -1050,11 +1030,17 @@ static int settings_loop(int id, void *context, const input_data *input) {
   sprintf(current, "%s", config.enable_frame_pacer ? "yes" : "no");
   MENU_REPLACE(SETTINGS_VIEW_ENABLE_FRAME_PACER, current);
 
-  sprintf(current, "%s", config.center_region_only ? "yes" : "no");
+  sprintf(current, "%s",
+          config.center_region_only ? "Crop / fill" : "Fit entire frame");
   MENU_REPLACE(SETTINGS_VIEW_CENTER_REGION_ONLY, current);
 
-  sprintf(current, "%s", config.save_debug_log ? "yes" : "no");
+  sprintf(current, "%s",
+          vita_debug_is_logging_enabled() ? "Enabled" : "Off");
   MENU_REPLACE(SETTINGS_VIEW_SAVE_DEBUG_LOG, current);
+
+  sprintf(current, "%s", config_controller_profile_name(
+      config_detect_controller_profile()));
+  MENU_REPLACE(SETTINGS_VIEW_CONTROLLER_TYPE, current);
 
   sprintf(current, "%s", psbutton_mode_names[config.psbutton_mode]);
   MENU_REPLACE(SETTINGS_VIEW_PSBUTTON_MODE, current);
@@ -1117,33 +1103,35 @@ int ui_settings_menu() {
 
   MENU_CATEGORY("Stream");
   MENU_ENTRY(SETTINGS_STREAM_PRESET, SETTINGS_VIEW_STREAM_PRESET, "Streaming preset", ICON_LEFT_RIGHT_ARROWS);
-  menu[idx++] = (menu_entry) { .name = "What do these settings change?", .id = SETTINGS_STREAM_HELP };
-  MENU_ENTRY(SETTINGS_RESOLUTION, SETTINGS_VIEW_RESOLUTION, "Resolution", ICON_LEFT_RIGHT_ARROWS);
-  MENU_ENTRY(SETTINGS_FPS, SETTINGS_VIEW_FPS, "FPS", ICON_LEFT_RIGHT_ARROWS);
-  MENU_ENTRY(SETTINGS_BITRATE, SETTINGS_VIEW_BITRATE, "Bitrate", "");
-  MENU_ENTRY(SETTINGS_SOPS, SETTINGS_VIEW_SOPS, "Let host optimize game settings", "");
-  MENU_ENTRY(SETTINGS_ENABLE_FRAME_INVAL, SETTINGS_VIEW_ENABLE_FRAME_INVAL, "Recover after packet loss", "");
-  MENU_ENTRY(SETTINGS_ENABLE_STREAM_OPTIMIZE, SETTINGS_VIEW_ENABLE_STREAM_OPTIMIZE, "Remote-network optimization", "");
-  MENU_ENTRY(SETTINGS_ENABLE_VITA_VBLANK_WAIT, SETTINGS_VIEW_ENABLE_VITA_VBLANK_WAIT, "Wait for display vblank", "");
-
-
-  MENU_ENTRY(SETTINGS_ENABLE_FRAME_PACER, SETTINGS_VIEW_ENABLE_FRAME_PACER, "Enable frame pacer", "");
+  menu[idx++] = (menu_entry) { .name = "Preset guide", .id = SETTINGS_STREAM_HELP };
+  MENU_ENTRY(SETTINGS_RESOLUTION, SETTINGS_VIEW_RESOLUTION, "Stream + virtual display", ICON_LEFT_RIGHT_ARROWS);
+  menu[idx++] = (menu_entry) { .name = "Resolution and quality guide", .id = SETTINGS_RESOLUTION_HELP };
+  MENU_ENTRY(SETTINGS_FPS, SETTINGS_VIEW_FPS, "Frame rate", ICON_LEFT_RIGHT_ARROWS);
+  MENU_ENTRY(SETTINGS_BITRATE, SETTINGS_VIEW_BITRATE, "Video bitrate", "");
+  MENU_ENTRY(SETTINGS_SOPS, SETTINGS_VIEW_SOPS, "Host game optimization", "");
+  MENU_ENTRY(SETTINGS_ENABLE_FRAME_INVAL, SETTINGS_VIEW_ENABLE_FRAME_INVAL, "Packet-loss recovery", "");
+  MENU_ENTRY(SETTINGS_ENABLE_STREAM_OPTIMIZE, SETTINGS_VIEW_ENABLE_STREAM_OPTIMIZE, "Network mode", ICON_LEFT_RIGHT_ARROWS);
+  MENU_ENTRY(SETTINGS_ENABLE_VITA_VBLANK_WAIT, SETTINGS_VIEW_ENABLE_VITA_VBLANK_WAIT, "Wait for Vita vblank", "");
+  MENU_ENTRY(SETTINGS_ENABLE_FRAME_PACER, SETTINGS_VIEW_ENABLE_FRAME_PACER, "Frame pacing", "");
+  MENU_ENTRY(SETTINGS_CENTER_REGION_ONLY, SETTINGS_VIEW_CENTER_REGION_ONLY, "Aspect scaling", "");
   MENU_ENTRY(SETTINGS_LOCAL_AUDIO, SETTINGS_VIEW_LOCAL_AUDIO, "Enable local audio", "");
+  menu[idx++] = (menu_entry) { .name = "Latency and recovery guide", .id = SETTINGS_ADVANCED_STREAM_HELP };
+  menu[idx++] = (menu_entry) { .name = "Reset all to recommended", .id = SETTINGS_RESET_RECOMMENDED };
 
   MENU_CATEGORY("System");
-  MENU_ENTRY(SETTINGS_SAVE_DEBUG_LOG, SETTINGS_VIEW_SAVE_DEBUG_LOG, "Enable debug log", "");
+  MENU_ENTRY(SETTINGS_SAVE_DEBUG_LOG, SETTINGS_VIEW_SAVE_DEBUG_LOG, "Diagnostic file logging", "");
   MENU_ENTRY(SETTINGS_DISABLE_POWERSAVE, SETTINGS_VIEW_DISABLE_POWERSAVE, "Disable power save", "");
   MENU_ENTRY(SETTINGS_JP_LAYOUT, SETTINGS_VIEW_JP_LAYOUT, "Swap X & O for Moonlight", "");
-  MENU_ENTRY(SETTINGS_SHOW_FPS, SETTINGS_VIEW_SHOW_FPS, "Display streaming FPS", "");
+  MENU_ENTRY(SETTINGS_SHOW_FPS, SETTINGS_VIEW_SHOW_FPS, "Performance overlay", "");
 
   MENU_CATEGORY("Input");
   menu[idx++] = (menu_entry) { .name = "Controller and touch guide", .id = SETTINGS_INPUT_HELP };
 
-  MENU_ENTRY(SETTINGS_ENABLE_MOTION_CONTROLS, SETTINGS_VIEW_ENABLE_MOTION_CONTROLS, "Enable Gyroscope reporting", "");
-  MENU_ENTRY(SETTINGS_ENABLE_DOUBLE_TAP_SPRINT, SETTINGS_VIEW_ENABLE_DOUBLE_TAP_SPRINT, "Enable double tap to sprint", "");
+  MENU_ENTRY(SETTINGS_ENABLE_MOTION_CONTROLS, SETTINGS_VIEW_ENABLE_MOTION_CONTROLS, "Gyroscope reporting", "");
+  MENU_ENTRY(SETTINGS_ENABLE_DOUBLE_TAP_SPRINT, SETTINGS_VIEW_ENABLE_DOUBLE_TAP_SPRINT, "Double-tap sprint helper", "");
   MENU_ENTRY(SETTINGS_DOUBLE_TAP_SPRINT_STEP_TIME, SETTINGS_VIEW_DOUBLE_TAP_SPRINT_STEP_TIME, "Sprint double tap time", "");
   MENU_ENTRY(SETTINGS_CONTROLLER_TYPE, SETTINGS_VIEW_CONTROLLER_TYPE, "Controller preset", ICON_LEFT_RIGHT_ARROWS);
-  MENU_ENTRY(SETTINGS_SWAP_SHOULDER_BUTTONS, SETTINGS_VIEW_SWAP_SHOULDER_BUTTONS, "Swap R1/L1 <-> R2/L2", "");
+  MENU_ENTRY(SETTINGS_SWAP_SHOULDER_BUTTONS, SETTINGS_VIEW_SWAP_SHOULDER_BUTTONS, "Swap L1/R1 with L2/R2", "");
   MENU_ENTRY(SETTINGS_MOUSE_ACCEL, SETTINGS_VIEW_MOUSE_ACCEL, "Mouse acceleration", ICON_LEFT_RIGHT_ARROWS);
   MENU_ENTRY(SETTINGS_ENABLE_MAPPING, SETTINGS_VIEW_ENABLE_MAPPING, "Enable mapping file", "");
   char mapping_location_msg[256];
@@ -1168,16 +1156,17 @@ int ui_settings_menu() {
   // Resolution
   sprintf(current, "%dx%d", config.stream.width, config.stream.height);
   strcpy(menu[SETTINGS_VIEW_IDX[SETTINGS_VIEW_RESOLUTION]].subname, current);
-  strcpy(menu[SETTINGS_VIEW_IDX[SETTINGS_VIEW_STREAM_PRESET]].subname, stream_preset_names[detect_stream_preset()]);
+  strcpy(menu[SETTINGS_VIEW_IDX[SETTINGS_VIEW_STREAM_PRESET]].subname,
+         config_stream_preset_name(config_detect_stream_preset()));
   // FPS
   sprintf(current, "%d", config.stream.fps);
   strcpy(menu[SETTINGS_VIEW_IDX[SETTINGS_VIEW_FPS]].subname, current);
   // Bitrate
   sprintf(current, "%d", config.stream.bitrate);
   strcpy(menu[SETTINGS_VIEW_IDX[SETTINGS_VIEW_BITRATE]].subname, current);
-  // Controller type
-  int current_idx = get_controller_type_index(config.controller_type);
-  snprintf(current, sizeof(current), "%s", controller_type_names[current_idx]);
+  // Controller profile
+  snprintf(current, sizeof(current), "%s",
+           config_controller_profile_name(config_detect_controller_profile()));
   strcpy(menu[SETTINGS_VIEW_IDX[SETTINGS_VIEW_CONTROLLER_TYPE]].subname, current);
   // Swap shoulder buttons
   swap_shoulder_buttons = config.swap_shoulder_buttons;
@@ -1207,7 +1196,8 @@ void ui_settings_save_config() {
   vita_debug_log("  stream.height = %d", config.stream.height);
   vita_debug_log("  stream.fps = %d", config.stream.fps);
   vita_debug_log("  stream.bitrate = %d", config.stream.bitrate);
-  vita_debug_log("  save_debug_log = %d", config.save_debug_log);
+  vita_debug_log("  save_debug_log = %d",
+                 vita_debug_is_logging_enabled());
   vita_debug_log("  disable_powersave = %d", config.disable_powersave);
   vita_debug_log("  jp_layout = %d", config.jp_layout);
   vita_debug_log("  localaudio = %d", config.localaudio);

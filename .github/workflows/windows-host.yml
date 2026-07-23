@@ -116,6 +116,7 @@ jobs:
         with:
           name: vita-moonlight-windows-host
           path: artifacts/installer/*
+          if-no-files-found: error
       - name: Remove temporary signing certificate
         if: ${{ always() && env.HAS_WINDOWS_SIGNING_CERTIFICATE == 'true' }}
         shell: pwsh

@@ -8,7 +8,8 @@ internal sealed record DisplayDescriptor(
     string FriendlyName,
     string DevicePath,
     bool IsActive,
-    bool IsAvailable);
+    bool IsAvailable,
+    int OutputTechnology = -1);
 
 internal sealed record DisplayRecoveryRecord(
     int FormatVersion,
@@ -86,7 +87,8 @@ internal sealed class DisplayTopologyService
                 name.MonitorFriendlyDeviceName ?? string.Empty,
                 name.MonitorDevicePath ?? string.Empty,
                 (path.Flags & WindowsDisplayNative.PathActive) != 0,
-                path.TargetInfo.TargetAvailable != 0);
+                path.TargetInfo.TargetAvailable != 0,
+                path.TargetInfo.OutputTechnology);
             var key = string.IsNullOrWhiteSpace(descriptor.DevicePath)
                 ? $"{path.TargetInfo.AdapterId.HighPart}:{path.TargetInfo.AdapterId.LowPart}:{path.TargetInfo.Id}"
                 : descriptor.DevicePath;
@@ -163,7 +165,7 @@ internal sealed class DisplayTopologyService
     internal static DisplayDescriptor[] SelectPhysicalDisplaysForRecovery(IEnumerable<DisplayDescriptor> displays)
     {
         var availablePhysical = displays
-            .Where(display => display.IsAvailable && !IsManagedVirtualDisplay(display))
+            .Where(display => display.IsAvailable && !IsLikelyVirtualDisplay(display))
             .ToArray();
         var activePhysical = availablePhysical.Where(display => display.IsActive).ToArray();
         return activePhysical.Length > 0 ? activePhysical : availablePhysical;
@@ -188,22 +190,17 @@ internal sealed class DisplayTopologyService
         return recovery;
     }
 
-    internal DisplayDescriptor ActivateVirtualDisplay(string? nameMatch, int width, int height, int fps, bool forceSdr = true)
+    internal DisplayDescriptor ActivateVirtualDisplay(
+        string? nameMatch,
+        int width,
+        int height,
+        int fps,
+        bool forceSdr = true,
+        bool persistMode = false)
     {
         var configuration = WindowsDisplayNative.Query(WindowsDisplayNative.QueryAllPaths);
         var displays = Describe(configuration);
-        var candidates = displays.Where(display => display.IsAvailable).ToList();
-        DisplayDescriptor? selected;
-        if (!string.IsNullOrWhiteSpace(nameMatch))
-        {
-            selected = candidates.FirstOrDefault(display =>
-                display.FriendlyName.Contains(nameMatch, StringComparison.OrdinalIgnoreCase) ||
-                display.DevicePath.Contains(nameMatch, StringComparison.OrdinalIgnoreCase));
-        }
-        else
-        {
-            selected = candidates.FirstOrDefault(IsLikelyVirtualDisplay);
-        }
+        var selected = SelectVirtualDisplayForActivation(displays, nameMatch);
 
         if (selected is null)
         {
@@ -238,10 +235,58 @@ internal sealed class DisplayTopologyService
             throw new InvalidOperationException("The selected virtual display did not become active.");
         }
         var sourceName = WindowsDisplayNative.GetSourceNameFor(activePath.Value);
-        WindowsDisplayNative.ChangeSourceMode(sourceName.ViewGdiDeviceName, width, height, fps);
+        WindowsDisplayNative.ChangeSourceMode(sourceName.ViewGdiDeviceName, width, height, fps, persistMode);
         if (forceSdr)
         {
             WindowsDisplayNative.TrySetAdvancedColorState(activePath.Value, false);
+        }
+        return selected;
+    }
+
+    internal static DisplayDescriptor? SelectVirtualDisplayForActivation(
+        IEnumerable<DisplayDescriptor> displays,
+        string? nameMatch)
+    {
+        var candidates = displays
+            .Where(display => display.IsAvailable && IsLikelyVirtualDisplay(display))
+            .ToArray();
+        if (!string.IsNullOrWhiteSpace(nameMatch))
+        {
+            return candidates.FirstOrDefault(display =>
+                display.FriendlyName.Contains(nameMatch, StringComparison.OrdinalIgnoreCase) ||
+                display.DevicePath.Contains(nameMatch, StringComparison.OrdinalIgnoreCase));
+        }
+        return candidates.FirstOrDefault(IsManagedVirtualDisplay) ?? candidates.FirstOrDefault();
+    }
+
+    internal DisplayDescriptor ChangeActiveVirtualDisplayMode(
+        string? nameMatch,
+        int width,
+        int height,
+        int fps,
+        bool forceSdr = true)
+    {
+        var configuration = WindowsDisplayNative.Query(WindowsDisplayNative.QueryOnlyActivePaths);
+        var candidates = Describe(configuration)
+            .Where(display => display.IsActive && IsLikelyVirtualDisplay(display))
+            .ToArray();
+        var selected = !string.IsNullOrWhiteSpace(nameMatch)
+            ? candidates.FirstOrDefault(display =>
+                display.FriendlyName.Contains(nameMatch, StringComparison.OrdinalIgnoreCase) ||
+                display.DevicePath.Contains(nameMatch, StringComparison.OrdinalIgnoreCase))
+            : candidates.FirstOrDefault(IsManagedVirtualDisplay) ?? candidates.FirstOrDefault();
+        if (selected is null)
+        {
+            throw new InvalidOperationException(
+                "No active Vita virtual display was found. Start a Vita stream before changing its desktop mode.");
+        }
+
+        var path = configuration.Paths[selected.PathIndex];
+        var sourceName = WindowsDisplayNative.GetSourceNameFor(path);
+        WindowsDisplayNative.ChangeSourceMode(sourceName.ViewGdiDeviceName, width, height, fps);
+        if (forceSdr)
+        {
+            WindowsDisplayNative.TrySetAdvancedColorState(path, false);
         }
         return selected;
     }
@@ -271,10 +316,13 @@ internal sealed class DisplayTopologyService
         File.Move(temporary, path, true);
     }
 
-    private static bool IsLikelyVirtualDisplay(DisplayDescriptor display)
+    internal static bool IsLikelyVirtualDisplay(DisplayDescriptor display)
     {
         var identity = $"{display.FriendlyName} {display.DevicePath}";
-        return IsManagedVirtualDisplay(display) ||
+        return display.OutputTechnology is
+                   WindowsDisplayNative.OutputTechnologyIndirectWired or
+                   WindowsDisplayNative.OutputTechnologyIndirectVirtual ||
+               IsManagedVirtualDisplay(display) ||
                identity.Contains("virtual", StringComparison.OrdinalIgnoreCase) ||
                identity.Contains("iddsample", StringComparison.OrdinalIgnoreCase) ||
                identity.Contains("idd", StringComparison.OrdinalIgnoreCase);

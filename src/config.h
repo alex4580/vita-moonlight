@@ -48,6 +48,22 @@ enum psbutton_mode {
   PSBUTTON_MODE_COUNT
 };
 
+enum stream_preset {
+  STREAM_PRESET_RELIABLE = 0,
+  STREAM_PRESET_RECOMMENDED = 1,
+  STREAM_PRESET_QUALITY = 2,
+  STREAM_PRESET_REMOTE = 3,
+  STREAM_PRESET_CUSTOM = 4,
+  STREAM_PRESET_COUNT
+};
+
+enum controller_profile {
+  CONTROLLER_PROFILE_COMPATIBILITY = 0,
+  CONTROLLER_PROFILE_STEAM = 1,
+  CONTROLLER_PROFILE_CUSTOM = 2,
+  CONTROLLER_PROFILE_COUNT
+};
+
 typedef struct _CONFIGURATION {
   // static configuration, value will be saved to config file
   int config_version;
@@ -71,6 +87,7 @@ typedef struct _CONFIGURATION {
   bool disable_powersave;
   bool jp_layout;
   bool show_fps;
+  int performance_overlay_mode; // 0=off, 1=FPS, 2=FPS+network, 3=advanced
   bool enable_frame_pacer;
   bool center_region_only;
   bool save_debug_log;
@@ -106,4 +123,10 @@ bool config_file_parse(char* filename, PCONFIGURATION config);
 void config_parse(int argc, char* argv[], PCONFIGURATION config);
 void config_save(const char* filename, PCONFIGURATION config);
 int config_recommended_bitrate(int width, int height, int fps);
+int config_detect_stream_preset(void);
+void config_apply_stream_preset(int preset);
+const char *config_stream_preset_name(int preset);
+int config_detect_controller_profile(void);
+void config_apply_controller_profile(int profile);
+const char *config_controller_profile_name(int profile);
 void update_layout();

@@ -1,36 +1,38 @@
 # Vita Moonlight
 
 Vita Moonlight is a PlayStation Vita Moonlight client plus a Windows companion
-for a console-like Sunshine setup. The host switches Windows to a Vita-native
-virtual display before capture, forces SDR for the session, restores the normal
-desktop afterward, and configures Xbox or DS4 controller support.
+for a console-like Sunshine setup. During a stream, the companion activates an
+SDR virtual display at a Vita-compatible resolution; after the stream, it
+restores the normal Windows display layout.
 
-This fork is designed to be installed and operated through graphical controls.
-The command line remains available for diagnostics and automation, but it is
-not required for normal setup.
+This fork is intended to be installed and operated through graphical controls.
+The command line remains available for automation and support, but it is not
+required for normal setup or troubleshooting.
 
 ## What this fork adds
 
 - A single Windows installer containing the host control panel, Sunshine,
   ViGEmBus, and a pinned signed virtual-display driver.
-- Automatic 960x544 at 60 Hz virtual-display switching for **every Sunshine
-  application**, including Desktop and Steam Big Picture.
-- SDR enforcement on the virtual display so an HDR desktop is not captured as
-  a washed-out image on the Vita.
-- Transactional display recovery after normal exit, network interruption, or
-  the next Windows sign-in after an interrupted session.
-- A highest-privilege stream rescue agent: the Vita overlay can close or
-  force-close the foreground Windows game, end Sunshine's current app, or
-  restore the physical display, reload VDD, and restart Sunshine.
-- Xbox-compatible and PS4 + gyro controller profiles, plus DS4 touchpad,
-  absolute mouse, and Sunshine tablet touch modes.
-- A real in-stream Vita overlay for resume, disconnect, resolution, bitrate,
-  frame rate, controller mode, touch mode, and the FPS counter.
-- A configurable PS-button policy whose safe default keeps PS entirely local,
-  while preserving double-PS as a forced LiveArea escape.
-- A compatibility-first **Balanced** profile: 960x544, 60 FPS, H.264, 8 Mbps,
-  packet-loss recovery, frame pacing, and an Xbox/XInput controller. Reliable
-  and High quality presets are available without manual bitrate entry.
+- A native **960x544 at 60 Hz** first-run display and stream configuration.
+- Managed **960x544**, **960x540**, and **1280x720** virtual-display modes.
+- Global Sunshine display switching for Desktop, Steam Big Picture, and other
+  Sunshine applications, with SDR enforcement and automatic recovery.
+- Complete Reliable, Recommended, High quality, and Remote / VPN streaming
+  presets instead of resolution-and-bitrate shortcuts.
+- Matching core stream and controller controls before and during a session.
+- In-stream **Apply resolution + reconnect** and **Apply input changes +
+  reconnect** actions that renegotiate the session without closing the running
+  Windows game.
+- Xbox-compatible and Steam / DS4 + gyro controller profiles, DS4 touchpad,
+  mouse, and Sunshine tablet touch modes.
+- A configurable top-right performance overlay and a separate real-time
+  diagnostics screen.
+- Optional, append-only file logging that is off by default; extended
+  per-frame metric collection is skipped when no diagnostics feature needs it.
+- A highest-privilege stream rescue agent that can close a bad foreground
+  game, end Sunshine's current app, or recover the display and Sunshine.
+- A PS-button policy whose safe default keeps PS local while preserving
+  double-PS as a forced LiveArea escape.
 
 ## Install
 
@@ -40,127 +42,226 @@ Download both artifacts from the same release:
    PC. Keep Sunshine, ViGEmBus, and the signed virtual-display driver selected.
 2. Open **Start > Vita Moonlight Host > Vita Moonlight Host Control Panel**.
 3. If prompted, choose **Restart as Administrator**, then click **Apply
-   recommended setup**. The control panel enables Sunshine's native global
-   display lifecycle and restarts Sunshine.
+   recommended setup**. This verifies or repairs Sunshine, ViGEmBus, and the
+   signed display driver before applying the streaming configuration.
 4. Run **Run health check**. Sunshine, ViGEmBus, virtual display, recovery, and
    **Stream rescue** should report ready.
 5. Install the matching `.vpk` on the Vita, pair it with Sunshine, and launch
-   Desktop, Steam Big Picture, or any other Sunshine application.
+   Desktop, Steam Big Picture, or another Sunshine application.
 
-The virtual display may initially appear in Windows as an inactive or 800x600
-display named **VDD by MTT**. That is expected. Leave it disabled while idle;
-the host activates it at the Vita's requested mode only for a stream.
+The installer keeps a compatible Sunshine installation, upgrades an older one
+to the pinned supported build, repairs controller support, and preserves
+configuration. Every prerequisite command is checked. If Windows requests a
+restart, setup stops before applying Sunshine display configuration or changing
+the active display; restart, open the control panel as Administrator, and click
+**Apply recommended setup** again.
+
+The virtual display may appear in Windows as an inactive or generic-resolution
+display named **VDD by MTT** while idle. Leave it disabled while idle. The host
+activates it at the requested mode when a Vita stream starts; the first-run
+mode is the Vita panel's native **960x544 at 60 Hz**.
 
 See the [Windows host guide](host/README.md) for installation, configuration,
 recovery, and troubleshooting. Release testing is documented in the
 [GUI-first acceptance test](host/END_TO_END_TEST.md); use the
-[final-release checklist](host/FINAL_RELEASE_CHECKLIST.md) for sign-off. See
-[host compatibility](host/COMPATIBILITY.md) and the
+[final-release checklist](host/FINAL_RELEASE_CHECKLIST.md) for sign-off. Read
+the [host compatibility guide](host/COMPATIBILITY.md) and
 [Vita settings guide](docs/VITA_SETTINGS_GUIDE.md) before changing defaults.
 
 ## Vita controls while streaming
 
-- Hold **START**, then press **L + R** within one second: open the stream
-  overlay. Pressing all three together or in another order also works. Using
-  START first lets the complete chord be consumed before it reaches the PC.
-- **PS (default)**: a single press stays on the Vita and is not sent to
-  Windows. Double-press it to return to LiveArea; this remains the forced
-  system-level escape from a stream.
-- **D-pad Up/Down**: select an overlay item.
-- **D-pad Left/Right**: change a setting.
-- **X**: activate the selected item.
-- **O**: close the overlay and resume.
+- Hold **START**, then press **L + R** within one second to open the stream
+  menu. Starting with START allows the entire chord to be consumed locally
+  instead of sending those buttons to the PC.
+- **PS (default)**: a single press stays on the Vita. Double-press PS to return
+  to LiveArea; this remains the forced system-level escape from a stream.
+- **D-pad Up/Down**: select an item.
+- **D-pad Left/Right**: change the selected setting.
+- **X**: open or activate the selected item.
+- **O**: go back or resume the stream.
 - **START + Left**: open the floating keyboard.
 
-The **Controller preset** row configures the related options as a group. Choose
-**Steam / DS4 + gyro** to enable DS4 emulation, Vita motion, DS4 touchpad, and
-**Safe PC Guide** together, then reconnect. A single PS press will open Steam's
-Guide/overlay after a short safety delay; double-PS remains the local LiveArea
-escape. Choose **Xbox / local PS** for maximum game compatibility and to keep
-single PS presses off the PC.
+The stream menu is organized around the same choices available before a
+session:
 
-The normal Vita settings screen and in-stream overlay also offer four
-individual **PS button behavior** choices.
-**Local double-tap** is the recommended default. **Safe PC Guide** delays a
-single Guide press by 250 ms so a quick double-press can remain local.
-**Immediate PC Guide** is the old low-latency behavior and may activate Steam
-or Windows shortcuts—including play/pause mappings. **System / LiveArea** does
-not capture PS, so one press leaves Moonlight and no Guide event reaches the
-PC.
+- **Stream & virtual display** contains preset, resolution, FPS, bitrate,
+  network mode, frame pacing, packet-loss recovery, aspect scaling, vblank,
+  and host game optimization.
+- **Controller & input** contains controller preset, PS behavior, touchscreen,
+  gyro, shoulder swap, and the double-tap sprint helper.
+- **Performance overlay** cycles through Off, Frame rate, Frame rate + network,
+  and Advanced.
+- **Real-time diagnostics** shows live stream, decoder, network, controller,
+  gyro, and Circle-button state without adding those details to the normal
+  stream interface.
 
-Destructive overlay actions require pressing **X twice**:
+The pre-stream Settings screen and in-stream pages edit the same saved
+configuration. Less frequently changed options such as local audio, power
+behavior, mapping files, touch zones, and keyboard layout remain in Settings.
+
+Resolution, FPS, bitrate, and network mode are negotiated when a stream
+connects. After changing them in-stream, select **Apply resolution +
+reconnect**. Moonlight switches the Windows virtual display, ends only the
+video connection, and resumes the same Sunshine application with the new
+encoder settings. Controller capabilities are also negotiated at connection;
+use **Apply input changes + reconnect** for those without sending a display
+command. Neither action closes the running Windows game. The picture may
+disappear briefly during renegotiation.
+
+Destructive stream actions require pressing **X twice**:
 
 - **Close Windows game** first asks the rescue agent to close the foreground
-  game normally, then force-terminates that process tree if it does not exit.
-  Steam, Sunshine, Explorer, and critical Windows processes are protected.
+  game normally, then force-terminates that process tree if necessary. Steam,
+  Sunshine, Explorer, and critical Windows processes are protected.
 - **End Sunshine app** ends Sunshine's current application session and
-  disconnects Moonlight. This is useful when the foreground window cannot be
-  identified safely.
-- **Recover display + Sunshine** disconnects, forces a physical display active,
-  reloads VDD, enforces the physical-only idle topology, and restarts Sunshine.
+  disconnects Moonlight.
+- **Recover host display** disconnects, forces a physical display active,
+  reloads VDD, restores the physical-only idle topology, and restarts Sunshine.
 
-Resolution, bitrate, frame-rate, and controller changes take effect on the next
-connection. Touch mode and the FPS counter update immediately. Choose
-**Disconnect stream** in the overlay for a normal exit that also restores the
-physical display.
+Choose **Disconnect stream** for a normal exit that restores the physical
+display.
 
-## Recommended streaming settings
+## Native display modes
 
-Start with the **Balanced** preset: **960x544, 60 FPS, 8 Mbps**. It matches the Vita panel, avoids
-wasting bandwidth on pixels the device cannot display, and gives the H.264
-encoder enough headroom for motion. If Wi-Fi is unstable, try 5 Mbps or 30 FPS.
-On a strong local network, 12 Mbps can reduce artifacts further.
+The Vita panel is **960x544**, so that is the default for both the Windows
+virtual display and Sunshine encoder. The managed choices are:
 
-The settings screen explains the tradeoffs and provides **Reliable**
-(960x544/30 at 5 Mbps), **Balanced**, and **High quality** (960x544/60 at
-12 Mbps) presets. Higher bitrate improves compression only while the wireless
-link can sustain it; once packets queue or drop, quality and responsiveness get
-worse together. Resolution above the Vita's native panel usually adds decoder
-and network work with little visible benefit.
+| Mode | Use |
+|---|---|
+| **960x544** | Native Vita geometry and the recommended choice. No unnecessary scaling or 4:3 fallback. |
+| **960x540** | Strict 16:9 compatibility for a title that rejects 960x544. Fitting it to the Vita can leave a two-pixel bar at the top and bottom. |
+| **1280x720** | Compatibility option for games with tiny UI or a fixed 720p minimum. It is downscaled on the Vita and costs more decoder and network work. |
 
-The Windows companion forces the Vita virtual display to SDR by default. This
-does not permanently disable HDR on the physical monitor; the saved physical
-layout and color behavior return when the stream ends.
+Changing only the Vita resolution setting during an active stream cannot alter
+an encoder session that has already been negotiated. Use **Apply resolution +
+reconnect** so the VDD and Sunshine encoder both adopt the selected mode.
+
+## Streaming presets
+
+The first-run preset is **Recommended**. Every preset owns the complete stream
+path: 960x544 output, a 1024-byte packet size, H.264, Rec. 709 limited-range
+SDR, stereo audio, 60 Hz client timing, host game optimization, packet-loss
+recovery, frame pacing, fit-to-screen scaling, local-audio off, Vita vblank
+wait off, and power-save suppression. Selecting a preset restores all of those
+values, not just resolution and bitrate.
+
+| Preset | FPS / bitrate / network | Tradeoff |
+|---|---|---|
+| **Reliable** | 30 FPS, 5 Mbps, automatic network detection | Lower packet and decoder load for unstable Wi-Fi; motion is less fluid. |
+| **Recommended** | 60 FPS, 8 Mbps, automatic network detection | Native-detail, responsive default for ordinary local play. |
+| **High quality** | 60 FPS, 12 Mbps, automatic network detection | Cleaner motion on a strong link; a weak link can stutter or add latency. |
+| **Remote / VPN** | 30 FPS, 4 Mbps, remote-network handling | More tolerant of constrained or routed links; least fluid and most compressed. |
+
+Changing an owned value marks the preset **Custom**. Streaming presets do not
+silently change controller choices. **Reset all to recommended** additionally
+restores the Maximum compatibility controller profile, turns the performance
+overlay off, and disables diagnostic file logging.
+
+Higher bitrate improves compression only while the wireless link can sustain
+it. Once packets queue or drop, image quality and responsiveness get worse
+together. Start with Recommended; use Reliable for freezes or audio breakup,
+and High quality only when motion remains smooth but looks blocky.
+
+## Performance overlay and diagnostics
+
+The performance overlay appears in the **top-right corner** over a **50%
+alpha** background. It can be changed from Settings or the in-stream menu:
+
+| Mode | Information shown |
+|---|---|
+| **Off** | No on-screen metrics. Extended per-frame collection is skipped unless the diagnostics screen or file logging needs it. |
+| **Frame rate** | Rendered FPS and target FPS. |
+| **Frame rate + network** | FPS, network health, estimated round-trip time, and measured encoded-video rate. |
+| **Advanced** | The above plus configured stream mode/rate, average and maximum decode time, dropped-frame counts, and recovered/failed/out-of-sequence packet counts. |
+
+For a fuller live view, open the stream menu and choose **Real-time
+diagnostics**. This dedicated screen shows connection state, measured and
+active video rates, round-trip-time estimate, the active stream and packet
+size, any settings selected for the next reconnect, decode timing, drops,
+controller type, gyro request/event status, Circle down/up state,
+performance-overlay mode, file-logging state, and the actual log path. It does
+not write a log unless logging is separately enabled.
+
+### Capture an optional diagnostic log
+
+Diagnostic file logging is **off by default**. When it is off, log calls return
+immediately and no log file is opened for normal activity.
+
+1. Before connecting, open **Settings > System > Diagnostic file logging**;
+   or, while streaming, open **Real-time diagnostics** and press **Triangle**.
+2. Reproduce the quality, connection, input, or display problem.
+3. Return to Real-time diagnostics and press **Triangle** again, or disable
+   logging in Settings. This closes the file cleanly. Exiting Moonlight also
+   closes it.
+4. Open VitaShell and copy
+   `ux0:data/moonlight/moonlight.log` to the PC over USB or FTP.
+
+The log is append-only across captures. Rename or delete an old log before a
+fresh reproduction if you want a smaller file. If `ux0:data/moonlight` is not
+available, Moonlight can use `ux0:moonlight` or
+`uma0:data/moonlight`; Real-time diagnostics displays the exact active path.
+Review the file for host names or network addresses before posting it publicly.
 
 ## Controller and touch profiles
 
-- **Xbox / local PS** is the first-run default and exposes a conventional
-  XInput controller for broad Windows compatibility. Single PS presses stay
-  local.
-- **Steam / DS4 + gyro** exposes DS4 motion and touchpad capabilities and
-  selects Safe PC Guide so PS opens Steam's overlay without sacrificing the
-  double-PS LiveArea escape. Gyroscope values
-  are sent in degrees per second and acceleration in metres per second squared,
-  at no more than the host-requested rate.
-- **Relative mouse** is the broadest touchscreen default. **DS4 Touchpad**,
-  **Absolute mouse**, and **Tablet** provide specialized mappings. These can be
-  changed from the in-stream overlay or the normal settings screen.
+- **Maximum compatibility** is the first-run controller profile. It presents
+  an Xbox/XInput controller, uses relative-mouse touch, keeps single PS presses
+  local, disables gyro, mapping files, shoulder swapping, and the sprint
+  helper. It has the broadest native Windows game compatibility.
+- **Steam / DS4 + gyro** presents a DualShock 4, enables Vita gyro and DS4
+  touchpad, and selects **Safe PC Guide**. Configure gyro behavior in Steam
+  Input. A single PS press reaches Steam after a short safety delay;
+  double-PS remains the local LiveArea escape. Some XInput-only games require
+  Steam Input translation.
+- **Custom** appears when individual controller or touch choices no longer
+  match either complete profile.
 
-The overlay's blue diagnostic line reports whether Sunshine requested gyro,
-whether Vita samples are actually being sent, and matching Circle down/up
-counts. If Circle's counts match but a game still repeats the action, the
-problem is downstream in the host/game mapping; mismatched counts identify a
-Vita input or stream-boundary problem. Stream pause and disconnect now send an
-explicit neutral state and controller removal so a held button cannot survive
-the session.
+After changing controller profiles in-stream, choose **Apply input changes +
+reconnect** so Sunshine recreates the virtual controller. This input-only
+reconnect does not send a display-mode command or reset the VDD. The Real-time
+diagnostics screen distinguishes the active controller from a pending choice
+and can confirm whether Sunshine requested gyro samples and the Vita sent them.
+
+The four individual PS modes are:
+
+- **Local double-tap**: recommended default. Single PS stays local; double-PS
+  returns to LiveArea. Windows receives no Guide event.
+- **Safe PC Guide**: delays a single Guide event by 250 ms so a quick double
+  press can remain local.
+- **Immediate PC Guide**: sends Guide immediately. It has less delay but may
+  trigger Steam, Windows, or media shortcuts before a second press is known.
+- **System / LiveArea**: leaves PS to the Vita system; one press exits and no
+  Guide event reaches the PC.
+
+Touch choices are **Relative mouse**, **DS4 Touchpad**, **Mouse Absolute**, and
+**Tablet (Sunshine)**. They affect pointer/controller behavior, not video
+quality or bitrate. See the [Vita settings guide](docs/VITA_SETTINGS_GUIDE.md)
+for complete tuning and controller details.
 
 ## If something goes wrong
 
-- Washed-out video or Sunshine capturing the physical monitor: open the host
-  control panel, keep **Automatically switch to the Vita display for every
-  Sunshine application** and **Force SDR** enabled, then choose **Save and
-  apply**.
-- The physical monitor does not return: sign out and back in. The installed
+- **The Vita still shows the physical display or a 4:3 image:** open the host
+  control panel, enable automatic Vita-display switching and Force SDR, then
+  choose **Save and apply**. In-stream, select 960x544 and choose **Apply
+  resolution + reconnect**.
+- **The physical monitor does not return:** sign out and back in so the
   recovery task restores the saved layout. If the desktop is visible, use
   **Displays > Emergency display reset** in the Administrator control panel.
-- A game turns black while the local Vita overlay still draws: try **Close
-  Windows game** first. If Steam does not return, use **End Sunshine app**. If
-  the entire captured desktop remains black, use **Recover display +
-  Sunshine**, wait about ten seconds, then reconnect.
-- Sunshine reports ViGEmBus missing: run the control panel health check. If
+- **A game turns black while the Vita menu still draws:** try **Close Windows
+  game**. If Steam does not return, use **End Sunshine app**. If the captured
+  desktop remains black, use **Recover host display**, wait about ten seconds,
+  and reconnect.
+- **Video capture stops completely:** the Vita menu and diagnostics continue
+  redrawing over the last completed frame, so the same close/recovery actions
+  remain available.
+- **Sunshine reports ViGEmBus missing:** run the control-panel health check. If
   ViGEmBus is running but Sunshine started earlier, click **Restart Sunshine**.
-- Motion artifacts: verify the overlay shows at least 8 Mbps at 960x544/60 and
-  that the PC is using wired Ethernet or strong 5 GHz/6 GHz Wi-Fi.
+- **Motion looks blocky:** inspect Frame rate + network or Advanced. If the
+  network is degraded, lower bitrate or choose Reliable; if delivery is smooth
+  at 8 Mbps, try High quality.
+- **Gyro or a button behaves incorrectly:** select Steam / DS4 + gyro when
+  needed, reconnect, then inspect Real-time diagnostics. Enable file logging
+  only while reproducing the issue.
 
 ## Build from source
 
@@ -183,13 +284,13 @@ dotnet run --project host\VitaMoonlight.Host\VitaMoonlight.Host.csproj -c Releas
 ```
 
 The release workflows build the VPK, portable Windows package, and Windows
-installer. The host packaging and pinned third-party components are described
-in [host/THIRD_PARTY_NOTICES.md](host/THIRD_PARTY_NOTICES.md).
+installer. Pinned third-party components are described in
+[host/THIRD_PARTY_NOTICES.md](host/THIRD_PARTY_NOTICES.md).
 
 ## Upstream and community
 
 This project builds on the original Vita Moonlight port and the Moonlight
 ecosystem. General Moonlight documentation is available from the
-[Moonlight documentation wiki](https://github.com/moonlight-stream/moonlight-docs/wiki)
+[Moonlight documentation wiki](https://github.com/moonlight-stream/moonlight-docs/wiki),
 and the original Vita project has additional background in its
 [wiki](https://github.com/xyzz/vita-moonlight/wiki).

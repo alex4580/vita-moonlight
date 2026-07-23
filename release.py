@@ -1,4 +1,5 @@
-#/usr/bin/env python
+#!/usr/bin/env python3
+import re
 import sys
 
 def ver2appver(version):
@@ -28,15 +29,51 @@ with open('sce_sys/livearea/contents/template.xml.format') as f:
 lines = []
 with open('CMakeLists.txt') as f:
     for line in f.readlines():
-        if 'set(VERSION_MAJOR' in line:
+        if re.match(r'^\s*set\(VERSION_MAJOR\b', line):
             line = 'set(VERSION_MAJOR "%d")\n' % versions[0]
-        elif 'set(VERSION_MINOR' in line:
+        elif re.match(r'^\s*set\(VERSION_MINOR\b', line):
             line = 'set(VERSION_MINOR "%d")\n' % versions[1]
-        elif 'set(VERSION_PATCH' in line:
+        elif re.match(r'^\s*set\(VERSION_PATCH\b', line):
             line = 'set(VERSION_PATCH "%d")\n' % versions[2]
         lines.append(line)
 with open('CMakeLists.txt', 'w') as w:
     w.write(''.join(lines))
+
+# keep the Windows companion, installer, and generated manual on the same
+# release identity as the VPK
+def replace_required(path, pattern, replacement):
+    with open(path, encoding='utf-8') as f:
+        content = f.read()
+    updated, count = re.subn(pattern, replacement, content, flags=re.MULTILINE)
+    if count == 0:
+        raise RuntimeError('release metadata pattern not found in %s' % path)
+    with open(path, 'w', encoding='utf-8', newline='\n') as w:
+        w.write(updated)
+
+replace_required(
+    'host/VitaMoonlight.Host/VitaMoonlight.Host.csproj',
+    r'<Version>[^<]+</Version>',
+    '<Version>%s</Version>' % version)
+replace_required(
+    'host/VitaMoonlight.Host/VitaMoonlight.Host.csproj',
+    r'<AssemblyVersion>[^<]+</AssemblyVersion>',
+    '<AssemblyVersion>%s.0</AssemblyVersion>' % version)
+replace_required(
+    'host/VitaMoonlight.Host/VitaMoonlight.Host.csproj',
+    r'<FileVersion>[^<]+</FileVersion>',
+    '<FileVersion>%s.0</FileVersion>' % version)
+replace_required(
+    'host/installer/VitaMoonlightHost.iss',
+    r'^AppVersion=.*$',
+    'AppVersion=%s' % version)
+replace_required(
+    'docs/README.pod',
+    r'(=head1 VERSION\s+)[^\s]+',
+    r'\g<1>%s' % version)
+replace_required(
+    'docs/CMakeLists.txt',
+    r'--release="vita-moonlight [^"]+"',
+    '--release="vita-moonlight %s"' % version)
 
 # update release note
 lines = []

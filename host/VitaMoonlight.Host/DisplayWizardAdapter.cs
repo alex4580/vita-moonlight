@@ -5,6 +5,16 @@ using Microsoft.Win32;
 
 namespace VitaMoonlight.Host;
 
+internal enum PnPUtilExitDisposition
+{
+    Success,
+    ContinueToVerification,
+    RestartRequired,
+    Failure,
+}
+
+internal sealed class HostRestartRequiredException(string message) : Exception(message);
+
 internal sealed class DisplayWizardAdapter
 {
     private const string DriverHardwareId = @"ROOT\MttVDD";
@@ -25,14 +35,6 @@ internal sealed class DisplayWizardAdapter
         "PRPlanIT.com-VirtualDisplayDrv_Wiz.exe",
         "VirtualDisplayDrv.exe",
     };
-    private static readonly (int Width, int Height)[] VitaResolutions =
-    {
-        (960, 540),
-        (960, 544),
-        (1280, 720),
-    };
-    private const int VitaDisplayRefreshRate = 60;
-
     private readonly string executablePath;
 
     private DisplayWizardAdapter(string executablePath)
@@ -41,6 +43,8 @@ internal sealed class DisplayWizardAdapter
     }
 
     internal string ExecutablePath => executablePath;
+    internal static string DriverConfigurationPath =>
+        Path.Combine(DriverConfigurationDirectory, "vdd_settings.xml");
 
     internal static DisplayWizardAdapter Locate(string? configuredPath)
     {
@@ -84,25 +88,30 @@ internal sealed class DisplayWizardAdapter
     internal void InstallDriver()
     {
         ValidateDriverBundle();
+        DriverNativeModeVerification.Invalidate();
         EnsureVitaCompatibilityModes();
         var workingDirectory = Path.GetDirectoryName(executablePath)!;
         var driverAlreadyInstalled = IsDriverInstalled();
         if (!driverAlreadyInstalled)
         {
-            RunProcess(
+            EnsureProcessSucceeded(RunProcess(
                 Path.Combine(workingDirectory, "nefconw.exe"),
                 workingDirectory,
                 30000,
                 "--create-device-node",
                 "--hardware-id", DriverHardwareId,
                 "--class-name", "Display",
-                "--class-guid", DriverClassGuid);
-            RunProcess(
-                "pnputil.exe",
-                workingDirectory,
-                60000,
-                "/add-driver", Path.Combine(workingDirectory, "MttVDD.inf"), "/install");
+                "--class-guid", DriverClassGuid));
         }
+
+        // Always stage and install the pinned package. This repairs damaged
+        // files, updates an older package, and rebinds an existing root device
+        // instead of treating the mere presence of its hardware ID as healthy.
+        EnsurePnPUtilSucceeded(RunProcess(
+            "pnputil.exe",
+            workingDirectory,
+            60000,
+            "/add-driver", Path.Combine(workingDirectory, "MttVDD.inf"), "/install"));
         ReloadDriver();
     }
 
@@ -113,13 +122,14 @@ internal sealed class DisplayWizardAdapter
         var original = File.ReadAllText(configurationPath);
         var updated = AddVitaCompatibilityModesToConfiguration(original);
         if (string.Equals(original, updated, StringComparison.Ordinal)) return false;
+        DriverNativeModeVerification.Invalidate();
         DisplayTopologyService.AtomicWrite(configurationPath, updated);
         return true;
     }
 
     internal static bool HasVitaCompatibilityModes()
     {
-        var path = Path.Combine(DriverConfigurationDirectory, "vdd_settings.xml");
+        var path = DriverConfigurationPath;
         if (!File.Exists(path)) return false;
         try
         {
@@ -144,11 +154,16 @@ internal sealed class DisplayWizardAdapter
         }
         foreach (var instanceId in instanceIds)
         {
-            RunProcess(
+            EnsurePnPUtilSucceeded(RunProcess(
                 "pnputil.exe",
                 Path.GetDirectoryName(executablePath)!,
                 45000,
-                "/restart-device", instanceId);
+                "/enable-device", instanceId));
+            EnsurePnPUtilSucceeded(RunProcess(
+                "pnputil.exe",
+                Path.GetDirectoryName(executablePath)!,
+                45000,
+                "/restart-device", instanceId));
         }
     }
 
@@ -216,7 +231,7 @@ internal sealed class DisplayWizardAdapter
 
     private string EnsureDriverConfiguration()
     {
-        var targetPath = Path.Combine(DriverConfigurationDirectory, "vdd_settings.xml");
+        var targetPath = DriverConfigurationPath;
         if (File.Exists(targetPath)) return targetPath;
 
         Directory.CreateDirectory(DriverConfigurationDirectory);
@@ -227,7 +242,10 @@ internal sealed class DisplayWizardAdapter
 
     private static void AddMode(string configurationPath, int width, int height, int fps)
     {
-        var updated = AddModeToConfiguration(File.ReadAllText(configurationPath), width, height, fps);
+        var original = File.ReadAllText(configurationPath);
+        var updated = AddModeToConfiguration(original, width, height, fps);
+        if (string.Equals(original, updated, StringComparison.Ordinal)) return;
+        DriverNativeModeVerification.Invalidate();
         DisplayTopologyService.AtomicWrite(configurationPath, updated);
     }
 
@@ -265,11 +283,35 @@ internal sealed class DisplayWizardAdapter
     internal static string AddVitaCompatibilityModesToConfiguration(string configuration)
     {
         var updated = configuration;
-        foreach (var (width, height) in VitaResolutions)
+        foreach (var mode in VitaDisplayModes.Supported)
         {
-            updated = AddModeToConfiguration(updated, width, height, VitaDisplayRefreshRate);
+            updated = AddModeToConfiguration(updated, mode.Width, mode.Height, mode.Fps);
         }
-        return updated;
+
+        // Advertise the Vita's native mode first while retaining the stock
+        // modes for local recovery and compatibility. Setup also activates and
+        // verifies this mode once because Windows can retain an older mode for
+        // an already-enumerated display.
+        var document = XDocument.Parse(updated, LoadOptions.PreserveWhitespace);
+        var resolutions = document.Root?.Element("resolutions")
+            ?? throw new InvalidDataException("The virtual display configuration has no resolutions element.");
+        var currentModes = resolutions.Elements("resolution").ToArray();
+        var preferredModes = VitaDisplayModes.Supported
+            .Select(mode => currentModes.First(resolution =>
+                resolution.Element("width")?.Value == mode.Width.ToString() &&
+                resolution.Element("height")?.Value == mode.Height.ToString()))
+            .ToArray();
+        if (currentModes.Take(preferredModes.Length).SequenceEqual(preferredModes))
+        {
+            return updated;
+        }
+
+        for (var index = preferredModes.Length - 1; index >= 0; index--)
+        {
+            preferredModes[index].Remove();
+            resolutions.AddFirst(preferredModes[index]);
+        }
+        return document.ToString(SaveOptions.None);
     }
 
     internal static bool HasVitaCompatibilityModesInConfiguration(string configuration)
@@ -277,14 +319,31 @@ internal sealed class DisplayWizardAdapter
         var document = XDocument.Parse(configuration);
         var resolutions = document.Root?.Element("resolutions")?.Elements("resolution").ToArray();
         if (resolutions is null) return false;
-        return VitaResolutions.All(mode => resolutions.Any(resolution =>
+        var preferred = resolutions.FirstOrDefault();
+        return preferred?.Element("width")?.Value == VitaDisplayModes.Native.Width.ToString() &&
+               preferred.Element("height")?.Value == VitaDisplayModes.Native.Height.ToString() &&
+               preferred.Elements("refresh_rate").Any(rate => rate.Value == VitaDisplayModes.Native.Fps.ToString()) &&
+               VitaDisplayModes.Supported.All(mode => resolutions.Any(resolution =>
             resolution.Element("width")?.Value == mode.Width.ToString() &&
             resolution.Element("height")?.Value == mode.Height.ToString() &&
             resolution.Elements("refresh_rate")
-                .Any(rate => rate.Value == VitaDisplayRefreshRate.ToString())));
+                .Any(rate => rate.Value == mode.Fps.ToString())));
     }
 
-    private static void RunProcess(string fileName, string workingDirectory, int timeoutMilliseconds, params string[] arguments)
+    internal static PnPUtilExitDisposition ClassifyPnPUtilExitCode(int exitCode) =>
+        exitCode switch
+        {
+            0 => PnPUtilExitDisposition.Success,
+            259 => PnPUtilExitDisposition.ContinueToVerification,
+            1641 or 3010 => PnPUtilExitDisposition.RestartRequired,
+            _ => PnPUtilExitDisposition.Failure,
+        };
+
+    private static ProcessExecutionResult RunProcess(
+        string fileName,
+        string workingDirectory,
+        int timeoutMilliseconds,
+        params string[] arguments)
     {
         using var process = new Process
         {
@@ -317,12 +376,49 @@ internal sealed class DisplayWizardAdapter
         }
         var output = outputTask.GetAwaiter().GetResult();
         var error = errorTask.GetAwaiter().GetResult();
-        if (process.ExitCode != 0)
+        return new ProcessExecutionResult(
+            Path.GetFileName(fileName),
+            process.ExitCode,
+            output,
+            error);
+    }
+
+    private static void EnsureProcessSucceeded(ProcessExecutionResult result)
+    {
+        if (result.ExitCode != 0)
         {
             throw new InvalidOperationException(
-                $"{Path.GetFileName(fileName)} exited with code {process.ExitCode}. {error} {output}".Trim());
+                $"{result.FileName} exited with code {result.ExitCode}. {result.Error} {result.Output}".Trim());
         }
     }
+
+    private static void EnsurePnPUtilSucceeded(ProcessExecutionResult result)
+    {
+        switch (ClassifyPnPUtilExitCode(result.ExitCode))
+        {
+            case PnPUtilExitDisposition.Success:
+                return;
+            case PnPUtilExitDisposition.ContinueToVerification:
+                Console.WriteLine(
+                    "PnPUtil made no device change because no target matched or Windows already has an equal/newer driver. " +
+                    "Continuing to explicit display enumeration and native-mode verification.");
+                return;
+            case PnPUtilExitDisposition.RestartRequired:
+                DriverNativeModeVerification.Invalidate();
+                throw new HostRestartRequiredException(
+                    "Windows accepted the virtual display driver operation and requires a restart before native 960x544 can be verified.");
+            default:
+                DriverNativeModeVerification.Invalidate();
+                throw new InvalidOperationException(
+                    $"{result.FileName} exited with code {result.ExitCode}. {result.Error} {result.Output}".Trim());
+        }
+    }
+
+    private sealed record ProcessExecutionResult(
+        string FileName,
+        int ExitCode,
+        string Output,
+        string Error);
 
     private static void ValidateDimension(int value, string name, int minimum, int maximum)
     {

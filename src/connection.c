@@ -30,6 +30,7 @@
 #include "connection_overlay.h"
 #include "debug.h"
 #include "gui/ui_stream_overlay.h"
+#include "gui/ui_diagnostics.h"
 
 static int connection_status = LI_DISCONNECTED;
 
@@ -67,6 +68,8 @@ void connection_connection_started() {
   vita_debug_log("connection started\n");
   connection_status = LI_CONNECTED;
   stream_overlay_reset();
+  ui_diagnostics_reset_session();
+  ui_diagnostics_set_network_state(UI_DIAGNOSTICS_NETWORK_GOOD);
   start_output();
   vitavideo_hide_poor_net_indicator();
 }
@@ -104,6 +107,8 @@ static void connection_connection_terminated(int error_code) {
   vita_debug_log("connection terminated\n");
   connection_status = LI_DISCONNECTED;
   stream_overlay_reset();
+  ui_diagnostics_reset_session();
+  ui_diagnostics_set_network_state(UI_DIAGNOSTICS_NETWORK_UNKNOWN);
 }
 
 int connection_reset() {
@@ -188,9 +193,11 @@ void connection_status_update(int status) {
   switch (status) {
     case CONN_STATUS_POOR:
       vitavideo_show_poor_net_indicator();
+      ui_diagnostics_set_network_state(UI_DIAGNOSTICS_NETWORK_DEGRADED);
       break;
     case CONN_STATUS_OKAY:
       vitavideo_hide_poor_net_indicator();
+      ui_diagnostics_set_network_state(UI_DIAGNOSTICS_NETWORK_GOOD);
       break;
   }
 }

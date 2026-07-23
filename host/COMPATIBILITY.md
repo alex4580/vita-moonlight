@@ -2,10 +2,13 @@
 
 ## Supported release target
 
-The all-in-one package targets **Windows 10/11 x64 on Intel or AMD CPUs**. It
-uses the official AMD64 Sunshine installer and the pinned x64 signed Virtual
-Display Driver. The installer now refuses non-x64 Windows rather than allowing
-an architecture-mismatched display driver to fail halfway through setup.
+The all-in-one package targets **Windows 10 version 2004 (build 19041) or
+newer, and Windows 11, on x64 Intel or AMD CPUs**. It uses the official AMD64
+Sunshine installer and the pinned x64 signed Virtual Display Driver. Build
+19041 is the minimum because the safe driver reload uses PnPUtil device
+enable/restart commands introduced in that Windows release. The installer and
+portable companion refuse older, non-x64, or non-client Windows before running
+setup actions. Diagnostics remain available through `doctor`.
 
 Sunshine supports hardware encoding on AMD, Intel, and NVIDIA GPUs. Actual
 codec/encoder availability still depends on the installed GPU and vendor
@@ -18,8 +21,12 @@ Not currently packaged:
   need an ARM64 companion and a release-qualified ARM64 VDD package.
 - Windows Server. The bundled ViGEmBus project explicitly supports Windows
   10/11 rather than Server editions.
-- Windows 7/8. The current Sunshine, ViGEmBus, and VDD stack targets Windows
-  10/11.
+- Windows 7/8 and Windows 10 builds older than 19041. The current Sunshine,
+  ViGEmBus, VDD, and safe device-reload path require a newer release.
+- PCs with no writable `C:` volume. The pinned signed VDD binary reads
+  `C:\VirtualDisplayDriver\vdd_settings.xml`; this path is imposed by that
+  upstream driver even when Windows itself is installed elsewhere. Use Apollo
+  on an unusual machine without a usable `C:` volume.
 
 ## Machine layouts covered by the companion
 
@@ -39,6 +46,10 @@ used for streaming. This release supports one configured interactive streaming
 account per PC; applying setup from another account reassigns the tasks to that
 account. Simultaneous fast-user-switching sessions are not a release target.
 Recovery state itself is machine-wide under `%ProgramData%\VitaMoonlight`.
+Use the same Windows account for setup and streaming. Supplying credentials for
+a different Administrator account from a standard-user session is a required
+release test and must not be advertised as supported until both scheduled
+tasks are observed in the intended interactive session.
 
 The companion never selects a display by a developer's monitor model or device
 path. It identifies only the managed VDD by its published driver identities and

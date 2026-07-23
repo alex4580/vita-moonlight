@@ -17,6 +17,7 @@
  * along with Moonlight; if not, see <http://www.gnu.org/licenses/>.
  */
 #include <math.h>
+#include <stdint.h>
 
 // Vita's sceVideodecInitLibrary only accept resolution that is multiple of 16 on either dimension,
 // and the smallest resolution is 64
@@ -28,6 +29,8 @@
 
 void vitavideo_start();
 void vitavideo_stop();
+void vitavideo_get_fps(uint32_t *rendered, uint32_t *target);
+void vitavideo_request_redraw();
 void vitavideo_show_poor_net_indicator();
 void vitavideo_hide_poor_net_indicator();
 int vitavideo_initialized();

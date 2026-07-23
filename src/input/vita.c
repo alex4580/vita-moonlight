@@ -159,6 +159,13 @@ inline void move_wheel(TouchData old, TouchData cur) {
 
 SceCtrlData pad, pad_old;
 static SceCtrlData shortcut_pad_old;
+/*
+ * Closing the local stream menu must not turn its closing X/O/START/chord
+ * into a fresh remote button press on the following 2 ms input tick. Keep
+ * this latch across stream reconnects so a button held through reconnect is
+ * still consumed when the new virtual controller arrives.
+ */
+static bool suppress_remote_input_until_release = false;
 TouchData touch;
 TouchData touch_old, swipe;
 SceTouchData front, back;
@@ -172,9 +179,14 @@ SceRtcTick current, until;
 //static int special_status;
 
 input_data curr, old;
-static volatile uint32_t circle_press_count = 0;
-static volatile uint32_t circle_release_count = 0;
-static volatile bool circle_held = false;
+/*
+ * The performance overlay is rendered by the video/pacer threads while these
+ * counters are updated by the input thread. Use real atomics rather than
+ * volatile so diagnostics never introduce a C data race.
+ */
+static uint32_t circle_press_count = 0;
+static uint32_t circle_release_count = 0;
+static uint32_t circle_held = 0;
 int controller_port;
 bool _calibrateGyro = true;
 bool _motionActivated = false;
@@ -890,6 +902,17 @@ inline void vitainput_process(void) {
   // Siempre procesar las esquinas del back (para compatibilidad o futuros usos)
   read_backscreen();
 
+  if (suppress_remote_input_until_release) {
+    memcpy(&pad_old, &raw_pad, sizeof(SceCtrlData));
+    memcpy(&shortcut_pad_old, &raw_pad, sizeof(SceCtrlData));
+    memset(&old, 0, sizeof(input_data));
+    if (raw_pad.buttons == 0) {
+      suppress_remote_input_until_release = false;
+      reset_physical_shortcuts();
+    }
+    return;
+  }
+
   sceRtcGetCurrentTick(&current);
   bool overlay_was_open = stream_overlay_is_open();
   if (!overlay_was_open) {
@@ -899,6 +922,9 @@ inline void vitainput_process(void) {
   memcpy(&shortcut_pad_old, &raw_pad, sizeof(SceCtrlData));
   if (overlay_was_open) {
     stream_overlay_handle_input(&pad, &pad_old);
+    if (!stream_overlay_is_open()) {
+      suppress_remote_input_until_release = true;
+    }
     memcpy(&pad_old, &pad, sizeof(SceCtrlData));
     memset(&old, 0, sizeof(input_data));
     return;
@@ -972,9 +998,15 @@ inline void vitainput_process(void) {
       bool was_circle_held = (old.button & B_FLAG) != 0;
       bool is_circle_held = (curr.button & B_FLAG) != 0;
       if (was_circle_held != is_circle_held) {
-        if (is_circle_held) circle_press_count++;
-        else circle_release_count++;
-        circle_held = is_circle_held;
+        if (is_circle_held) {
+          __atomic_fetch_add(
+              &circle_press_count, 1U, __ATOMIC_RELAXED);
+        } else {
+          __atomic_fetch_add(
+              &circle_release_count, 1U, __ATOMIC_RELAXED);
+        }
+        __atomic_store_n(
+            &circle_held, is_circle_held ? 1U : 0U, __ATOMIC_RELEASE);
       }
       LiSendMultiControllerEvent(0, 1, curr.button, curr.lt, curr.rt, curr.lx, -1 * curr.ly, curr.rx, -1 * curr.ry);
       memcpy(&old, &curr, sizeof(input_data));
@@ -990,9 +1022,12 @@ static volatile uint8_t active_input_thread = 0;
 
 void vitainput_get_diagnostics(VitaInputDiagnostics *diagnostics) {
   if (!diagnostics) return;
-  diagnostics->circle_presses = circle_press_count;
-  diagnostics->circle_releases = circle_release_count;
-  diagnostics->circle_held = circle_held;
+  diagnostics->circle_presses =
+      __atomic_load_n(&circle_press_count, __ATOMIC_ACQUIRE);
+  diagnostics->circle_releases =
+      __atomic_load_n(&circle_release_count, __ATOMIC_ACQUIRE);
+  diagnostics->circle_held =
+      __atomic_load_n(&circle_held, __ATOMIC_ACQUIRE) != 0;
 }
 
 int vitainput_thread(SceSize args, void *argp) {
@@ -1117,9 +1152,9 @@ void vitainput_start(void) {
   memset(&pad_old, 0, sizeof(pad_old));
   memset(&shortcut_pad_old, 0, sizeof(shortcut_pad_old));
   memset(&old, 0, sizeof(old));
-  circle_press_count = 0;
-  circle_release_count = 0;
-  circle_held = false;
+  __atomic_store_n(&circle_press_count, 0U, __ATOMIC_RELEASE);
+  __atomic_store_n(&circle_release_count, 0U, __ATOMIC_RELEASE);
+  __atomic_store_n(&circle_held, 0U, __ATOMIC_RELEASE);
   reset_physical_shortcuts();
   uint16_t gamepadMask = 1;
   uint16_t gamepadCapabilities = LI_CCAP_BATTERY_STATE;
@@ -1170,9 +1205,9 @@ void vitainput_start(void) {
 
 void vitainput_stop(void) {
   active_input_thread = false;
-  if (circle_held) {
-    circle_release_count++;
-    circle_held = false;
+  if (__atomic_exchange_n(&circle_held, 0U, __ATOMIC_ACQ_REL) != 0) {
+    __atomic_fetch_add(
+        &circle_release_count, 1U, __ATOMIC_RELAXED);
   }
   // Release all controls and remove the virtual pad while the connection is
   // still alive. This prevents a held button surviving pause or disconnect.

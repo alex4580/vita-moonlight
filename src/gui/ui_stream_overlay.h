@@ -13,6 +13,8 @@ bool stream_overlay_take_disconnect_request(void);
 bool stream_overlay_take_close_game_request(void);
 bool stream_overlay_take_quit_app_request(void);
 bool stream_overlay_take_recover_host_request(void);
+bool stream_overlay_take_apply_display_request(int *virtual_key);
+bool stream_overlay_take_apply_input_request(void);
 void stream_overlay_draw(void);
 
 #endif

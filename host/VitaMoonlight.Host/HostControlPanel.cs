@@ -7,6 +7,7 @@ namespace VitaMoonlight.Host;
 
 internal sealed class HostControlPanel : Form
 {
+    private const int RestartRequiredExitCode = 4;
     private static readonly Color Accent = Color.FromArgb(48, 118, 255);
     private static readonly Color Surface = Color.FromArgb(247, 249, 252);
     private static readonly Color Ink = Color.FromArgb(28, 34, 46);
@@ -157,7 +158,9 @@ internal sealed class HostControlPanel : Form
 
         var actions = CreateActionRow();
         AddCommandButton(actions, "Apply recommended setup", ButtonKind.Primary,
-            async () => await ApplyConfigurationAsync(restartSunshine: true), 220);
+            async () => await ApplyConfigurationAsync(
+                restartSunshine: true,
+                repairPrerequisites: true), 220);
         AddCommandButton(actions, "Run health check", ButtonKind.Secondary,
             async () => { await RunCommandAsync(new[] { "doctor" }, allowNonZeroExit: true); }, 180,
             requiresAdministrator: false);
@@ -235,7 +238,7 @@ internal sealed class HostControlPanel : Form
 
         var maintenance = CreateActionRow();
         AddCommandButton(maintenance, "Install/update display driver", ButtonKind.Secondary,
-            async () => { await RunCommandAsync(new[] { "driver", "install" }); }, 220,
+            async () => { await RepairDisplayDriverAsync(); }, 220,
             "Install or update the signed virtual display driver? Windows may briefly refresh connected displays.");
         AddCommandButton(maintenance, "Reload display driver", ButtonKind.Secondary,
             async () => { await RunCommandAsync(new[] { "driver", "reload" }); }, 180,
@@ -261,6 +264,12 @@ internal sealed class HostControlPanel : Form
         AddCommandButton(actions, "Install stream rescue agent", ButtonKind.Secondary,
             async () => { await RunCommandAsync(new[] { "agent", "install" }); }, 210,
             "Install or repair the background hotkey agent used by the Vita overlay for game and display recovery?");
+        AddCommandButton(actions, "Repair controller support", ButtonKind.Secondary,
+            async () => { await RepairGamepadAsync(); }, 210,
+            "Install or repair ViGEmBus, then verify its service is running?");
+        AddCommandButton(actions, "Update/repair Sunshine", ButtonKind.Secondary,
+            async () => { await RepairSunshineAsync(); }, 210,
+            "Install or repair the packaged compatible Sunshine build? Active streams will end.");
         AddCommandButton(actions, "Rescue agent status", ButtonKind.Secondary,
             async () => { await RunCommandAsync(new[] { "agent", "status" }, allowNonZeroExit: true); }, 180,
             requiresAdministrator: false);
@@ -416,7 +425,9 @@ internal sealed class HostControlPanel : Form
         displayMatch.Text = settings.DisplayMatch ?? string.Empty;
     }
 
-    private async Task ApplyConfigurationAsync(bool restartSunshine)
+    private async Task ApplyConfigurationAsync(
+        bool restartSunshine,
+        bool repairPrerequisites = false)
     {
         var selectedHost = hostMode.SelectedItem?.ToString()?.ToLowerInvariant() ?? "sunshine";
         var arguments = new List<string>
@@ -429,6 +440,15 @@ internal sealed class HostControlPanel : Form
         {
             arguments.Add("--display-match");
             arguments.Add(displayMatch.Text.Trim());
+        }
+        if (repairPrerequisites)
+        {
+            if (!await RepairGamepadAsync()) return;
+            if (selectedHost == "sunshine")
+            {
+                if (!await RepairSunshineAsync()) return;
+                if (!await RepairDisplayDriverAsync()) return;
+            }
         }
         if (restartSunshine && selectedHost == "sunshine" &&
             !await RunCommandAsync(new[] { "host", "restart", "--host", "sunshine" }))
@@ -443,6 +463,51 @@ internal sealed class HostControlPanel : Form
             await RunCommandAsync(new[] { "host", "restart", "--host", "sunshine" });
         }
     }
+
+    private Task<bool> RepairGamepadAsync() =>
+        RunCommandAsync(new[]
+        {
+            "gamepad",
+            "ensure-compatible",
+            "--installer",
+            Path.Combine(
+                AppContext.BaseDirectory,
+                "tools",
+                "ViGEmBus",
+                "ViGEmBus_1.22.0_x64_x86_arm64.exe"),
+        });
+
+    private Task<bool> RepairSunshineAsync() =>
+        RunCommandAsync(new[]
+        {
+            "host",
+            "ensure-compatible",
+            "--installer",
+            Path.Combine(
+                AppContext.BaseDirectory,
+                "tools",
+                "Sunshine",
+                "Sunshine-Windows-AMD64-installer.msi"),
+        });
+
+    private async Task<bool> RepairDisplayDriverAsync()
+    {
+        if (!await RepairVisualCppRuntimeAsync()) return false;
+        return await RunCommandAsync(new[] { "driver", "install" });
+    }
+
+    private Task<bool> RepairVisualCppRuntimeAsync() =>
+        RunCommandAsync(new[]
+        {
+            "runtime",
+            "ensure-compatible",
+            "--installer",
+            Path.Combine(
+                AppContext.BaseDirectory,
+                "tools",
+                "DisplayWizard",
+                "VC_redist.x64.exe"),
+        });
 
     private void AddCommandButton(
         Control parent,
@@ -535,6 +600,19 @@ internal sealed class HostControlPanel : Form
                 Environment.NewLine,
                 new[] { await standardOutput, await standardError }.Where(value => !string.IsNullOrWhiteSpace(value)));
             output.Text = $"> VitaMoonlight.Host.exe {string.Join(' ', arguments)}{Environment.NewLine}{Environment.NewLine}{combined}";
+            if (process.ExitCode == RestartRequiredExitCode)
+            {
+                status.Text = "Windows restart required";
+                MessageBox.Show(
+                    this,
+                    string.IsNullOrWhiteSpace(combined)
+                        ? "Restart Windows, then click Apply recommended setup again."
+                        : combined,
+                    "Restart required",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+                return false;
+            }
             var accepted = process.ExitCode == 0 || allowNonZeroExit;
             status.Text = process.ExitCode == 0 ? "Completed successfully" : "Check completed — review the recommendation";
             if (!accepted)

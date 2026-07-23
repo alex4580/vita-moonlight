@@ -5,6 +5,8 @@ namespace VitaMoonlight.Host;
 
 internal static class WindowsDisplayNative
 {
+    internal const int OutputTechnologyIndirectWired = 16;
+    internal const int OutputTechnologyIndirectVirtual = 17;
     internal const uint QueryAllPaths = 0x00000001;
     internal const uint QueryOnlyActivePaths = 0x00000002;
     internal const uint PathActive = 0x00000001;
@@ -22,6 +24,7 @@ internal static class WindowsDisplayNative
     private const uint DevModePelsWidth = 0x00080000;
     private const uint DevModePelsHeight = 0x00100000;
     private const uint DevModeDisplayFrequency = 0x00400000;
+    private const uint ChangeUpdateRegistry = 0x00000001;
 
     internal static DisplayConfiguration Query(uint flags)
     {
@@ -81,24 +84,48 @@ internal static class WindowsDisplayNative
         return name;
     }
 
-    internal static void ChangeSourceMode(string gdiDeviceName, int width, int height, int fps)
+    internal static void ChangeSourceMode(
+        string gdiDeviceName,
+        int width,
+        int height,
+        int fps,
+        bool persist = false)
     {
         EnsureWindows();
+        var mode = ReadSourceMode(gdiDeviceName);
+        mode.PelsWidth = checked((uint)width);
+        mode.PelsHeight = checked((uint)height);
+        mode.DisplayFrequency = checked((uint)fps);
+        mode.Fields = DevModePelsWidth | DevModePelsHeight | DevModeDisplayFrequency;
+        var result = ChangeDisplaySettingsEx(
+            gdiDeviceName,
+            ref mode,
+            IntPtr.Zero,
+            persist ? ChangeUpdateRegistry : 0,
+            IntPtr.Zero);
+        if (result != 0)
+        {
+            throw new InvalidOperationException($"Windows rejected {width}x{height}@{fps} for {gdiDeviceName} (result {result}).");
+        }
+
+        var applied = ReadSourceMode(gdiDeviceName);
+        if (applied.PelsWidth != width || applied.PelsHeight != height || applied.DisplayFrequency != fps)
+        {
+            throw new InvalidOperationException(
+                $"Windows reported success but applied {applied.PelsWidth}x{applied.PelsHeight}@{applied.DisplayFrequency} " +
+                $"instead of {width}x{height}@{fps} to {gdiDeviceName}.");
+        }
+    }
+
+    private static DeviceMode ReadSourceMode(string gdiDeviceName)
+    {
         var mode = new DeviceMode { DeviceName = string.Empty, FormName = string.Empty };
         mode.Size = checked((ushort)Marshal.SizeOf<DeviceMode>());
         if (!EnumDisplaySettings(gdiDeviceName, EnumCurrentSettings, ref mode))
         {
             throw new Win32Exception(Marshal.GetLastWin32Error(), $"Could not read display mode for {gdiDeviceName}.");
         }
-        mode.PelsWidth = checked((uint)width);
-        mode.PelsHeight = checked((uint)height);
-        mode.DisplayFrequency = checked((uint)fps);
-        mode.Fields = DevModePelsWidth | DevModePelsHeight | DevModeDisplayFrequency;
-        var result = ChangeDisplaySettingsEx(gdiDeviceName, ref mode, IntPtr.Zero, 0, IntPtr.Zero);
-        if (result != 0)
-        {
-            throw new InvalidOperationException($"Windows rejected {width}x{height}@{fps} for {gdiDeviceName} (result {result}).");
-        }
+        return mode;
     }
 
     internal static bool TrySetAdvancedColorState(DisplayPathInfo path, bool enabled)

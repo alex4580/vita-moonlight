@@ -20,10 +20,18 @@ Program Files variants, and common per-user installation directories. The
 configuration directory follows the discovered executable unless explicitly
 overridden.
 
-For the bundled Sunshine version, the companion selects the virtual display by
-Sunshine's stable `device_id` and enables its native Windows display manager:
-`ensure_only_display`, automatic client resolution and refresh rate, automatic
-HDR state, and `dd_config_revert_on_disconnect`. This policy is global, so it
+The installer upgrades Sunshine builds older than `2026.516.143833`, while
+leaving compatible newer builds in place. The health check rejects an unknown
+or older build before the companion writes native display-manager keys. After a
+restart, configuration polls Sunshine's display inventory for up to 30 seconds
+instead of assuming service-running means enumeration is complete.
+
+For a compatible Sunshine version, the companion selects the virtual display
+by Sunshine's stable `device_id` and enables its native Windows display manager:
+`ensure_only_display`, automatic client resolution, a driver-safe 60 Hz
+Windows desktop refresh, automatic HDR state, and
+`dd_config_revert_on_disconnect`. Moonlight negotiates the stream frame rate
+independently. This policy is global, so it
 covers Desktop, Steam Big Picture, and custom games and restores the physical
 layout after the final client disconnects even when the application remains
 open. Obsolete `VitaMoonlight.Host` prep hooks are removed while unrelated
@@ -62,10 +70,14 @@ creation to Apollo but retains the same client and controller profile.
 ## Stream rescue agent
 
 Setup installs a highest-privilege per-user logon task that runs a hidden,
-single-instance WinForms message loop. It registers two non-repeating global
-hotkeys; no TCP listener, credentials, or remotely callable HTTP endpoint is
-added. The Vita overlay emits the matching keyboard chords through the normal
-encrypted Moonlight input channel.
+single-instance WinForms message loop. Close-game and emergency-recovery
+hotkeys are mandatory. The three managed display-mode hotkeys register
+independently, so an unrelated shortcut collision cannot disable the two
+recovery actions; readiness is exposed to the health check. A named ready event
+is signaled only after mandatory registration succeeds. No TCP listener,
+credentials, or remotely callable HTTP endpoint is added. The Vita overlay
+emits the matching keyboard chords through the normal encrypted Moonlight input
+channel.
 
 The close-game action captures the foreground window, refuses Windows shell,
 Steam, Sunshine, companion, and critical-system process names, requests a
@@ -82,19 +94,22 @@ The client advertises a conventional controller in Xbox mode and DS4 motion
 and touchpad capabilities only in the PS4 profile. Sensor samples are converted
 to Moonlight protocol units and rate-limited to the host request.
 
-New installs use the Balanced 960x544/60/8 Mbps preset. Reliable and High
-quality presets adjust frame rate/bitrate without increasing resolution above
-the Vita panel. Configuration values are range-checked before decoder/input
-initialization so an old or damaged INI file cannot select unsafe packet,
-video, motion, controller, or touch values.
+New installs use the Recommended 960x544/60/8 Mbps preset. Reliable, High
+quality, and Remote / VPN presets set the whole streaming path, including
+resolution, frame rate, bitrate, route detection, packet size, codec, color
+range, recovery, pacing, and scaling. Configuration values are range-checked
+before decoder/input initialization so an old or damaged INI file cannot select
+unsafe packet, video, motion, controller, or touch values.
 
 The in-stream overlay is rendered by vita2d over decoded video. While open, it
 sends a neutral controller state and consumes Vita input locally. Settings are
-saved immediately; negotiation settings apply on reconnect, while touch mode
-and the FPS counter can update during the current session. Destructive rescue
-items require a second confirmation. Disconnect, Sunshine-app termination, and
-host-recovery requests are consumed by the connection UI loop so network
-teardown remains ordered; close-game recovery keeps the current stream alive.
+saved immediately; negotiation settings apply through the controlled reconnect,
+while input policies and performance-overlay modes can update during the
+current session. The dedicated diagnostics page is read-only except for its
+optional logging toggle. Destructive rescue items require a second confirmation.
+Disconnect, Sunshine-app termination, display-mode changes, and host-recovery
+requests are consumed by the connection UI loop so network teardown remains
+ordered; close-game recovery keeps the current stream alive.
 
 ## Packaging
 

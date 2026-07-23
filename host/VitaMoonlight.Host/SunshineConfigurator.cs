@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
@@ -19,7 +20,7 @@ internal static class SunshineConfigurator
         "{\"requested_resolution\":\"960x540\",\"final_resolution\":\"960x540\"}," +
         "{\"requested_resolution\":\"960x544\",\"final_resolution\":\"960x544\"}," +
         "{\"requested_resolution\":\"1280x720\",\"final_resolution\":\"1280x720\"}," +
-        "{\"final_resolution\":\"960x540\"}],\"refresh_rate_only\":[]}";
+        "{\"final_resolution\":\"960x544\"}],\"refresh_rate_only\":[]}";
 
     internal static SunshineConfigurationResult Configure(HostSettings settings, string companionPath)
     {
@@ -68,13 +69,16 @@ internal static class SunshineConfigurator
         UpdateSunshineConfiguration(configurationLines);
         if (useNativeDisplayManagement)
         {
-            var displayDeviceId = FindManagedDisplayDeviceId(
+            var displayDeviceId = WaitForManagedDisplayDeviceId(
                 Path.Combine(configDirectory, "sunshine.log"),
-                settings.DisplayMatch);
+                settings.DisplayMatch,
+                timeoutMilliseconds: 30000,
+                pollMilliseconds: 250);
             if (displayDeviceId is null)
             {
                 throw new InvalidOperationException(
-                    "Sunshine has not enumerated the Vita virtual display yet. Restart Sunshine once, then apply configuration again.");
+                    "Sunshine did not enumerate the Vita virtual display within 30 seconds. " +
+                    "Restart Windows if the display driver was just installed, then click Apply recommended setup.");
             }
             ConfigureNativeDisplayManagement(configurationLines, displayDeviceId, settings.ForceSdr);
         }
@@ -198,41 +202,81 @@ internal static class SunshineConfigurator
         return null;
     }
 
+    internal static string? WaitForManagedDisplayDeviceId(
+        string logPath,
+        string? displayMatch,
+        int timeoutMilliseconds,
+        int pollMilliseconds)
+    {
+        if (timeoutMilliseconds < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(timeoutMilliseconds));
+        }
+        if (pollMilliseconds < 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(pollMilliseconds));
+        }
+
+        var timer = Stopwatch.StartNew();
+        while (true)
+        {
+            var displayDeviceId = FindManagedDisplayDeviceId(logPath, displayMatch);
+            if (displayDeviceId is not null) return displayDeviceId;
+            if (timer.ElapsedMilliseconds >= timeoutMilliseconds) return null;
+            var remaining = timeoutMilliseconds - timer.ElapsedMilliseconds;
+            Thread.Sleep((int)Math.Min(pollMilliseconds, Math.Max(1, remaining)));
+        }
+    }
+
     private static IReadOnlyList<SunshineDisplayCandidate> ParseDisplayCandidates(string log)
     {
         var candidates = new List<SunshineDisplayCandidate>();
         const string marker = "Currently available display devices:";
-        for (var markerIndex = log.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
-             markerIndex >= 0;
-             markerIndex = log.IndexOf(marker, markerIndex + marker.Length, StringComparison.OrdinalIgnoreCase))
+        var markerIndex = log.LastIndexOf(marker, StringComparison.OrdinalIgnoreCase);
+        if (markerIndex < 0)
         {
-            var arrayStart = log.IndexOf('[', markerIndex + marker.Length);
-            if (arrayStart < 0) continue;
-            var arrayEnd = FindJsonArrayEnd(log, arrayStart);
-            if (arrayEnd < 0) continue;
-            try
+            return candidates;
+        }
+
+        // Never fall back to an older inventory. While Sunshine is writing a
+        // new block, returning an earlier device ID can bind output_name to a
+        // display that no longer exists. Polling will retry once this newest
+        // inventory is complete.
+        var arrayStart = log.IndexOf('[', markerIndex + marker.Length);
+        if (arrayStart < 0)
+        {
+            return candidates;
+        }
+        var arrayEnd = FindJsonArrayEnd(log, arrayStart);
+        if (arrayEnd < 0)
+        {
+            return candidates;
+        }
+
+        var inventory = log[arrayStart..(arrayEnd + 1)];
+        try
+        {
+            using var document = JsonDocument.Parse(inventory);
+            foreach (var display in document.RootElement.EnumerateArray())
             {
-                using var document = JsonDocument.Parse(log[arrayStart..(arrayEnd + 1)]);
-                foreach (var display in document.RootElement.EnumerateArray())
-                {
-                    if (!display.TryGetProperty("device_id", out var idElement)) continue;
-                    var id = idElement.GetString();
-                    if (string.IsNullOrWhiteSpace(id)) continue;
-                    var name = display.TryGetProperty("friendly_name", out var nameElement)
-                        ? nameElement.GetString() ?? string.Empty
-                        : string.Empty;
-                    candidates.Add(new SunshineDisplayCandidate(id, name, display.GetRawText()));
-                }
+                if (!display.TryGetProperty("device_id", out var idElement)) continue;
+                var id = idElement.GetString();
+                if (string.IsNullOrWhiteSpace(id)) continue;
+                var name = display.TryGetProperty("friendly_name", out var nameElement)
+                    ? nameElement.GetString() ?? string.Empty
+                    : string.Empty;
+                candidates.Add(new SunshineDisplayCandidate(id, name, display.GetRawText()));
             }
-            catch (JsonException)
-            {
-                // Older or development Sunshine builds may emit non-strict JSON; regex fallback below handles those.
-            }
+        }
+        catch (JsonException)
+        {
+            // Older or development Sunshine builds may emit non-strict JSON;
+            // the regex fallback below remains restricted to the newest block.
         }
         if (candidates.Count > 0) return candidates;
 
         var idFirst = Regex.Matches(
-            log,
+            inventory,
             "\\\"device_id\\\"\\s*:\\s*\\\"(?<id>\\{[^\\\"]+\\})\\\"(?:(?!\\\"device_id\\\").)*?\\\"friendly_name\\\"\\s*:\\s*\\\"(?<name>[^\\\"]*)\\\"",
             RegexOptions.Singleline | RegexOptions.CultureInvariant);
         foreach (Match match in idFirst)
@@ -243,7 +287,7 @@ internal static class SunshineConfigurator
                 match.Value));
         }
         var nameFirst = Regex.Matches(
-            log,
+            inventory,
             "\\\"friendly_name\\\"\\s*:\\s*\\\"(?<name>[^\\\"]*)\\\"(?:(?!\\\"friendly_name\\\").)*?\\\"device_id\\\"\\s*:\\s*\\\"(?<id>\\{[^\\\"]+\\})\\\"",
             RegexOptions.Singleline | RegexOptions.CultureInvariant);
         foreach (Match match in nameFirst)
@@ -290,8 +334,8 @@ internal static class SunshineConfigurator
 
     private static bool IsManagedDisplayIdentity(string identity) =>
         identity.Contains("VDD by MTT", StringComparison.OrdinalIgnoreCase) ||
-        identity.Contains("Virtual Display", StringComparison.OrdinalIgnoreCase) ||
-        identity.Contains("IddSample", StringComparison.OrdinalIgnoreCase) ||
+        identity.Contains("MttVDD", StringComparison.OrdinalIgnoreCase) ||
+        identity.Contains("MTT1337", StringComparison.OrdinalIgnoreCase) ||
         (identity.Contains("MTT", StringComparison.OrdinalIgnoreCase) &&
          identity.Contains("1337", StringComparison.OrdinalIgnoreCase));
 

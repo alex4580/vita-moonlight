@@ -70,3 +70,4 @@ jobs:
         with:
           name: moonlight-vpk
           path: build/*.vpk
+          if-no-files-found: error

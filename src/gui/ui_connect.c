@@ -5,6 +5,7 @@
 #include "guilib.h"
 #include "ime.h"
 #include "ui_settings.h"
+#include "ui_diagnostics.h"
 #include "ui_stream_overlay.h"
 
 #include "../connection.h"
@@ -104,6 +105,8 @@ void ui_connect_stream(int appId) {
 
   // --- Ajuste para soporte Host Resolution: no modificar resolución si es -1 ---
   // Eliminados g_requested_width y g_requested_height, lógica simplificada
+  UiDiagnosticsReconnectSettings active_settings;
+  ui_diagnostics_capture_reconnect_settings(&active_settings);
   int orig_width = config.stream.width;
   int orig_height = config.stream.height;
   // Si se seleccionó una resolución específica, se mantiene; si es -1, se deja al host
@@ -120,6 +123,7 @@ void ui_connect_stream(int appId) {
   config.stream.height = orig_height;
 
   if (ret == 0) {
+    ui_diagnostics_set_active_stream(&active_settings);
     server.currentGame = appId;
   } else {
     
@@ -246,6 +250,52 @@ int ui_connect_loop(int id, void *context, const input_data *input) {
 
 //mainloop:
       while (connection_is_connected()) {
+        int display_virtual_key = 0;
+        bool apply_display =
+            stream_overlay_take_apply_display_request(&display_virtual_key);
+        bool apply_input = stream_overlay_take_apply_input_request();
+        if (apply_display || apply_input) {
+          int reconnect_app = server.currentGame != 0
+              ? server.currentGame
+              : id;
+          if (apply_display) {
+            vita_debug_log(
+                "Applying stream/display mode %dx%d@%d and reconnecting",
+                config.stream.width, config.stream.height, config.stream.fps);
+
+            // Change the active VDD first, then resume the same Sunshine app
+            // so both the Windows desktop and encoder renegotiate to this
+            // mode.
+            send_host_rescue_hotkey(display_virtual_key);
+            sceKernelDelayThread(750 * 1000);
+          } else {
+            vita_debug_log(
+                "Applying controller/input configuration and reconnecting");
+          }
+          connection_terminate();
+          sceKernelDelayThread(500 * 1000);
+
+          ret = gs_refresh(&server);
+          if (ret != GS_OK) {
+            display_error(
+                "%s reconnect refresh failed: %d\n%s",
+                apply_display ? "Display" : "Input", ret, gs_error);
+            break;
+          }
+
+          if (connection_reset() != 0 || connection_paired() != 0) {
+            vita_debug_log("Controlled stream reconnect could not reset state");
+            break;
+          }
+          vitapower_config(config);
+          vitainput_config(config);
+          ui_connect_stream(reconnect_app);
+          if (!connection_is_connected()) {
+            vita_debug_log("Controlled stream reconnect failed");
+            break;
+          }
+          continue;
+        }
         if (stream_overlay_take_close_game_request()) {
           vita_debug_log("Stream overlay requested foreground Windows game close");
           send_host_rescue_hotkey(0x7B); // F12
@@ -298,7 +348,9 @@ int ui_connect(char *name, char *address, uint16_t port) {
     char key_dir[4096];
     sprintf(key_dir, "%s/%s", config.key_dir, name);
 
-    ret = gs_init(&server, address, port, key_dir, 0, true);
+    ret = gs_init(
+        &server, address, port, key_dir,
+        vita_debug_is_logging_enabled() ? 3 : 0, true);
     if (ret == GS_OUT_OF_MEMORY) {
       display_error("Not enough memory");
       return 0;
@@ -437,7 +489,9 @@ device_info_t* ui_connect_and_pairing(device_info_t *info) {
   sprintf(key_dir, "%s/%s", config.key_dir, info->name);
   sceIoMkdir(key_dir, 0777);
 
-  int ret = gs_init(&server, info->internal, info->port, key_dir, 0, true);
+  int ret = gs_init(
+      &server, info->internal, info->port, key_dir,
+      vita_debug_is_logging_enabled() ? 3 : 0, true);
 
   if (ret == GS_OUT_OF_MEMORY) {
     display_error("Not enough memory");
@@ -543,7 +597,7 @@ bool check_connection(const char *name, char *addr, uint16_t port) {
   flash_message("Check connecting to:\n %s:%d...", addr, port);
 
   int log_level = 0;
-  if (config.save_debug_log) {
+  if (vita_debug_is_logging_enabled()) {
     log_level = 3;
   }
 
