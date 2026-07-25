@@ -863,6 +863,39 @@ internal static class Program
             "Vita mode provisioning added an unsafe nonessential mode.");
         Require(DisplayWizardAdapter.AddVitaCompatibilityModesToConfiguration(compatibleDriverConfiguration) == compatibleDriverConfiguration,
             "Vita virtual display mode provisioning was not idempotent.");
+        const string existingRepairConfiguration = """
+            <vdd_settings>
+              <global>
+                <g_refresh_rate>60</g_refresh_rate>
+                <g_refresh_rate>60</g_refresh_rate>
+                <g_refresh_rate>120</g_refresh_rate>
+              </global>
+              <resolutions>
+                <resolution>
+                  <width>960</width>
+                  <height>544</height>
+                  <refresh_rate>60</refresh_rate>
+                  <refresh_rate>60</refresh_rate>
+                </resolution>
+              </resolutions>
+              <options><HardwareCursor>true</HardwareCursor></options>
+            </vdd_settings>
+            """;
+        var normalizedRepairConfiguration =
+            DisplayWizardAdapter.AddVitaCompatibilityModesToConfiguration(existingRepairConfiguration);
+        var normalizedRepairDocument = System.Xml.Linq.XDocument.Parse(normalizedRepairConfiguration);
+        Require(
+            normalizedRepairDocument.Root?.Element("global")?.Elements("g_refresh_rate")
+                .Count(rate => rate.Value == "60") == 1 &&
+            normalizedRepairDocument.Root.Element("resolutions")?.Elements("resolution")
+                .First(mode => mode.Element("width")?.Value == "960" && mode.Element("height")?.Value == "544")
+                .Elements("refresh_rate")
+                .All(rate => rate.Value != "60") == true &&
+            normalizedRepairConfiguration.Contains("<HardwareCursor>true</HardwareCursor>", StringComparison.Ordinal),
+            "Existing-driver repair did not remove duplicate effective modes while preserving options.");
+        Require(
+            DisplayWizardAdapter.HasVitaCompatibilityModesInConfiguration(normalizedRepairConfiguration),
+            "Global 60 Hz was not recognized as an effective Vita compatibility refresh rate.");
         var driverConfigurationSha256 = DriverNativeModeVerification.ComputeConfigurationSha256(
             System.Text.Encoding.UTF8.GetBytes(compatibleDriverConfiguration));
         var changedDriverConfigurationSha256 = DriverNativeModeVerification.ComputeConfigurationSha256(

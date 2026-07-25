@@ -93,7 +93,25 @@ internal static class WindowsDisplayNative
         bool persist = false)
     {
         EnsureWindows();
+        var advertisedModes = EnumerateSourceModes(gdiDeviceName);
+        if (!advertisedModes.Any(mode =>
+            mode.Width == width &&
+            mode.Height == height &&
+            mode.Fps == fps))
+        {
+            throw new InvalidOperationException(
+                $"{gdiDeviceName} does not advertise {width}x{height}@{fps}. " +
+                $"Closest advertised modes: {FormatClosestModes(advertisedModes, width, height, fps)}.");
+        }
+
         var mode = ReadSourceMode(gdiDeviceName);
+        if (mode.PelsWidth == width &&
+            mode.PelsHeight == height &&
+            mode.DisplayFrequency == fps)
+        {
+            return;
+        }
+        var currentMode = $"{mode.PelsWidth}x{mode.PelsHeight}@{mode.DisplayFrequency}";
         mode.PelsWidth = checked((uint)width);
         mode.PelsHeight = checked((uint)height);
         mode.DisplayFrequency = checked((uint)fps);
@@ -106,7 +124,11 @@ internal static class WindowsDisplayNative
             IntPtr.Zero);
         if (result != 0)
         {
-            throw new InvalidOperationException($"Windows rejected {width}x{height}@{fps} for {gdiDeviceName} (result {result}).");
+            throw new InvalidOperationException(
+                $"Windows rejected {width}x{height}@{fps} for {gdiDeviceName} " +
+                $"({DescribeDisplayChangeResult(result)}). " +
+                $"Current mode: {currentMode}. " +
+                $"Closest advertised modes: {FormatClosestModes(advertisedModes, width, height, fps)}.");
         }
 
         var applied = ReadSourceMode(gdiDeviceName);
@@ -120,14 +142,73 @@ internal static class WindowsDisplayNative
 
     private static DeviceMode ReadSourceMode(string gdiDeviceName)
     {
-        var mode = new DeviceMode { DeviceName = string.Empty, FormName = string.Empty };
-        mode.Size = checked((ushort)Marshal.SizeOf<DeviceMode>());
+        var mode = CreateDeviceMode();
         if (!EnumDisplaySettings(gdiDeviceName, EnumCurrentSettings, ref mode))
         {
             throw new Win32Exception(Marshal.GetLastWin32Error(), $"Could not read display mode for {gdiDeviceName}.");
         }
         return mode;
     }
+
+    internal static IReadOnlyList<AdvertisedDisplayMode> EnumerateSourceModes(string gdiDeviceName)
+    {
+        EnsureWindows();
+        var modes = new HashSet<AdvertisedDisplayMode>();
+        for (var index = 0; ; index++)
+        {
+            var mode = CreateDeviceMode();
+            if (!EnumDisplaySettings(gdiDeviceName, index, ref mode))
+            {
+                break;
+            }
+            modes.Add(new AdvertisedDisplayMode(
+                checked((int)mode.PelsWidth),
+                checked((int)mode.PelsHeight),
+                checked((int)mode.DisplayFrequency)));
+        }
+        return modes
+            .OrderBy(mode => mode.Width)
+            .ThenBy(mode => mode.Height)
+            .ThenBy(mode => mode.Fps)
+            .ToArray();
+    }
+
+    private static DeviceMode CreateDeviceMode()
+    {
+        var mode = new DeviceMode { DeviceName = string.Empty, FormName = string.Empty };
+        mode.Size = checked((ushort)Marshal.SizeOf<DeviceMode>());
+        return mode;
+    }
+
+    private static string FormatClosestModes(
+        IReadOnlyList<AdvertisedDisplayMode> modes,
+        int width,
+        int height,
+        int fps)
+    {
+        if (modes.Count == 0) return "none";
+        return string.Join(
+            ", ",
+            modes
+                .OrderBy(mode =>
+                    Math.Abs(mode.Width - width) +
+                    Math.Abs(mode.Height - height) +
+                    Math.Abs(mode.Fps - fps))
+                .Take(8));
+    }
+
+    private static string DescribeDisplayChangeResult(int result) =>
+        result switch
+        {
+            1 => "restart required",
+            -1 => "general failure, DISP_CHANGE_FAILED",
+            -2 => "unsupported mode, DISP_CHANGE_BADMODE",
+            -3 => "registry update failed, DISP_CHANGE_NOTUPDATED",
+            -4 => "invalid flags, DISP_CHANGE_BADFLAGS",
+            -5 => "invalid parameters, DISP_CHANGE_BADPARAM",
+            -6 => "dual-view mode rejected, DISP_CHANGE_BADDUALVIEW",
+            _ => $"result {result}",
+        };
 
     internal static bool TrySetAdvancedColorState(DisplayPathInfo path, bool enabled)
     {
@@ -312,6 +393,10 @@ internal static class WindowsDisplayNative
 }
 
 internal sealed record DisplayConfiguration(DisplayPathInfo[] Paths, DisplayModeInfo[] Modes);
+internal readonly record struct AdvertisedDisplayMode(int Width, int Height, int Fps)
+{
+    public override string ToString() => $"{Width}x{Height}@{Fps}";
+}
 
 [StructLayout(LayoutKind.Sequential)]
 internal struct DisplayLuid

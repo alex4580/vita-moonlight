@@ -46,13 +46,16 @@ internal sealed class SessionManager
         DisplayDescriptor selected;
         try
         {
+            // The verification topology is intentionally temporary.
+            // Persisting a mode for it with CDS_UPDATEREGISTRY can fail even
+            // when the active driver advertises and accepts the mode.
             selected = displays.VerifyVirtualDisplayModeSafely(
                 settings.DisplayMatch,
                 mode.Width,
                 mode.Height,
                 mode.Fps,
                 settings.ForceSdr,
-                persistMode: true,
+                persistMode: false,
                 modeAttempts: 40);
             displays.SaveRecovery(recovery with { SelectedDisplay = selected.FriendlyName });
         }

@@ -1,6 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <changeinfo>
 <changes app_ver="00.14"><![CDATA[
+## 0.14.3<br>
+* Repair an already-installed VDD in place without assuming a clean install or losing the existing configuration.<br>
+* Remove duplicate effective refresh modes and apply temporary 960x544 verification non-persistently.<br>
+* Report the current and advertised Windows display modes when a live change is rejected.<br>
+<br>
 ## 0.14.2<br>
 * Keep every active physical monitor visible while setup verifies the Vita virtual display at native 960x544/60.<br>
 * Restore the original display topology once and report the actual Windows mode error instead of repeatedly requesting a reboot.<br>

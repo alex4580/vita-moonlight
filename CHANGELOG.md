@@ -1,3 +1,21 @@
+## 0.14.3
+
+* Fixed **Apply recommended setup** on an existing VDD installation. Repair
+  now stages the driver package first, then reapplies and normalizes the
+  existing configuration so a real upgrade cannot overwrite Vita modes with
+  the stock XML.
+* Removed duplicate effective modes created when a resolution contained an
+  explicit 60 Hz entry and the upstream driver also replicated global 60 Hz
+  onto it. Other user resolutions, refresh rates, and driver options remain
+  intact.
+* Fixed native-mode verification using `CDS_UPDATEREGISTRY` on its temporary
+  extended-display topology. Verification now uses the same non-persistent
+  live change as streaming, which was validated against an upgraded
+  `ROOT\MttVDD` device at 960x544/60.
+* Mode failures now distinguish an absent mode from a Windows rejection and
+  report the current mode plus the closest modes actually advertised by the
+  active display source.
+
 ## 0.14.2
 
 * Fixed driver setup and repair temporarily making the Vita virtual display

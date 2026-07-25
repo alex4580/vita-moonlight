@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Xml.Linq;
 using Microsoft.Win32;
@@ -89,7 +90,6 @@ internal sealed class DisplayWizardAdapter
     {
         ValidateDriverBundle();
         DriverNativeModeVerification.Invalidate();
-        EnsureVitaCompatibilityModes();
         var workingDirectory = Path.GetDirectoryName(executablePath)!;
         var driverAlreadyInstalled = IsDriverInstalled();
         if (!driverAlreadyInstalled)
@@ -112,6 +112,13 @@ internal sealed class DisplayWizardAdapter
             workingDirectory,
             60000,
             "/add-driver", Path.Combine(workingDirectory, "MttVDD.inf"), "/install"));
+
+        // Apply the managed modes after staging/installing the package. A real
+        // upgrade can replace C:\VirtualDisplayDriver\vdd_settings.xml with
+        // the driver's stock copy, while a repair of an equal/newer package
+        // leaves the existing file in place. Normalizing at this point handles
+        // both cases without assuming a clean installation.
+        EnsureVitaCompatibilityModes();
         ReloadDriver();
     }
 
@@ -270,15 +277,19 @@ internal sealed class DisplayWizardAdapter
             resolution = new XElement(
                 "resolution",
                 new XElement("width", width),
-                new XElement("height", height),
-                new XElement("refresh_rate", fps));
+                new XElement("height", height));
             resolutions.AddFirst(resolution);
         }
-        else if (!resolution.Elements("refresh_rate").Any(rate => rate.Value == fps.ToString()))
+
+        var refreshRate = fps.ToString();
+        var globalRefreshRates = ReadGlobalRefreshRates(root);
+        if (!globalRefreshRates.Contains(refreshRate) &&
+            !resolution.Elements("refresh_rate").Any(rate => NormalizeRefreshRate(rate.Value) == refreshRate))
         {
             resolution.Add(new XElement("refresh_rate", fps));
         }
 
+        NormalizeRefreshRates(root);
         return document.ToString(SaveOptions.None);
     }
 
@@ -295,7 +306,10 @@ internal sealed class DisplayWizardAdapter
         // verifies this mode once because Windows can retain an older mode for
         // an already-enumerated display.
         var document = XDocument.Parse(updated, LoadOptions.PreserveWhitespace);
-        var resolutions = document.Root?.Element("resolutions")
+        var root = document.Root
+            ?? throw new InvalidDataException("The virtual display configuration has no root element.");
+        NormalizeRefreshRates(root);
+        var resolutions = root.Element("resolutions")
             ?? throw new InvalidDataException("The virtual display configuration has no resolutions element.");
         var currentModes = resolutions.Elements("resolution").ToArray();
         var preferredModes = VitaDisplayModes.Supported
@@ -319,18 +333,90 @@ internal sealed class DisplayWizardAdapter
     internal static bool HasVitaCompatibilityModesInConfiguration(string configuration)
     {
         var document = XDocument.Parse(configuration);
-        var resolutions = document.Root?.Element("resolutions")?.Elements("resolution").ToArray();
+        var root = document.Root;
+        var resolutions = root?.Element("resolutions")?.Elements("resolution").ToArray();
         if (resolutions is null) return false;
+        var globalRefreshRates = ReadGlobalRefreshRates(root!);
         var preferred = resolutions.FirstOrDefault();
         return preferred?.Element("width")?.Value == VitaDisplayModes.Native.Width.ToString() &&
                preferred.Element("height")?.Value == VitaDisplayModes.Native.Height.ToString() &&
-               preferred.Elements("refresh_rate").Any(rate => rate.Value == VitaDisplayModes.Native.Fps.ToString()) &&
+               HasEffectiveRefreshRate(preferred, VitaDisplayModes.Native.Fps, globalRefreshRates) &&
                VitaDisplayModes.Supported.All(mode => resolutions.Any(resolution =>
             resolution.Element("width")?.Value == mode.Width.ToString() &&
             resolution.Element("height")?.Value == mode.Height.ToString() &&
-            resolution.Elements("refresh_rate")
-                .Any(rate => rate.Value == mode.Fps.ToString())));
+            HasEffectiveRefreshRate(resolution, mode.Fps, globalRefreshRates)));
     }
+
+    private static HashSet<string> ReadGlobalRefreshRates(XElement root) =>
+        root.Element("global")?
+            .Elements("g_refresh_rate")
+            .Select(rate => NormalizeRefreshRate(rate.Value))
+            .Where(rate => rate.Length > 0)
+            .ToHashSet(StringComparer.Ordinal) ??
+        new HashSet<string>(StringComparer.Ordinal);
+
+    private static bool HasEffectiveRefreshRate(
+        XElement resolution,
+        int fps,
+        IReadOnlySet<string> globalRefreshRates)
+    {
+        var refreshRate = fps.ToString();
+        return globalRefreshRates.Contains(refreshRate) ||
+               resolution.Elements("refresh_rate")
+                   .Any(rate => NormalizeRefreshRate(rate.Value) == refreshRate);
+    }
+
+    private static void NormalizeRefreshRates(XElement root)
+    {
+        var global = root.Element("global");
+        var globalRefreshRates = new HashSet<string>(StringComparer.Ordinal);
+        if (global is not null)
+        {
+            foreach (var rate in global.Elements("g_refresh_rate").ToArray())
+            {
+                var normalized = NormalizeRefreshRate(rate.Value);
+                if (normalized.Length == 0 || !globalRefreshRates.Add(normalized))
+                {
+                    rate.Remove();
+                }
+                else
+                {
+                    rate.Value = normalized;
+                }
+            }
+        }
+
+        var resolutions = root.Element("resolutions");
+        if (resolutions is null) return;
+        foreach (var resolution in resolutions.Elements("resolution"))
+        {
+            var localRefreshRates = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var rate in resolution.Elements("refresh_rate").ToArray())
+            {
+                var normalized = NormalizeRefreshRate(rate.Value);
+                if (normalized.Length == 0 ||
+                    globalRefreshRates.Contains(normalized) ||
+                    !localRefreshRates.Add(normalized))
+                {
+                    rate.Remove();
+                }
+                else
+                {
+                    rate.Value = normalized;
+                }
+            }
+        }
+    }
+
+    private static string NormalizeRefreshRate(string value) =>
+        decimal.TryParse(
+            value.Trim(),
+            NumberStyles.Float,
+            CultureInfo.InvariantCulture,
+            out var parsedRate) &&
+        parsedRate > 0
+            ? parsedRate.ToString("0.################", CultureInfo.InvariantCulture)
+            : value.Trim();
 
     internal static PnPUtilExitDisposition ClassifyPnPUtilExitCode(
         int exitCode,

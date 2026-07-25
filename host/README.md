@@ -51,6 +51,15 @@ only visible screen. The default Vita client profile is **Recommended**:
 installed host, ViGEmBus state, virtual display, app coverage, SDR policy,
 recovery state, and stream rescue agent.
 
+An existing VDD is repaired in place; setup does not assume a clean machine.
+It stages the pinned package first, then reapplies the Vita modes to the live
+configuration so a driver upgrade cannot replace them with its stock XML.
+Existing resolutions and driver options are preserved. Duplicate effective
+refresh modes are removed when the same rate is both local and global because
+the upstream driver already replicates global rates onto every resolution.
+The temporary verification mode is not written to the Windows display
+profile; Sunshine applies the live mode when a stream starts.
+
 ### Streaming
 
 - **Streaming host** selects Sunshine or Apollo.
@@ -194,7 +203,8 @@ compatibility modes provisioned**.
 If setup instead reports that safe native-mode verification failed, the
 physical layout has already been restored. Do not repeat a restart loop: keep
 the complete error shown by the control panel and report its final Windows
-response together with **Displays > List displays**.
+response, current mode, and advertised modes together with **Displays > List
+displays**.
 
 ## Controller, gyro, touch, and keyboard
 

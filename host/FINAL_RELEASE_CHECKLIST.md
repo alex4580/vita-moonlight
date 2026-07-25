@@ -132,6 +132,11 @@ release notes.
       is accepted only for enable-device, native 960x544 is still verified, and
       any genuine failure is shown with the host error rather than only an exit
       code.
+- [ ] Upgrade over 0.14.2 with the existing `ROOT\MttVDD` device and modified
+      `C:\VirtualDisplayDriver\vdd_settings.xml`. Package staging happens
+      before managed-mode normalization; unrelated resolutions/options remain,
+      local/global duplicate effective modes are removed, and 960x544/60 is
+      verified using a non-persistent live mode change.
 - [ ] During install and repair verification, every active physical display
       remains in the applied topology while VDD is added as an extended
       display and its GDI mode list is re-enumerated. Success and failure both
@@ -169,7 +174,7 @@ release notes.
 - [ ] Vita and Windows workflows pass on the frozen commit.
 - [ ] PR is merged into the `vita` release branch with the tested commit
       ancestry intact.
-- [ ] Create and push `v0.14.2` only after the hardware and safety gates pass.
+- [ ] Create and push `v0.14.3` only after the hardware and safety gates pass.
       The release workflow builds both platforms and publishes their artifacts.
 - [ ] Download the published release, verify hashes/signatures again, and run a
       short install/pair/stream/disconnect smoke test from those public assets.

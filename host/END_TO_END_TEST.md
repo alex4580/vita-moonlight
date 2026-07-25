@@ -33,7 +33,14 @@ commit.
    Windows rejects the mode, setup must restore the original topology, show
    the final Windows response as an error, and must not request another reboot
    merely because the mode check failed.
-6. Click **Run health check**. Sunshine, its supported version, ViGEmBus,
+6. Treat the same machine as an upgrade, not a clean install. Add an unrelated
+   resolution and retain non-default driver options, then rerun the installer.
+   The pinned package must be staged before Vita modes are normalized, the
+   unrelated settings must survive, and the effective mode list must contain
+   only one 960x544/60 entry even when 60 Hz is global. Verification must use a
+   non-persistent live mode change; it must not require
+   `CDS_UPDATEREGISTRY` for the temporary extended topology.
+7. Click **Run health check**. Sunshine, its supported version, ViGEmBus,
    Sunshine gamepad, Microsoft Visual C++ runtime, driver bundle, virtual
    display, recovery task, and
    **Stream rescue** must report ready. **Vita display modes** must say the
