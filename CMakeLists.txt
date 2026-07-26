@@ -75,8 +75,6 @@ add_executable(${PROJECT_NAME}.elf
 	src/gui/ui_controller_mapper.c
 	src/gui/ui_connect.c
 	src/gui/ui_device.c
-	src/gui/ui_hotkey.c
-	src/gui/hotkey.c
 	src/gui/ui_check.c
 	src/gui/ui_stream_overlay.c
 	src/gui/ui_diagnostics.c
