@@ -5,6 +5,7 @@
 #include "../config.h"
 #include "../debug.h"
 #include "../input/touchabsolute.h"
+#include "../keyboardsystem.h"
 #include "../video/vita.h"
 
 #include <Limelight.h>
@@ -24,6 +25,8 @@ enum {
   MAIN_INPUT,
   MAIN_PERFORMANCE,
   MAIN_DIAGNOSTICS,
+  MAIN_LOGGING,
+  MAIN_KEYBOARD,
   MAIN_CLOSE_GAME,
   MAIN_QUIT_APP,
   MAIN_RECOVER_HOST,
@@ -403,6 +406,19 @@ static void confirm_main_action(void) {
     ui_diagnostics_screen_open();
     return;
   }
+  if (selected_item == MAIN_LOGGING) {
+    bool enabled = !vita_debug_is_logging_enabled();
+    vita_debug_set_logging_enabled(enabled);
+    save_settings();
+    if (enabled) {
+      vita_debug_log("[DIAGNOSTICS] Optional file logging enabled by user");
+    }
+    return;
+  }
+  if (selected_item == MAIN_KEYBOARD) {
+    keyboardsystem_open_keyboard();
+    return;
+  }
   if (selected_item == MAIN_DISCONNECT) {
     disconnect_requested = true;
     stream_overlay_close();
@@ -449,6 +465,10 @@ void stream_overlay_handle_input(const SceCtrlData *pad,
         selected_item == MAIN_PERFORMANCE) {
       ui_diagnostics_cycle_overlay_mode(-1);
       save_settings();
+    } else if (page == OVERLAY_PAGE_MAIN &&
+               selected_item == MAIN_LOGGING) {
+      vita_debug_set_logging_enabled(!vita_debug_is_logging_enabled());
+      save_settings();
     } else if (page == OVERLAY_PAGE_STREAM) {
       adjust_stream_item(-1);
     } else if (page == OVERLAY_PAGE_INPUT) {
@@ -460,6 +480,10 @@ void stream_overlay_handle_input(const SceCtrlData *pad,
     if (page == OVERLAY_PAGE_MAIN &&
         selected_item == MAIN_PERFORMANCE) {
       ui_diagnostics_cycle_overlay_mode(1);
+      save_settings();
+    } else if (page == OVERLAY_PAGE_MAIN &&
+               selected_item == MAIN_LOGGING) {
+      vita_debug_set_logging_enabled(!vita_debug_is_logging_enabled());
       save_settings();
     } else if (page == OVERLAY_PAGE_STREAM) {
       adjust_stream_item(1);
@@ -543,8 +567,8 @@ static void draw_row(int index,
 }
 
 static void draw_main_page(void) {
-  const int first_y = 124;
-  const int row_height = 36;
+  const int first_y = 119;
+  const int row_height = 32;
   draw_row(MAIN_RESUME, first_y, row_height, "Resume stream", "X");
   draw_row(MAIN_STREAM, first_y, row_height, "Stream & virtual display", ">");
   draw_row(MAIN_INPUT, first_y, row_height, "Controller & input", ">");
@@ -552,6 +576,10 @@ static void draw_main_page(void) {
       MAIN_PERFORMANCE, first_y, row_height, "Performance overlay",
       ui_diagnostics_overlay_mode_name(ui_diagnostics_get_overlay_mode()));
   draw_row(MAIN_DIAGNOSTICS, first_y, row_height, "Real-time diagnostics", ">");
+  draw_row(
+      MAIN_LOGGING, first_y, row_height, "Diagnostic file logging",
+      vita_debug_is_logging_enabled() ? "On" : "Off");
+  draw_row(MAIN_KEYBOARD, first_y, row_height, "Open on-screen keyboard", "X");
   draw_row(MAIN_CLOSE_GAME, first_y, row_height, "Close Windows game", "X");
   draw_row(MAIN_QUIT_APP, first_y, row_height, "End Sunshine app", "X");
   draw_row(MAIN_RECOVER_HOST, first_y, row_height, "Recover host display", "X");

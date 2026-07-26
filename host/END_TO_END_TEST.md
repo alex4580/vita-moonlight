@@ -123,9 +123,11 @@ recovery safeguard.
    Off and the diagnostics screen closed, stream for one minute and confirm no
    new diagnostic lines are appended. Open Real-time diagnostics, press
    **Triangle**, reproduce a short stream/input issue, and verify logging shows
-   Enabled. The first completed one-second sample must start from fresh
-   counters, with no cumulative bitrate, FEC, or out-of-sequence spike. Press
-   Triangle again, then use VitaShell to copy the append-only
+   Enabled. Toggle **Diagnostic file logging** from the main in-stream menu and
+   verify it shows and changes the same state. The first completed one-second
+   sample must start from fresh counters, with no cumulative bitrate, FEC, or
+   out-of-sequence spike. Disable logging again, then use VitaShell to copy the
+   append-only
    `ux0:data/moonlight/moonlight.log`. The capture must include the reproduction
    interval. If fallback storage is in use, copy the exact path displayed by
    the diagnostics screen instead.
@@ -232,6 +234,7 @@ it a display-driver crash based on a black game frame alone.
 3. In Absolute mouse mode touch all four corners and verify pixel alignment.
 4. In Tablet mode test contact and pressure in a compatible application.
 5. Press **START + Left** and type into a normal and an Administrator app.
+   Repeat with **Open on-screen keyboard** from the in-stream menu.
 6. Test discovery, manual host entry, pairing, Wake-on-LAN, reconnect, and
    deleting a saved host.
 

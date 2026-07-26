@@ -147,8 +147,8 @@ in-stream menu and select the dedicated **Real-time diagnostics** item to see:
 - the actual diagnostic-log path.
 
 Opening this screen collects the metrics required to update it, but does not
-write a file. Press **Triangle** to enable or disable file logging. Press **O**
-or **START** to return.
+write a file. Toggle **Diagnostic file logging** directly on the in-stream
+menu, or press **Triangle** on this screen. Press **O** or **START** to return.
 
 File logging is off by default. In the disabled state, log calls return after a
 single check and the file remains closed. When enabled, logs append to:
@@ -164,8 +164,9 @@ For a useful reproduction:
 
 1. Leave the performance overlay on the mode that best demonstrates the
    problem, if needed.
-2. Enable **Settings > System > Diagnostic file logging**, or press Triangle
-   on Real-time diagnostics immediately before the test.
+2. Enable **Settings > System > Diagnostic file logging**, toggle it on the
+   in-stream menu, or press Triangle on Real-time diagnostics immediately
+   before the test.
 3. Reproduce one problem once and note the approximate time and game.
 4. Disable logging again to close the file, or exit Moonlight.
 5. Use VitaShell USB or FTP to copy `moonlight.log` to the PC.
@@ -178,6 +179,18 @@ names or network addresses before sharing it publicly. While logging is
 enabled, its once-per-second performance records include FPS, received video
 rate, decode time, drops, network state, RTT/variance, FEC recovery/failure,
 and out-of-sequence packets.
+
+## On-screen keyboard
+
+Focus a text field in the streamed Windows application first. Then either hold
+**START** and tap **D-pad Left** within 300 ms, or choose **Open on-screen
+keyboard** from the in-stream menu. Typed characters are forwarded
+immediately; Backspace, Left/Right, and Enter are sent as PC keys. Close or
+minimize the Vita keyboard to return to the stream.
+
+Select the matching US, Spanish, or Latin American layout under **Settings >
+Input > Keyboard layout**. The keyboard translates supported characters to PC
+virtual keys; it is not a Unicode paste or clipboard feature.
 
 ## Controller profiles
 

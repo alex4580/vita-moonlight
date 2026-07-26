@@ -1,3 +1,9 @@
+## 0.14.5
+
+* Added explicit **Diagnostic file logging** and **Open on-screen keyboard**
+  rows to the in-stream menu. Logging remains off by default and the existing
+  Triangle and START + Left shortcuts remain available.
+
 ## 0.14.4
 
 * Fixed repair installs racing Windows display-target re-enumeration after the

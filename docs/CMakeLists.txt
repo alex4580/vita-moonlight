@@ -4,7 +4,7 @@ add_custom_command(
           --section=1
           --center="Vita Moonlight Manual"
           --name="VITA-MOONLIGHT"
-          --release="vita-moonlight 0.14.4"
+          --release="vita-moonlight 0.14.5"
           ${CMAKE_CURRENT_SOURCE_DIR}/README.pod
           ${CMAKE_CURRENT_BINARY_DIR}/vita-moonlight.1
   DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/README.pod

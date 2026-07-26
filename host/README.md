@@ -223,7 +223,8 @@ re-enumeration race fixed in 0.14.4; upgrade the host package in place.
   before it starts.
 - Touch modes are **Relative mouse**, **DS4 Touchpad**, **Absolute mouse**, and
   **Tablet**.
-- **START + Left** opens the floating keyboard.
+- **START + Left** opens the floating keyboard. It is also available as
+  **Open on-screen keyboard** on the in-stream menu.
 
 If Sunshine's web UI reports that ViGEmBus is missing, run **Run health check**.
 If ViGEmBus reports running but Sunshine reports restart required, click

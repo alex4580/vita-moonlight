@@ -79,7 +79,15 @@ the [host compatibility guide](host/COMPATIBILITY.md) and
 - **D-pad Left/Right**: change the selected setting.
 - **X**: open or activate the selected item.
 - **O**: go back or resume the stream.
-- **START + Left**: open the floating keyboard.
+- **START + Left**: open the floating keyboard. It is also available as
+  **Open on-screen keyboard** on the in-stream menu.
+
+To type, focus a Windows text field first. On the Vita, hold **START** and tap
+**D-pad Left** within 300 ms, or select **Open on-screen keyboard** from the
+stream menu. Characters are sent to Windows as they are entered; Backspace,
+Left/Right, and Enter are forwarded as PC keys. Close or minimize the Vita
+keyboard to return to the stream. Choose the matching US, Spanish, or Latin
+American keyboard layout under **Settings > Input > Keyboard layout**.
 
 The stream menu is organized around the same choices available before a
 session:
@@ -187,8 +195,9 @@ not write a log unless logging is separately enabled.
 Diagnostic file logging is **off by default**. When it is off, log calls return
 immediately and no log file is opened for normal activity.
 
-1. Before connecting, open **Settings > System > Diagnostic file logging**;
-   or, while streaming, open **Real-time diagnostics** and press **Triangle**.
+1. Before connecting, open **Settings > System > Diagnostic file logging**.
+   While streaming, toggle **Diagnostic file logging** directly on the
+   in-stream menu, or open **Real-time diagnostics** and press **Triangle**.
 2. Reproduce the quality, connection, input, or display problem.
 3. Return to Real-time diagnostics and press **Triangle** again, or disable
    logging in Settings. This closes the file cleanly. Exiting Moonlight also

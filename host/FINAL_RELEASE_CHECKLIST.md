@@ -86,7 +86,8 @@ release notes.
       correct motion axes, sensible units, no drift at rest, and clean state
       after suspend/reconnect. Real-time diagnostics confirms host gyro request
       and increasing sample events.
-- [ ] All four touch modes and the floating keyboard pass.
+- [ ] All four touch modes and the floating keyboard pass from both
+      **START + Left** and **Open on-screen keyboard** on the in-stream menu.
 - [ ] Default Local double-tap sends no single-PS event, keeps paused PC media
       paused, and double PS always returns to LiveArea. Safe Guide, Immediate
       Guide, and System / LiveArea match the documented behavior; START + L +
@@ -104,8 +105,9 @@ release notes.
       line remains in the normal session menu.
 - [ ] Diagnostic file logging is Off on first run and does not append during a
       normal Off-mode stream. Triangle and the Settings toggle both enable and
-      disable it; a reproduction appends to the path shown on-screen and the
-      closed file copies successfully with VitaShell.
+      disable it; the in-stream menu shows and changes the same state; a
+      reproduction appends to the path shown on-screen and the closed file
+      copies successfully with VitaShell.
 - [ ] A non-technical tester completes install, health check, pairing, normal
       play, game close, and recovery using only the GUI documentation.
 - [ ] A first-run Vita shows Recommended 960x544/60/8 Mbps, H.264 Rec. 709
@@ -178,7 +180,7 @@ release notes.
 - [ ] Vita and Windows workflows pass on the frozen commit.
 - [ ] PR is merged into the `vita` release branch with the tested commit
       ancestry intact.
-- [ ] Create and push `v0.14.4` only after the hardware and safety gates pass.
+- [ ] Create and push `v0.14.5` only after the hardware and safety gates pass.
       The release workflow builds both platforms and publishes their artifacts.
 - [ ] Download the published release, verify hashes/signatures again, and run a
       short install/pair/stream/disconnect smoke test from those public assets.

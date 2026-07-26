@@ -1,6 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <changeinfo>
 <changes app_ver="00.14"><![CDATA[
+## 0.14.5<br>
+* Add visible in-stream menu controls for optional diagnostic file logging and the on-screen keyboard.<br>
+* Keep file logging off by default and retain the Triangle and START + Left shortcuts.<br>
+<br>
 ## 0.14.4<br>
 * Wait for an existing virtual display to finish re-enumerating after an in-place driver repair.<br>
 * Keep physical displays active during that wait and distinguish a delayed target from a display-name mismatch.<br>
