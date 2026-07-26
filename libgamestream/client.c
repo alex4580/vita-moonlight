@@ -39,6 +39,7 @@
 #include <openssl/x509.h>
 #include <openssl/pem.h>
 #include <openssl/err.h>
+#include <psp2/kernel/threadmgr.h>
 
 #include "../src/debug.h"
 
@@ -278,6 +279,9 @@ static int load_serverinfo(PSERVER_DATA server, bool https) {
   if (currentGameText != NULL)
     free(currentGameText);
 
+  if (stateText != NULL)
+    free(stateText);
+
   if (serverCodecModeSupportText != NULL)
     free(serverCodecModeSupportText);
 
@@ -290,6 +294,8 @@ static int load_serverinfo(PSERVER_DATA server, bool https) {
   return ret;
 }
 
+static void free_server_status_data(PSERVER_DATA server);
+
 static int load_server_status(PSERVER_DATA server) {
   int ret;
   int i;
@@ -297,8 +303,10 @@ static int load_server_status(PSERVER_DATA server) {
   /* Fetch the HTTPS port if we don't have one yet */
   if (!server->httpsPort) {
     ret = load_serverinfo(server, false);
-    if (ret != GS_OK)
+    if (ret != GS_OK) {
+      free_server_status_data(server);
       return ret;
+    }
   }
 
   // Modern GFE versions don't allow serverinfo to be fetched over HTTPS if the client
@@ -307,20 +315,50 @@ static int load_server_status(PSERVER_DATA server) {
   // for everything because it doesn't accurately tell us if we're paired.
   ret = GS_INVALID;
   for (i = 0; i < 2 && ret != GS_OK; i++) {
+    // A failed HTTPS attempt may have parsed only part of the response.
+    // Clear that attempt before the HTTP fallback so repeated refreshes don't
+    // accumulate XML-owned strings or mode-list nodes.
+    free_server_status_data(server);
     ret = load_serverinfo(server, i == 0);
   }
 
   if (ret == GS_OK && !server->unsupported) {
     if (server->serverMajorVersion > MAX_SUPPORTED_GFE_VERSION) {
-      gs_error = "Ensure you're running the latest version of Moonlight Embedded or downgrade GeForce Experience and try again";
+      gs_error = "Update Vita Moonlight or use a supported Sunshine/Apollo host version and try again";
       ret = GS_UNSUPPORTED_VERSION;
     } else if (server->serverMajorVersion < MIN_SUPPORTED_GFE_VERSION) {
-      gs_error = "Moonlight Embedded requires a newer version of GeForce Experience. Please upgrade GFE on your PC and try again.";
+      gs_error = "Vita Moonlight requires a newer supported Sunshine/Apollo host version.";
       ret = GS_UNSUPPORTED_VERSION;
     }
   }
 
+  if (ret != GS_OK) {
+    free_server_status_data(server);
+  }
   return ret;
+}
+
+static void free_server_status_data(PSERVER_DATA server) {
+  if (server == NULL) return;
+
+  free(server->gpuType);
+  server->gpuType = NULL;
+  free(server->gsVersion);
+  server->gsVersion = NULL;
+  free((void *)server->serverInfo.serverInfoAppVersion);
+  server->serverInfo.serverInfoAppVersion = NULL;
+  free((void *)server->serverInfo.serverInfoGfeVersion);
+  server->serverInfo.serverInfoGfeVersion = NULL;
+  free((void *)server->serverInfo.rtspSessionUrl);
+  server->serverInfo.rtspSessionUrl = NULL;
+
+  PDISPLAY_MODE mode = server->modes;
+  while (mode != NULL) {
+    PDISPLAY_MODE next = mode->next;
+    free(mode);
+    mode = next;
+  }
+  server->modes = NULL;
 }
 
 static void bytes_to_hex(unsigned char *in, char *out, size_t len) {
@@ -565,7 +603,8 @@ int gs_pair(PSERVER_DATA server, char* pin) {
   char client_secret_data[16];
   RAND_bytes(client_secret_data, sizeof(client_secret_data));
 
-  const ASN1_BIT_STRING *asnSignature;
+  // VitaSDK's OpenSSL headers expose the legacy non-const output signature.
+  ASN1_BIT_STRING *asnSignature;
   X509_get0_signature(&asnSignature, NULL, cert);
 
   char challenge_response[16 + SIGNATURE_LEN + sizeof(client_secret_data)];
@@ -866,6 +905,33 @@ int gs_init(PSERVER_DATA server, char *address, unsigned short httpPort, const c
   server->httpPort = httpPort ? httpPort : 47989;
   server->httpsPort = 0; /* Populated by load_server_status() */
   return load_server_status(server);
+}
+
+int gs_refresh(PSERVER_DATA server) {
+  if (server == NULL || server->serverInfo.address == NULL) {
+    return GS_INVALID;
+  }
+
+  SERVER_DATA refreshed = {0};
+  LiInitializeServerInformation(&refreshed.serverInfo);
+  refreshed.serverInfo.address = server->serverInfo.address;
+  refreshed.unsupported = server->unsupported;
+  refreshed.httpPort = server->httpPort;
+  refreshed.httpsPort = server->httpsPort;
+
+  int ret = load_server_status(&refreshed);
+  if (ret != GS_OK) {
+    free_server_status_data(&refreshed);
+    return ret;
+  }
+
+  // Sunshine may report the app as idle between video sessions. Preserve the
+  // app ID so the caller resumes it instead of launching a duplicate.
+  int running_app = server->currentGame;
+  free_server_status_data(server);
+  *server = refreshed;
+  server->currentGame = running_app;
+  return GS_OK;
 }
 
 int gs_get_server_mac(PSERVER_DATA server, char *mac, unsigned int size) {

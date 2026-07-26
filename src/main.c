@@ -59,6 +59,7 @@
 #include "graphics.h"
 #include "device.h"
 #include "gui/ui.h"
+#include "gui/ui_diagnostics.h"
 #include "util.h"
 #include "power/vita.h"
 #include "input/motion.h"
@@ -161,9 +162,11 @@ int main(int argc, char* argv[]) {
   check_and_create_moonlight_dir(out_path, out_key_dir);
   config_path = out_path;
   strcpy(config.key_dir, out_key_dir);
-  vita_debug_log("[Moonlight] Carpeta seleccionada: %s", config.key_dir);
   // Ya no se guarda config antes de inicializar todos los valores
   config_parse(argc, argv, &config);
+  /* Support logs are explicit per-run captures and never resume at startup. */
+  config.save_debug_log = false;
+  vita_debug_set_logging_enabled(false);
 
   // Restaurar estado de Absolute Touch al iniciar
   touchabsolute_enable(config.touchscreen_mode == 2);
@@ -174,11 +177,12 @@ int main(int argc, char* argv[]) {
   vitapower_config(config);
   vitainput_config(config);
 
-  char log_path[MOONLIGHT_PATH_MAX] = {0};
-  snprintf(log_path, sizeof(log_path), "%s/moonlight.log", config.key_dir);
-  config.log_file = fopen(log_path, "w");
+  ui_diagnostics_init();
 
   load_all_known_devices();
 
   gui_loop();
+
+  ui_diagnostics_shutdown();
+  vita_debug_shutdown();
 }

@@ -62,6 +62,7 @@ add_library(moonlight-common-c STATIC
     moonlight-common-c/reedsolomon/rs.c
 )
 target_include_directories(moonlight-common-c PUBLIC moonlight-common-c/src moonlight-common-c/reedsolomon)
+target_compile_definitions(moonlight-common-c PRIVATE _POSIX_C_SOURCE=200809L)
 
 add_library(mdnsniff STATIC
     mdnsniff/udp_sniffer_vita.c

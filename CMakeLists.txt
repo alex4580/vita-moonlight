@@ -13,16 +13,13 @@ add_compile_options(-g3 -Wall -Wextra -Wno-unused-parameter -Wno-pointer-sign -W
 project(moonlight)
 
 include("$ENV{VITASDK}/share/vita.cmake" REQUIRED)
-# NOTE: To update the version shown in the UI and VPK, edit the following lines:
-#   set(VERSION_MAJOR "0")
-#   set(VERSION_MINOR "11")
-#   set(VERSION_PATCH "2")
-#
+# NOTE: release.py updates these values together with the Windows host,
+# installer, manual, and LiveArea metadata.
 set(TITLE_ID "XYZZ00002")
 set(TITLE "Moonlight")
 set(VERSION_MAJOR "0")
-set(VERSION_MINOR "13")
-set(VERSION_PATCH "2")
+set(VERSION_MINOR "14")
+set(VERSION_PATCH "6")
 
 execute_process(COMMAND
 	python -c "print('%02d.%02d' % (${VERSION_MAJOR}, ${VERSION_MINOR}))"
@@ -75,11 +72,12 @@ add_executable(${PROJECT_NAME}.elf
 	src/gui/ime.c
 	src/gui/ui.c
 	src/gui/ui_settings.c
+	src/gui/ui_controller_mapper.c
 	src/gui/ui_connect.c
 	src/gui/ui_device.c
-	src/gui/ui_hotkey.c
-	src/gui/hotkey.c
 	src/gui/ui_check.c
+	src/gui/ui_stream_overlay.c
+	src/gui/ui_diagnostics.c
 
 	libgamestream/client.c
 	libgamestream/http.c
@@ -142,11 +140,14 @@ add_executable(${PROJECT_NAME}.elf
 	src/check_host.c
 )
 
+target_compile_definitions(${PROJECT_NAME}.elf PRIVATE _POSIX_C_SOURCE=200809L)
+
 
 # Por defecto, solo enlazamos curl y el resto de libs estándar:
 target_link_libraries(${PROJECT_NAME}.elf
 	-lexpat
 	-lcurl
+	-lzstd
 	moonlight-common-c
 	enet
 	h264bitstream

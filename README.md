@@ -1,164 +1,126 @@
 # Vita Moonlight
 
-Vita Moonlight is a PlayStation Vita port of Moonlight, with major improvements for usability, pairing, device management, and now advanced touch, multitouch, and DS4 touchpad emulation.
+Stream games from a Windows PC to a PlayStation Vita. This release includes:
 
-## Highlights (0.13.2)
+- `moonlight.vpk` for the Vita;
+- an all-in-one Windows installer for the host control panel, Sunshine,
+  controller support, display recovery, and a Vita-sized virtual display; and
+- sensible first-run settings: 960x544, 60 FPS, H.264 SDR, and 8 Mbps.
 
-- **Touchscreen Modes Unified:** Select between three touchscreen modes from the settings menu:
-  - **DS4 Touchpad:** Emulates a DualShock 4-style multitouch touchpad, compatible with gestures and Steam Input advanced controls.
-  - **Absolute Mouse:** Use the Vita screen as a true absolute mouse (with improved gesture support).
-  - **Tablet (Sunshine):** Native multitouch for Sunshine streaming, with true multi-finger gestures.
-- **DS4 Touchpad Sensitivity:** DS4 mode is now more sensitive and precise for a smoother experience.
-- **PS Button Capture:** Optional PS button capture implemented — double press opens the menu, single press forwarded to Sunshine as PS/Xbox button mapping (requires SceShell permission in the VPK).
-- **Touch Zones Independent of Mode:** Touch zone support allows using front-screen touch zones independent of the selected touch input mode; when a zone is active, touch input in that area is ignored.
-- **Wake-on-LAN (WOL) Integration:** Power on your remote PC directly from the Vita, with robust MAC address handling and cross-platform compatibility.
-- **Host MAC Management:** MAC addresses are now saved/loaded correctly, with all ARP/legacy logic removed.
-- **WOL Packet Debugging:** Includes a Python script (`tools/wol_sniffer.py`) to verify WOL packets on your network.
-- **UI Improvements:**
-  - Host Management menu: improved navigation (O/cancel returns), clearer visual feedback, and unified status display.
-  - Special button overlays no longer interfere with absolute touch input.
-- **Combo Fixes:** L1+L2 and R1+R2 combos now work correctly, even with touchscreen or backtouch enabled.
-- **Robustness:** Many bugfixes, code cleanups, and internal refactors for stability and maintainability.
-- **L1/R1 and L2/R2 Swap:** Swap the functions of the L1/R1 and L2/R2 buttons from the settings menu for greater comfort and customization.
-- **Gamepad Type Selection:** Choose Xbox or PlayStation controller layout directly from the settings menu.
+## Before you install
 
-## Documentation
+You need:
 
-More information can find [moonlight-docs][1], [moonlight-embedded][2], and our [wiki][3].
-If you need more help, join the #vita-help channel in [discord][4].
+- a homebrew-enabled PlayStation Vita or PlayStation TV with VitaShell;
+- a 64-bit Intel or AMD PC running Windows 10 build 19041 or newer, or
+  Windows 11; and
+- the Windows installer and VPK from the **same** entry on the
+  [Releases page](https://github.com/alex4580/vita-moonlight/releases).
 
-[1]: https://github.com/moonlight-stream/moonlight-docs/wiki
-[2]: https://github.com/irtimmer/moonlight-embedded/wiki
-[3]: https://github.com/xyzz/vita-moonlight/wiki
-[4]: https://discord.gg/atkmxxT
+Save your work before setup. The display may briefly blink while Windows
+checks the virtual display.
 
-## Upcoming Features
+## Install for the first time
 
-- **Artemis/Apollo compatibility:** Planned support for Artemis/Apollo (a modified Sunshine host), to allow streaming from more sources and custom servers.
+1. On the PC, run `Vita-Moonlight-Host-Setup-win-x64.exe` and accept the
+   recommended components.
+2. Restart Windows if setup asks you to. Open **Vita Moonlight Host** from the
+   Start menu, choose **Restart as Administrator** if offered, and click
+   **Set up or repair this PC**.
+3. Click **Check readiness**. Follow any action shown until the host reports
+   that it is ready.
+4. Copy `moonlight.vpk` to the Vita with VitaShell USB or FTP, select the file
+   in VitaShell, and install it.
+5. Start Vita Moonlight. Select the PC, enter the displayed PIN in Sunshine's
+   web page when asked, and launch **Steam Big Picture** or **Desktop**.
 
-Stay tuned for more improvements!
+On Sunshine's first launch, its web page may ask you to create a username and
+password. Those are local Sunshine administration credentials; the short PIN
+shown later on the Vita is a separate one-time pairing code.
 
-## How to open the Pause Menu
+The virtual display is normally inactive when you are not streaming. During a
+stream, a physical PC monitor may go blank while Sunshine captures the
+Vita-sized display. It should return automatically after disconnecting.
 
-> **To open the pause menu at any time (even in any touch mode), press:**
-> 
-> **START + L + R**
->
-> This shortcut works regardless of the selected touch mode (Absolute Mouse or Touchscreen). Use it to access the in-game pause/options menu quickly.
+## Use it
 
----
+- Open the in-stream menu: hold **START**, then press **L + R**.
+- Open the Vita keyboard: **START + D-pad Left**, or choose
+  **Open on-screen keyboard** from the in-stream menu.
+- End normally: choose **Disconnect stream** from the menu.
+- Return to LiveArea if the stream is stuck: double-press **PS**.
+- Recover the PC display without the control panel: press
+  **Ctrl + Alt + Shift + F11** on a keyboard connected to the PC.
 
-## How to open the Floating Keyboard
+Start with the **Recommended** preset. See the
+[Vita settings guide](docs/VITA_SETTINGS_GUIDE.md) before changing bitrate,
+resolution, controller, gyro, touch, or PS-button behavior.
 
-> **To open the elevated floating keyboard at any time, press:**
->
-> **START + LEFT**
->
-> This shortcut will always open the virtual keyboard in elevated mode, never covering the main screen. Works in all touch modes.
+## Update or repair
 
----
+Download a matching installer and VPK from one release. End any stream, run
+the installer over the existing Windows installation, then open the control
+panel as Administrator and click **Set up or repair this PC**. Install the new
+VPK over the old Vita app.
 
+Running the same installer again is also the normal repair procedure. Your
+Sunshine credentials and unrelated Sunshine applications should be preserved.
+If Windows requests a restart, restart and run **Set up or repair this PC**
+again.
 
- 
-## What's New in 0.13.2
+Installing the same VPK over the current Vita app is also safe. Saved hosts and
+settings should remain.
 
-- **PS button capture:** When enabled, double-pressing the PS button will open the menu; a single press is passed through as a PS/Xbox button press to Sunshine.
-  - Note: Implementing PS button capture required removing the `-s` (safe) flag from `vita-make-fself` and adding the `SceShell` permission (0x2800000000000001) to the VPK.
-- **Touch Zones Independent of Mode:** Added a setting to enable/disable touch zones independently of the touch input mode.
-  - Allows using front screen touch zones regardless of touch input mode. When a touch zone is pressed, the touch input in that area is ignored; unused touch zones work like normal touch areas.
+## Uninstall
 
-### Bug fixes (0.13.2)
+1. End the stream and confirm that the physical PC display is visible.
+2. Open **Windows Settings > Apps > Installed apps** (Windows 11) or
+   **Apps & features** (Windows 10), find **Vita Moonlight Host**, and choose
+   **Uninstall**.
+3. Keep Sunshine, ViGEmBus, and the virtual-display driver unless you are sure
+   no other streaming or controller software uses them. They are shared
+   components and are kept by default.
+4. To remove the Vita app, highlight it in LiveArea, press **Triangle**, and
+   choose **Delete**.
 
-- Fixed front touch zone L2/R2 special keys not working.
+The Windows uninstaller restores a physical display before removing recovery
+safeguards. If it asks for a restart, restart Windows and run the uninstaller
+again.
 
-### Refactor & maintenance (0.13.2)
+Deleting the Vita app may leave its external settings and support-log files so
+they can survive a reinstall. Use VitaShell to review or back up those files;
+do not delete a parent storage directory merely to remove a log.
 
-- Updated subproject commits for `enet`, `inih`, and `moonlight-common-c`.
-- Split `vitainput_process` into multiple smaller functions for readability and maintainability.
+## Get help
 
----
+| Problem | What to do |
+|---|---|
+| Physical display did not return | Press **Ctrl + Alt + Shift + F11** on the PC keyboard. If Windows is visible, use **Display & recovery > Restore physical display now** in the Administrator control panel. |
+| Vita shows the physical monitor, 800x600, or a washed-out image | Open the control panel as Administrator, run **Set up or repair this PC**, then **Check readiness**. Confirm every-application switching and Force SDR are enabled. |
+| Sunshine says ViGEmBus is missing | Run **Diagnostics & support > Run full health check**, use **Repair controller support**, and restart Sunshine. |
+| A Windows game is black but the Vita menu still opens | Use **Close Windows game** from the in-stream menu. Use **End Sunshine app** or **Recover host display** only if needed. |
+| Motion is blocky or the stream stalls | Try the **Reliable** preset. Start a support log only for one short reproduction. |
 
-## Screenshots
+For detailed Windows recovery and advanced setup, see the
+[Windows host guide](host/README.md).
 
-<p align="center">
-  <img src="docs/keyboard.jpg" alt="Floating keyboard in Steam app" width="400"/>
-  <br><b>Floating keyboard in a Steam app using Moonlight</b>
-</p>
+## Help test the beta
 
-<p align="center">
-  <img src="docs/ip1.png" alt="Host waiting for IP update (yellow)" width="400"/>
-  <br><b>Host waiting for IP update (yellow)</b>
-</p>
+Community testing is welcome, including first installs, upgrades, repairs,
+laptops, and multi-monitor PCs:
 
-<p align="center">
-  <img src="docs/ip2.png" alt="Host online (green)" width="400"/>
-  <br><b>Host online (green)</b>
-</p>
+- [How to test and report results](docs/COMMUNITY_TESTING.md)
+- [Minimum beta test](host/BETA_SMOKE_TEST.md)
+- [Full end-to-end test](host/END_TO_END_TEST.md)
+- [Logging and support guide](docs/LOGGING_AND_SUPPORT.md)
 
-<p align="center">
-  <img src="docs/ip3.png" alt="Host offline/disconnected (red)" width="400"/>
-  <br><b>Host offline/disconnected (red)</b>
-</p>
+Support logging is **off by default**. During normal play, Vita Moonlight does
+not open, create, or write a support-log file.
 
-<p align="center">
-  <img src="docs/ip4.png" alt="IP change confirmation dialog" width="400"/>
-  <br><b>IP change confirmation dialog (shows old/new IP)</b>
-</p>
+## Build or fork the project
 
-<p align="center">
-  <img src="docs/ip5.png" alt="Search device function" width="400"/>
-  <br><b>Search device function showing a found local device</b>
-</p>
-
----
-
-
-## Build Requirements
-
-- **VitaSDK** installed and configured on your system ([guide here](https://vitasdk.org/)).
-- **Submodules updated:**
-  ```sh
-  git submodule update --init
-  ```
-
----
-
-## Quick Build
-
-1. Install dependencies with [vdpm](https://github.com/vitasdk/vdpm) if you haven't already.
-2. Make sure VitaSDK is installed and in your $PATH.
-3. Run:
-   ```sh
-   ./makepsv
-   ```
-   This will generate a VPK file ready to install on your PS Vita.
-
----
-
-## Manual Build (optional)
-
-If you prefer to build manually:
-
-```sh
-# If you do git pull, make sure to update submodules first
- git submodule update --init
- mkdir build && cd build
- cmake ..
- make
-```
-
----
-
-## Note about colors in vita2d
-
-> **Important:** The vita2d library interprets colors in BGRA format (not RGBA). For example:
-> - 0xFF00FFFF will appear **yellow** (not cyan)
-> - 0xFFFFFF00 will appear **blue** (not yellow)
-> - 0xFF00FF00 will appear **green** (correct)
-> - 0xFFFF0000 will appear **red** (correct)
->
-> If the color does not look as expected, swap the byte order (use BGR instead of RGB).
-
-
-Thanks to all contributors and the Moonlight community!
-
+Developers can use [Building and forking](docs/BUILDING.md) and
+[Releasing a fork](docs/RELEASING.md). Supported Windows versions and known
+hardware limits are listed in the [compatibility guide](host/COMPATIBILITY.md).
+Third-party licenses and versions are listed in
+[third-party notices](host/THIRD_PARTY_NOTICES.md).

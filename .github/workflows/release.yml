@@ -1,0 +1,180 @@
+name: Release Vita Moonlight
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    runs-on: ubuntu-24.04
+    permissions:
+      # Draft releases are only returned to callers with push access.
+      contents: write
+    steps:
+      - name: Require a new GitHub release tag
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]]; then
+            echo "Release tag has an unsupported format: $GITHUB_REF_NAME" >&2
+            exit 1
+          fi
+
+          tag_ref="$(
+            gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$GITHUB_REF_NAME"
+          )"
+          tag_type="$(jq --raw-output '.object.type' <<<"$tag_ref")"
+          tag_sha="$(jq --raw-output '.object.sha' <<<"$tag_ref")"
+          if [[ "$tag_type" != "tag" || -z "$tag_sha" || "$tag_sha" == "null" ]]; then
+            echo "Release tag $GITHUB_REF_NAME must be an annotated, cryptographically signed tag." >&2
+            exit 1
+          fi
+
+          tag_verification="$(
+            gh api "repos/$GITHUB_REPOSITORY/git/tags/$tag_sha"
+          )"
+          tag_verified="$(jq --raw-output '.verification.verified' <<<"$tag_verification")"
+          tag_reason="$(jq --raw-output '.verification.reason // "unknown"' <<<"$tag_verification")"
+          if [[ "$tag_verified" != "true" ]]; then
+            echo "GitHub did not verify the signature on $GITHUB_REF_NAME (reason: $tag_reason)." >&2
+            exit 1
+          fi
+          echo "GitHub verified the signed annotated tag $GITHUB_REF_NAME."
+
+          matching_releases="$(
+            gh api \
+              --paginate \
+              "repos/$GITHUB_REPOSITORY/releases?per_page=100" |
+              jq \
+                --raw-output \
+                --arg tag "$GITHUB_REF_NAME" \
+                '.[] | select(.tag_name == $tag) |
+                 [.id, .draft, .prerelease, .html_url] | @tsv'
+          )"
+          if [[ -n "$matching_releases" ]]; then
+            echo "A GitHub release (including a draft) already exists for $GITHUB_REF_NAME:" >&2
+            echo "$matching_releases" >&2
+            echo "Delete or resolve that release before retrying; existing assets will not be overwritten." >&2
+            exit 1
+          fi
+          echo "No existing GitHub release uses $GITHUB_REF_NAME."
+
+  vita:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: preflight
+    permissions:
+      contents: read
+    uses: ./.github/workflows/cmake-psvita.yml
+
+  windows-host:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: preflight
+    permissions:
+      contents: read
+    uses: ./.github/workflows/windows-host.yml
+    secrets:
+      WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
+      WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [vita, windows-host]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Checkout release metadata
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download release artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: release-assets
+
+      - name: Prepare release assets, checksums, and notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir release-dist
+          mapfile -d '' vpk_assets < <(find release-assets -type f -name '*.vpk' -print0)
+          mapfile -d '' installer_assets < <(find release-assets -type f -name '*.exe' -print0)
+          mapfile -d '' portable_assets < <(find release-assets -type f -name '*.zip' -print0)
+          if (( ${#vpk_assets[@]} != 1 )); then
+            echo "Expected exactly one VPK; found ${#vpk_assets[@]}." >&2
+            exit 1
+          fi
+          if (( ${#installer_assets[@]} != 1 )); then
+            echo "Expected exactly one Windows installer; found ${#installer_assets[@]}." >&2
+            exit 1
+          fi
+          if (( ${#portable_assets[@]} != 1 )); then
+            echo "Expected exactly one portable archive; found ${#portable_assets[@]}." >&2
+            exit 1
+          fi
+          cp -- "${vpk_assets[0]}" release-dist/
+          cp -- "${installer_assets[0]}" release-dist/
+          cp -- "${portable_assets[0]}" release-dist/
+          (
+            cd release-dist
+            sha256sum *.vpk *.exe *.zip > SHA256SUMS
+            sha256sum --check SHA256SUMS
+          )
+
+          release_version="${GITHUB_REF_NAME#v}"
+          release_version="${release_version%%-*}"
+          awk -v heading="## $release_version" '
+            $0 == heading { capture = 1; next }
+            capture && /^## / { exit }
+            capture { print }
+          ' CHANGELOG.md > release-notes.md
+          if [[ ! -s release-notes.md ]]; then
+            echo "CHANGELOG.md has no release notes for $release_version." >&2
+            exit 1
+          fi
+
+      - name: Attest release assets
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-path: release-dist/*
+
+      - name: Create draft GitHub release
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        with:
+          body_path: release-notes.md
+          draft: true
+          generate_release_notes: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          make_latest: false
+          overwrite_files: false
+          fail_on_unmatched_files: true
+          files: release-dist/*
+
+      - name: Publish verified draft
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            gh release edit "$GITHUB_REF_NAME" \
+              --draft=false \
+              --prerelease \
+              --latest=false \
+              --verify-tag
+          else
+            gh release edit "$GITHUB_REF_NAME" \
+              --draft=false \
+              --prerelease=false \
+              --latest \
+              --verify-tag
+          fi

@@ -1,6 +1,55 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <changeinfo>
-<changes app_ver="00.13"><![CDATA[
+<changes app_ver="00.14"><![CDATA[
+## 0.14.6<br>
+* Remove obsolete Circle/O transition counters from real-time diagnostics without changing normal Circle input or release safety.<br>
+* Fix clipped or overlapping menu text and make long help pages scrollable with UP/DOWN.<br>
+* Bound front-touch contacts and release mouse, DS4 touchpad, and tablet state safely across mode changes and disconnects.<br>
+* Correct the VPK package identity to 0.14.6 and harden release validation and checksums.<br>
+* Replace per-input logging with optional privacy-safe support sessions containing concise system, connection, decoder, and network summaries.<br>
+* Reorganize the Vita settings and Windows control panel around setup, streaming, controls, recovery, and support tasks.<br>
+* Add first-install, upgrade, repair, uninstall, community-testing, support-report, build, and release guidance to both Windows packages.<br>
+<br>
+## 0.14.5<br>
+* Add visible in-stream menu controls for optional diagnostic file logging and the on-screen keyboard.<br>
+* Keep file logging off by default and retain the Triangle and START + Left shortcuts.<br>
+<br>
+## 0.14.4<br>
+* Wait for an existing virtual display to finish re-enumerating after an in-place driver repair.<br>
+* Keep physical displays active during that wait and distinguish a delayed target from a display-name mismatch.<br>
+<br>
+## 0.14.3<br>
+* Repair an already-installed VDD in place without assuming a clean install or losing the existing configuration.<br>
+* Remove duplicate effective refresh modes and apply temporary 960x544 verification non-persistently.<br>
+* Report the current and advertised Windows display modes when a live change is rejected.<br>
+<br>
+## 0.14.2<br>
+* Keep every active physical monitor visible while setup verifies the Vita virtual display at native 960x544/60.<br>
+* Restore the original display topology once and report the actual Windows mode error instead of repeatedly requesting a reboot.<br>
+<br>
+## 0.14.1<br>
+* Add native 960x544/60 virtual-display provisioning and controlled in-stream switching between 960x544, 960x540, and 1280x720.<br>
+* Add top-right Frame rate, Frame rate + network, and Advanced overlays with a translucent background.<br>
+* Move live diagnostics to a dedicated screen and make append-only file logging optional and off by default.<br>
+* Add complete Reliable, Recommended, High quality, and Remote / VPN presets with matching pre-stream and in-stream controls.<br>
+* Separate stream-resolution and input reconnect actions so controller changes do not reset the virtual display.<br>
+* Harden stalled-video rendering, reconnect cleanup, input suppression, Sunshine compatibility checks, and physical-display recovery.<br>
+* Expand the Windows GUI companion, installer, documentation, and release acceptance tests.<br>
+<br>
+## 0.14.0<br>
+* Make START + L + R reliable in any button order with a longer START-led window.<br>
+* Keep single PS presses local by default while preserving double-PS LiveArea escape; add Safe Guide, Immediate Guide, and System modes.<br>
+* Fix virtual-display selection when the requested Vita mode was missing from VDD.<br>
+* Consume the START + L + R overlay chord locally instead of sending it to the PC.<br>
+* Add Reliable, Balanced, and High quality streaming presets with on-device help.<br>
+* Default new installs to Xbox compatibility, H.264 packet-loss recovery, 960x544/60, and 8 Mbps.<br>
+* Validate old configuration values and improve Windows host portability.<br>
+* Add an in-stream settings and disconnect overlay.<br>
+* Use the Vita virtual display for every Sunshine app, including Steam Big Picture.<br>
+* Force SDR during Vita virtual-display sessions.<br>
+* Raise the native 960x544/60 default to 8 Mbps for better motion quality.<br>
+* Add the redesigned GUI-first Windows host setup and recovery tool.<br>
+<br>
 ## 0.13.1<br>
 * fix: Split shortcuts into individual files for better code organization and maintainability.<br>
 * fix: Resolved ghost/phantom button presses when handling overlays and shortcuts. Button state is now correctly reset and restored.<br>

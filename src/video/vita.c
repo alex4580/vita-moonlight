@@ -21,6 +21,8 @@
 #include "../config.h"
 #include "../debug.h"
 #include "../gui/guilib.h"
+#include "../gui/ui_diagnostics.h"
+#include "../gui/ui_stream_overlay.h"
 #include "../util.h"
 #include "../input/vita.h"
 #include "vita.h"
@@ -28,6 +30,7 @@
 
 #include <Limelight.h>
 
+#include <pthread.h>
 #include <stdbool.h>
 #include <psp2/kernel/sysmem.h>
 #include <psp2/kernel/threadmgr.h>
@@ -46,7 +49,6 @@ extern void gs_sps_stop();
 extern double_click_tracker dc_tracker;
 
 void draw_streaming(vita2d_texture *frame_texture);
-void draw_fps();
 void draw_indicators();
 
 enum {
@@ -58,11 +60,23 @@ enum {
   VITA_VIDEO_ERROR_GET_MEMBASE          = 0x80010005,
   VITA_VIDEO_ERROR_CREATE_DEC           = 0x80010006,
   VITA_VIDEO_ERROR_CREATE_PACER_THREAD  = 0x80010007,
+  VITA_VIDEO_ERROR_CREATE_RENDER_MUTEX  = 0x80010008,
+  VITA_VIDEO_ERROR_CLEANUP_BLOCKED      = 0x80010009,
 };
 
 #define DECODER_BUFFER_SIZE (128 * 1024)
 
 #define AV_INPUT_BUFFER_PADDING_SIZE 64
+
+#define PACER_SAMPLE_INTERVAL_US 1000000ULL
+#define UI_WATCHDOG_POLL_US 16000
+#define UI_WATCHDOG_IDLE_POLL_US 50000
+#define UI_WATCHDOG_STALE_US 75000ULL
+#define UI_WATCHDOG_REFRESH_US 100000ULL
+#define UI_REQUEST_MIN_INTERVAL_US 16000ULL
+#define VIDEO_CLEANUP_WAIT_US 2000000
+#define VIDEO_CLEANUP_LOCK_POLL_US 1000
+#define DECODER_ERROR_LOG_INTERVAL_US 10000000ULL
 
 static char* decoder_buffer = NULL;
 
@@ -97,20 +111,60 @@ SceVideodecQueryInitInfoHwAvcdec *init = NULL;
 SceAvcdecQueryDecoderInfo *decoder_info = NULL;
 
 typedef struct {
-  bool activated;
   uint8_t alpha;
   bool plus;
 } indicator_status;
 
-//static unsigned numframes;
-static bool active_video_thread = true;
-static bool active_pacer_thread = false;
 static indicator_status poor_net_indicator = {0};
+static uint32_t poor_net_indicator_requested = 0;
+/*
+ * The hardware decoder writes directly into frame_texture. This mutex covers
+ * that write and every Vita2D draw so the watchdog can only reuse a fully
+ * decoded texture and can never overlap the normal presentation path.
+ */
+static pthread_mutex_t video_render_mutex;
+static uint32_t video_render_mutex_initialized = 0;
+static uint32_t active_video_thread = 0;
+static uint32_t active_pacer_thread = 0;
+static uint32_t video_cleanup_blocked = 0;
+static uint32_t redraw_request_generation = 0;
+static uint32_t rendered_redraw_generation = 0;
+static bool decoded_frame_available = false;
+static uint64_t last_video_activity_us = 0;
+static uint64_t last_render_us = 0;
+static uint64_t last_decoder_error_log_us = 0;
+static uint32_t suppressed_decoder_errors = 0;
 
-uint32_t frame_count = 0;
-uint32_t need_drop = 0;
-uint32_t curr_fps[2] = {0, 0};
+static uint32_t frame_count = 0;
+static uint32_t need_drop = 0;
+static uint32_t fps_snapshot = 0;
 float carry = 0;
+
+static uint32_t atomic_load_u32(const uint32_t *value) {
+  return __atomic_load_n(value, __ATOMIC_ACQUIRE);
+}
+
+static void atomic_store_u32(uint32_t *value, uint32_t next) {
+  __atomic_store_n(value, next, __ATOMIC_RELEASE);
+}
+
+static uint32_t atomic_exchange_u32(uint32_t *value, uint32_t next) {
+  return __atomic_exchange_n(value, next, __ATOMIC_ACQ_REL);
+}
+
+static void atomic_add_u32(uint32_t *value, uint32_t amount) {
+  __atomic_fetch_add(value, amount, __ATOMIC_ACQ_REL);
+}
+
+static void atomic_sub_u32(uint32_t *value, uint32_t amount) {
+  __atomic_fetch_sub(value, amount, __ATOMIC_ACQ_REL);
+}
+
+static void atomic_store_fps(uint32_t rendered, uint32_t target) {
+  /* One 32-bit publication keeps the rendered/target pair self-consistent. */
+  uint32_t packed = (rendered & 0xffffU) | ((target & 0xffffU) << 16);
+  atomic_store_u32(&fps_snapshot, packed);
+}
 
 typedef struct {
   unsigned int texture_width;
@@ -124,6 +178,33 @@ typedef struct {
 } image_scaling_settings;
 
 static image_scaling_settings image_scaling = {0};
+
+static void draw_stream_surface(bool count_video_frame) {
+  uint32_t request_generation =
+      atomic_load_u32(&redraw_request_generation);
+  vita2d_start_drawing();
+
+  if (decoded_frame_available && frame_texture != NULL) {
+    draw_streaming(frame_texture);
+  } else {
+    vita2d_clear_screen();
+  }
+  draw_indicators();
+  if (!stream_overlay_is_open()) {
+    ui_diagnostics_draw_overlay();
+  }
+  stream_overlay_draw();
+
+  vita2d_end_drawing();
+  vita2d_wait_rendering_done();
+  vita2d_swap_buffers();
+
+  last_render_us = sceKernelGetSystemTimeWide();
+  atomic_store_u32(&rendered_redraw_generation, request_generation);
+  if (count_video_frame) {
+    atomic_add_u32(&frame_count, 1);
+  }
+}
 
 void update_scaling_settings(int width, int height) {
   image_scaling.texture_width = SCREEN_WIDTH;
@@ -182,66 +263,135 @@ void update_scaling_settings(int width, int height) {
 }
 
 static int vita_pacer_thread_main(SceSize args, void *argp) {
-  // 1s
-  int wait = 1000000;
-  //float max_fps = 0;
-  //sceDisplayGetRefreshRate(&max_fps);
-  //if (config.stream.fps == 30) {
-  //  max_fps /= 2;
-  //}
   int max_fps = config.stream.fps;
-  //uint64_t last_vblank_count = sceDisplayGetVcount();
   uint64_t last_check_time = sceKernelGetSystemTimeWide();
-  //float carry = 0;
-  need_drop = 0;
-  frame_count = 0;
-  while (active_pacer_thread) {
-    //uint64_t curr_vblank_count = sceDisplayGetVcount();
-    //uint32_t vblank_fps = curr_vblank_count - last_vblank_count;
-    uint32_t curr_frame_count = frame_count;
-    frame_count = 0;
+  atomic_store_u32(&need_drop, 0);
+  atomic_store_u32(&frame_count, 0);
 
-    if (!active_video_thread) {
-    //  carry = 0;
-    } else {
-      if (config.enable_frame_pacer && curr_frame_count > max_fps) {
-        //carry += curr_frame_count - max_fps;
-        //if (carry > 1) {
-        //  need_drop += (int)carry;
-        //  carry -= (int)carry;
-        //}
-        need_drop += curr_frame_count - max_fps;
+  while (atomic_load_u32(&active_pacer_thread)) {
+    uint64_t now = sceKernelGetSystemTimeWide();
+
+    if (now - last_check_time >= PACER_SAMPLE_INTERVAL_US) {
+      uint32_t curr_frame_count =
+          atomic_exchange_u32(&frame_count, 0);
+
+      if (atomic_load_u32(&active_video_thread) &&
+          config.enable_frame_pacer &&
+          curr_frame_count > max_fps) {
+        atomic_add_u32(&need_drop, curr_frame_count - max_fps);
       }
-      //vita_debug_log("fps0/fps1/carry/need_drop: %u/%u/%f/%u\n",
-      //               curr_frame_count, vblank_fps, carry, need_drop);
+
+      atomic_store_fps(curr_frame_count, (uint32_t)max_fps);
+      last_check_time = now;
     }
 
-    curr_fps[0] = curr_frame_count;
-    curr_fps[1] = max_fps;
+    bool live_ui =
+        stream_overlay_is_open() ||
+        ui_diagnostics_get_overlay_mode() != UI_DIAGNOSTICS_OVERLAY_OFF;
+    bool redraw_pending =
+        atomic_load_u32(&redraw_request_generation) !=
+        atomic_load_u32(&rendered_redraw_generation);
+    /*
+     * A try-lock keeps the watchdog out of the latency-sensitive decode path.
+     * It redraws only after video has gone quiet, or once for an input-driven
+     * request such as opening/closing or changing the stream menu.
+     */
+    if (atomic_load_u32(&active_video_thread) &&
+        atomic_load_u32(&video_render_mutex_initialized) &&
+        (redraw_pending || live_ui) &&
+        pthread_mutex_trylock(&video_render_mutex) == 0) {
+      now = sceKernelGetSystemTimeWide();
+      redraw_pending =
+          atomic_load_u32(&redraw_request_generation) !=
+          atomic_load_u32(&rendered_redraw_generation);
+      bool video_stalled =
+          !decoded_frame_available ||
+          now - last_video_activity_us >= UI_WATCHDOG_STALE_US;
+      bool requested_redraw =
+          redraw_pending &&
+          now - last_render_us >= UI_REQUEST_MIN_INTERVAL_US;
+      bool periodic_redraw =
+          live_ui &&
+          video_stalled &&
+          now - last_render_us >= UI_WATCHDOG_REFRESH_US;
 
-    //last_vblank_count = curr_vblank_count;
-    uint64_t curr_check_time = sceKernelGetSystemTimeWide();
-    uint32_t lapse = curr_check_time - last_check_time;
-    last_check_time = curr_check_time;
-    if (lapse > wait && (lapse - wait) < wait) {
-      //vita_debug_log("sleep: %d", wait * 2 - lapse);
-      sceKernelDelayThread(wait * 2 - lapse);
-    } else {
-      sceKernelDelayThread(wait);
+      if (requested_redraw || periodic_redraw) {
+        draw_stream_surface(false);
+      }
+      pthread_mutex_unlock(&video_render_mutex);
     }
+
+    sceKernelDelayThread(
+        (atomic_load_u32(&redraw_request_generation) !=
+             atomic_load_u32(&rendered_redraw_generation) ||
+         live_ui)
+            ? UI_WATCHDOG_POLL_US
+            : UI_WATCHDOG_IDLE_POLL_US);
   }
   return 0;
 }
 
+static bool stop_pacer_thread(void) {
+  if (video_status != INIT_FRAME_PACER_THREAD) return true;
+
+  atomic_store_u32(&active_pacer_thread, 0);
+  SceUInt timeout = VIDEO_CLEANUP_WAIT_US;
+  int thread_status = 0;
+  int wait_result =
+      sceKernelWaitThreadEnd(pacer_thread, &thread_status, &timeout);
+  if (wait_result < 0) {
+    /*
+     * Vita's user-mode thread API has no forced termination primitive.
+     * Quarantine all video resources instead of risking a use-after-free if
+     * the watchdog is still inside Vita2D or waiting for the display.
+     */
+    vita_debug_event(
+        VITA_DEBUG_LEVEL_ERROR, "decoder.state",
+        "state=quarantined phase=pacer_stop code=0x%08x",
+        (unsigned int)wait_result);
+    atomic_store_u32(&video_cleanup_blocked, 1);
+    return false;
+  }
+
+  int delete_result = sceKernelDeleteThread(pacer_thread);
+  if (delete_result < 0) {
+    vita_debug_event(
+        VITA_DEBUG_LEVEL_WARNING, "decoder.state",
+        "state=cleanup_warning phase=pacer_delete code=0x%08x",
+        (unsigned int)delete_result);
+  }
+  pacer_thread = -1;
+  video_status--;
+  return true;
+}
+
+static bool lock_video_render_bounded(const char *operation) {
+  if (!atomic_load_u32(&video_render_mutex_initialized)) return false;
+  uint64_t deadline =
+      sceKernelGetSystemTimeWide() + VIDEO_CLEANUP_WAIT_US;
+  while (pthread_mutex_trylock(&video_render_mutex) != 0) {
+    if (sceKernelGetSystemTimeWide() >= deadline) {
+      (void)operation;
+      vita_debug_event(
+          VITA_DEBUG_LEVEL_ERROR, "decoder.state",
+          "state=quarantined phase=render_lock code=timeout");
+      atomic_store_u32(&video_cleanup_blocked, 1);
+      return false;
+    }
+    sceKernelDelayThread(VIDEO_CLEANUP_LOCK_POLL_US);
+  }
+  return true;
+}
+
 static void vita_cleanup() {
-  if (video_status == INIT_FRAME_PACER_THREAD) {
-    active_pacer_thread = false;
-    // wait 10sec
-    SceUInt timeout = 10000000;
-    int ret;
-    sceKernelWaitThreadEnd(pacer_thread, &ret, &timeout);
-    sceKernelDeleteThread(pacer_thread);
-    video_status--;
+  enum VideoStatus previous_status = video_status;
+  atomic_store_u32(&active_video_thread, 0);
+  if (!stop_pacer_thread()) return;
+  bool render_mutex_locked =
+      atomic_load_u32(&video_render_mutex_initialized) != 0;
+  if (render_mutex_locked &&
+      !lock_video_render_bounded("Video cleanup")) {
+    return;
   }
 
   if (video_status == INIT_AVC_DEC) {
@@ -292,11 +442,83 @@ static void vita_cleanup() {
     gs_sps_stop();
     video_status--;
   }
+
+  decoded_frame_available = false;
+  atomic_store_u32(&redraw_request_generation, 0);
+  atomic_store_u32(&rendered_redraw_generation, 0);
+  atomic_store_u32(&frame_count, 0);
+  atomic_store_u32(&need_drop, 0);
+  atomic_store_fps(0, 0);
+  atomic_store_u32(&poor_net_indicator_requested, 0);
+  poor_net_indicator.alpha = 0;
+  poor_net_indicator.plus = false;
+  last_video_activity_us = 0;
+  last_render_us = 0;
+
+  if (render_mutex_locked) {
+    pthread_mutex_unlock(&video_render_mutex);
+    int destroy_result = pthread_mutex_destroy(&video_render_mutex);
+    if (destroy_result == 0) {
+      atomic_store_u32(&video_render_mutex_initialized, 0);
+      atomic_store_u32(&video_cleanup_blocked, 0);
+    } else {
+      vita_debug_event(
+          VITA_DEBUG_LEVEL_WARNING, "decoder.state",
+          "state=cleanup_warning phase=render_mutex_destroy code=0x%08x",
+          (unsigned int)destroy_result);
+      atomic_store_u32(&video_cleanup_blocked, 1);
+    }
+  }
+  if (previous_status != NOT_INIT) {
+    vita_debug_event(
+        VITA_DEBUG_LEVEL_INFO, "decoder.state",
+        "state=stopped previous_state_id=%d", previous_status);
+  }
 }
 
 static int vita_setup(int videoFormat, int width, int height, int redrawRate, void* context, int drFlags) {
   int ret;
-  printf("vita video setup\n");
+  (void)context;
+  vita_debug_event(
+      VITA_DEBUG_LEVEL_INFO, "decoder.state",
+      "state=initializing backend=vita_hw_h264 format_mask=0x%x "
+      "width=%d height=%d refresh_hz=%d flags=0x%x",
+      (unsigned int)videoFormat, width, height, redrawRate,
+      (unsigned int)drFlags);
+  last_decoder_error_log_us = 0;
+  suppressed_decoder_errors = 0;
+
+  if (atomic_load_u32(&video_cleanup_blocked)) {
+    vita_debug_event(
+        VITA_DEBUG_LEVEL_ERROR, "decoder.state",
+        "state=error phase=preflight code=cleanup_blocked");
+    return VITA_VIDEO_ERROR_CLEANUP_BLOCKED;
+  }
+
+  if (!atomic_load_u32(&video_render_mutex_initialized)) {
+    ret = pthread_mutex_init(&video_render_mutex, NULL);
+    if (ret != 0) {
+      printf("pthread_mutex_init: 0x%x\n", ret);
+      vita_debug_event(
+          VITA_DEBUG_LEVEL_ERROR, "decoder.state",
+          "state=error phase=setup code=0x%08x",
+          (unsigned int)ret);
+      return VITA_VIDEO_ERROR_CREATE_RENDER_MUTEX;
+    }
+    atomic_store_u32(&video_render_mutex_initialized, 1);
+  }
+  decoded_frame_available = false;
+  atomic_store_u32(&active_video_thread, 0);
+  atomic_store_u32(&redraw_request_generation, 0);
+  atomic_store_u32(&rendered_redraw_generation, 0);
+  atomic_store_u32(&frame_count, 0);
+  atomic_store_u32(&need_drop, 0);
+  atomic_store_fps(0, 0);
+  atomic_store_u32(&poor_net_indicator_requested, 0);
+  poor_net_indicator.alpha = 0;
+  poor_net_indicator.plus = false;
+  last_video_activity_us = sceKernelGetSystemTimeWide();
+  last_render_us = 0;
 
   if (video_status == NOT_INIT) {
     // INIT_GS
@@ -426,14 +648,37 @@ static int vita_setup(int videoFormat, int width, int height, int redrawRate, vo
       goto cleanup;
     }
     pacer_thread = ret;
-    active_pacer_thread = true;
-    sceKernelStartThread(pacer_thread, 0, NULL);
+    atomic_store_u32(&active_pacer_thread, 1);
+    ret = sceKernelStartThread(pacer_thread, 0, NULL);
+    if (ret < 0) {
+      atomic_store_u32(&active_pacer_thread, 0);
+      sceKernelDeleteThread(pacer_thread);
+      pacer_thread = -1;
+      printf("sceKernelStartThread 0x%x\n", ret);
+      ret = VITA_VIDEO_ERROR_CREATE_PACER_THREAD;
+      goto cleanup;
+    }
     video_status++;
   }
 
+  vita_debug_event(
+      VITA_DEBUG_LEVEL_INFO, "decoder.state",
+      "state=ready backend=vita_hw_h264 codec=h264 format_mask=0x%x "
+      "width=%d height=%d texture_width=%u texture_height=%u "
+      "refresh_hz=%d ref_frames=%u frame_pacer=%d",
+      (unsigned int)videoFormat, width, height,
+      (unsigned int)image_scaling.texture_width,
+      (unsigned int)image_scaling.texture_height, redrawRate,
+      (unsigned int)(init ? init->numOfRefFrames : 0),
+      config.enable_frame_pacer ? 1 : 0);
   return VITA_VIDEO_INIT_OK;
 
 cleanup:
+  vita_debug_event(
+      VITA_DEBUG_LEVEL_ERROR, "decoder.state",
+      "state=error phase=setup code=0x%08x format_mask=0x%x "
+      "width=%d height=%d",
+      (unsigned int)ret, (unsigned int)videoFormat, width, height);
   vita_cleanup();
   return ret;
 }
@@ -492,40 +737,74 @@ static int vita_submit_decode_unit(PDECODE_UNIT decodeUnit) {
   au.pts.lower = 0xFFFFFFFF;
   au.pts.upper = 0xFFFFFFFF;
 
+  bool collect_diagnostics = ui_diagnostics_metrics_needed();
+  pthread_mutex_lock(&video_render_mutex);
+  uint64_t decode_started_us =
+      collect_diagnostics ? sceKernelGetSystemTimeWide() : 0;
   int ret = 0;
   ret = sceAvcdecDecode(decoder, &au, &array_picture);
+  uint64_t decode_elapsed_us = collect_diagnostics
+      ? sceKernelGetSystemTimeWide() - decode_started_us
+      : 0;
+  uint32_t decode_time_us = decode_elapsed_us > UINT32_MAX
+      ? UINT32_MAX
+      : (uint32_t)decode_elapsed_us;
   if (ret < 0) {
-    printf("sceAvcdecDecode (len=0x%x): 0x%x numOfOutput %d\n", decodeUnit->fullLength, ret, array_picture.numOfOutput);
+    if (collect_diagnostics) {
+      ui_diagnostics_record_video_frame(
+          decodeUnit->fullLength, decode_time_us, false);
+    }
+    uint64_t now_us = sceKernelGetSystemTimeWide();
+    if (last_decoder_error_log_us == 0 ||
+        now_us - last_decoder_error_log_us >=
+            DECODER_ERROR_LOG_INTERVAL_US) {
+      vita_debug_event(
+          VITA_DEBUG_LEVEL_ERROR, "decoder.state",
+          "state=error phase=decode code=0x%08x unit_bytes=%u outputs=%d "
+          "repeats_suppressed=%u",
+          (unsigned int)ret, (unsigned int)decodeUnit->fullLength,
+          array_picture.numOfOutput, suppressed_decoder_errors);
+      last_decoder_error_log_us = now_us;
+      suppressed_decoder_errors = 0;
+    } else {
+      suppressed_decoder_errors++;
+    }
+    pthread_mutex_unlock(&video_render_mutex);
     return DR_NEED_IDR;
   }
 
   if (array_picture.numOfOutput != 1) {
+    if (collect_diagnostics) {
+      ui_diagnostics_record_video_frame(
+          decodeUnit->fullLength, decode_time_us, false);
+    }
     //printf("numOfOutput %d\n", array_picture.numOfOutput);
+    pthread_mutex_unlock(&video_render_mutex);
     return DR_OK;
   }
 
+  decoded_frame_available = true;
+  last_video_activity_us = sceKernelGetSystemTimeWide();
+  bool presented = false;
+
   //TODO: Seems silly to decode the unit if we're going to drop the frame?
   // Find out why we decode or if we even need to
-  if (active_video_thread) {
-    if (need_drop > 0) {
-      vita_debug_log("remain frameskip: %d\n", need_drop);
+  if (atomic_load_u32(&active_video_thread)) {
+    uint32_t frames_to_drop = atomic_load_u32(&need_drop);
+    if (frames_to_drop > 0) {
       // skip
-      need_drop--;
+      atomic_sub_u32(&need_drop, 1);
     } else {
-      vita2d_start_drawing();
-
-      draw_streaming(frame_texture);
-      draw_fps();
-      draw_indicators();
-
-      vita2d_end_drawing();
-
-      vita2d_wait_rendering_done();
-      vita2d_swap_buffers();
-
-      frame_count++;
+      draw_stream_surface(true);
+      presented = true;
     }
   }
+
+  if (collect_diagnostics) {
+    ui_diagnostics_record_video_frame(
+        decodeUnit->fullLength, decode_time_us, presented);
+  }
+  pthread_mutex_unlock(&video_render_mutex);
 
   // if (numframes++ % 6 == 0)
   //   return DR_NEED_IDR;
@@ -545,20 +824,17 @@ void draw_streaming(vita2d_texture *frame_texture) {
                            image_scaling.region_y2);
 }
 
-void draw_fps() {
-  if (config.show_fps) {
-    vita2d_font_draw_textf(font, 40, 20, RGBA8(0xFF, 0xFF, 0xFF, 0xFF), 16, "fps: %u / %u", curr_fps[0], curr_fps[1]);
-  }
-}
-
 void draw_indicators() {
-  if (poor_net_indicator.activated) {
+  if (atomic_load_u32(&poor_net_indicator_requested)) {
     vita2d_font_draw_text(font, 40, 500, RGBA8(0xFF, 0xFF, 0xFF, poor_net_indicator.alpha), 64, ICON_NETWORK);
     poor_net_indicator.alpha += (0x4 * (poor_net_indicator.plus ? 1 : -1));
     if (poor_net_indicator.alpha == 0) {
       poor_net_indicator.plus = !poor_net_indicator.plus;
       poor_net_indicator.alpha += (0x4 * (poor_net_indicator.plus ? 1 : -1));
     }
+  } else {
+    poor_net_indicator.alpha = 0;
+    poor_net_indicator.plus = false;
   }
 
   if (dc_tracker.currently_sprinting) {
@@ -567,23 +843,48 @@ void draw_indicators() {
 
 }
 
+void vitavideo_get_fps(uint32_t *rendered, uint32_t *target) {
+  uint32_t packed = atomic_load_u32(&fps_snapshot);
+  if (rendered) *rendered = packed & 0xffffU;
+  if (target) *target = (packed >> 16) & 0xffffU;
+}
+
 void vitavideo_start() {
-  active_video_thread = true;
-  vita2d_set_vblank_wait(config.enable_vita_vblank_wait);
+  if (atomic_load_u32(&video_render_mutex_initialized)) {
+    if (!lock_video_render_bounded("Video start")) return;
+    vita2d_set_vblank_wait(config.enable_vita_vblank_wait);
+    atomic_store_u32(&active_video_thread, 1);
+    pthread_mutex_unlock(&video_render_mutex);
+  } else {
+    vita2d_set_vblank_wait(config.enable_vita_vblank_wait);
+    atomic_store_u32(&active_video_thread, 1);
+  }
+  vitavideo_request_redraw();
 }
 
 void vitavideo_stop() {
-  vita2d_set_vblank_wait(true);
-  active_video_thread = false;
+  atomic_store_u32(&active_video_thread, 0);
+  if (atomic_load_u32(&video_render_mutex_initialized)) {
+    if (!lock_video_render_bounded("Video stop")) return;
+    vita2d_set_vblank_wait(true);
+    pthread_mutex_unlock(&video_render_mutex);
+  } else {
+    vita2d_set_vblank_wait(true);
+  }
+}
+
+void vitavideo_request_redraw() {
+  if (atomic_load_u32(&video_render_mutex_initialized)) {
+    atomic_add_u32(&redraw_request_generation, 1);
+  }
 }
 
 void vitavideo_show_poor_net_indicator() {
-  poor_net_indicator.activated = true;
+  atomic_store_u32(&poor_net_indicator_requested, 1);
 }
 
 void vitavideo_hide_poor_net_indicator() {
-  //poor_net_indicator.activated = false;
-  memset(&poor_net_indicator, 0, sizeof(indicator_status));
+  atomic_store_u32(&poor_net_indicator_requested, 0);
 }
 
 int vitavideo_initialized() {

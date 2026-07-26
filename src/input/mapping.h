@@ -40,5 +40,5 @@ struct mapping {
   uint32_t btn_dpad_up, btn_dpad_down, btn_dpad_left, btn_dpad_right;
 };
 
-void mapping_load(char* fileName, struct mapping* map);
-void mapping_save(char* fileName, struct mapping* map);
+bool mapping_load(const char* fileName, struct mapping* map);
+bool mapping_save(const char* fileName, const struct mapping* map);

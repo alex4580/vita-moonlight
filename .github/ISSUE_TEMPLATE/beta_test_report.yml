@@ -1,0 +1,109 @@
+name: Community beta test report
+description: Record a complete or partial clean-install, upgrade, repair, streaming, recovery, or uninstall test.
+title: "[Beta test] "
+labels:
+  - testing
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for testing. You do not need to complete every scenario.
+        Choose exactly what you tested and report failures where they occurred.
+        Follow `host/BETA_SMOKE_TEST.md` for the minimum test or
+        `host/END_TO_END_TEST.md` for the full test.
+
+        Choose **Start support log** only when reproducing a problem, then
+        choose **Stop and save support log**. In the Windows control panel, use
+        **Diagnostics & support > Save support report...**. Inspect every
+        attachment before posting and never include credentials, pairing data,
+        private IP/MAC addresses, or tokens.
+  - type: input
+    id: release
+    attributes:
+      label: Beta release
+      description: Enter the exact GitHub release tag shown on the download page.
+      placeholder: v0.14.6-beta.1
+    validations:
+      required: true
+  - type: dropdown
+    id: scenario
+    attributes:
+      label: Starting point
+      options:
+        - PC and Vita had never installed this project
+        - PC had an older Vita Moonlight Host and Vita VPK
+        - PC had the same version and I ran repair/reinstall
+        - I tested uninstall while keeping shared dependencies
+        - I tested full removal of selected shared dependencies
+        - Portable diagnostics only
+        - Other or mixed scenario
+    validations:
+      required: true
+  - type: textarea
+    id: hardware
+    attributes:
+      label: Hardware and software
+      description: Include Vita model/firmware, Windows edition/build, CPU, GPU/driver, monitor count, HDR state, Sunshine or Apollo version, and network connection.
+      placeholder: |
+        Vita:
+        Windows:
+        CPU/GPU:
+        Displays/HDR:
+        Streaming host:
+        Network:
+    validations:
+      required: true
+  - type: checkboxes
+    id: tested
+    attributes:
+      label: What did you test?
+      options:
+        - label: Download and checksum/file matching
+        - label: First install
+        - label: Upgrade from an older version
+        - label: Same-version repair/reinstall
+        - label: Vita VPK reinstall, removal, and reinstall
+        - label: Vita pairing and first stream
+        - label: 960x544 SDR virtual-display switching
+        - label: Xbox/XInput controls
+        - label: Steam/DS4 Guide and gyro
+        - label: Graphical button and touch-zone mapping
+        - label: On-screen keyboard
+        - label: Normal disconnect and physical-display restoration
+        - label: Ctrl+Alt+Shift+F11 emergency display recovery
+        - label: Interrupted-stream/sign-out recovery
+        - label: Uninstall while keeping shared dependencies
+        - label: Full removal of selected shared dependencies
+        - label: Laptop, multi-monitor, HDR, or dock changes
+  - type: textarea
+    id: results
+    attributes:
+      label: Results
+      description: List each tested step as Pass, Fail, or Not tested. For a failure, include the exact step and what appeared on both screens.
+      placeholder: |
+        PASS - Initial installation
+        PASS - First 960x544 stream
+        FAIL - Emergency recovery: ...
+    validations:
+      required: true
+  - type: textarea
+    id: performance
+    attributes:
+      label: Streaming observations
+      description: Include preset, game/application, session length, perceived latency, motion quality, audio, and any diagnostics-screen values that were unusual.
+  - type: textarea
+    id: attachments
+    attributes:
+      label: Support files
+      description: Attach the sanitized Windows host support JSON and a fresh Vita support log for each reproduced failure. Include screenshots or short video only when useful.
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Confirmation
+      options:
+        - label: The VPK and Windows installer came from the same GitHub beta release.
+          required: true
+        - label: I identified which scenarios I did not test rather than marking them as passed.
+          required: true
+        - label: I inspected attachments and removed private information and credentials.
+          required: true

@@ -1,32 +1,47 @@
-# Contribution Guide
+# Contributing
 
-## Got a Question or Problem?
-Please take a look at the [wiki](https://github.com/irtimmer/moonlight-embedded/wiki) to see if answers your questions about the usage of Moonlight Embedded.
+Thanks for improving Vita Moonlight. This fork includes both the Vita client
+and the Windows host companion, so changes should preserve the full
+connect/stream/disconnect/recovery lifecycle.
 
-If you still have questions about Moonlight Embedded, please use one of the different fora discussing Moonlight Embedded.
+## Before filing an issue
 
-[XDA](http://forum.xda-developers.com/showthread.php?t=2505510) Moonlight in General
-[Raspberry Pi Forum](http://www.raspberrypi.org/forums/viewtopic.php?f=78&t=65878) Moonlight Embedded for Raspberry Pi
-[SolidRun Community](http://www.solid-run.com/community/viewtopic.php?f=13&t=1489&p=11173) Moonlight Embedded for Cubox-i and Hummingboard
-[ODROID Forum](http://forum.odroid.com/viewtopic.php?f=91&t=15456) Moonlight Embedded on ODROID
+Read `README.md`, `docs/VITA_SETTINGS_GUIDE.md`, and
+`host/BETA_SMOKE_TEST.md`. Search open and closed issues, then use the GitHub
+bug-report form so reports include the Vita, Windows, host, GPU, network, and
+diagnostic context needed to reproduce the problem.
 
-## Found an Issue?
-If you think you found a bug in Moonlight Embedded you can submit a issue. But please ensure first you have checked the following or otherwise we will mark the issue as invalid:
-- [ ] It's a bug in Moonlight Embedded and not in NVidia Geforce Experience or Steam as we otherwise can't fix them
-- [ ] It's not a misconfiguration of your own setup. Like firewall misconfiguration.
-- [ ] Their is no other bug report with the same issue. Check also the closed issues in case your bug is already solved in master.
+Optional Vita support logging is off by default. Choose **Start support log**
+only immediately before a reproduction, choose **Stop and save support log**
+afterward, and review the file before posting it. It records structured
+system, configuration, connection, decoder, motion-state, and periodic network
+events rather than every touch or input sample.
 
-Also provide as much information as possible about your setup and how to produce the issue so their are higher chances we can reproduce the issue and fix it. Even better you can submit a Pull Request
-with a fix.
+## Pull requests
 
-## Feature request
-There are not much developers working on Moonlight Embedded. So it currently doesn't make much sense to use the issue tracker to submit feature request. Please try to implement it yourself and submit a pull request or discuss it on one of the fora to see if someone else is able to implement it.
+- Base work on the current `vita` branch and keep changes focused.
+- Do not commit build output, downloaded installers, local configuration,
+  pairing data, logs, IP addresses, certificates, or credentials.
+- Preserve unrelated Sunshine applications and Windows display state.
+- Keep the Vita client usable without the overlay, diagnostics screen, or
+  support logging enabled.
+- Update user documentation and the acceptance test when behavior changes.
+- Explain hardware-only validation that remains outstanding.
 
-## Submitting a Pull Request
-Have you created a cool new feature or fixed a few bugs you can submit a pull request. But before your request is merged you have to check the following.
-- [ ] Your branch is based on a recent commit and can be merge cleanly
-- [ ] Your code uses the same code style as the rest of the code
-- [ ] Your history is cleanup and you provide one or multiple commits
-- [ ] Your commits only changes the necessery lines and not accidently changes whitespace or add or remove empty lines.
+For Windows-host changes, run:
 
-If these guide lines are not met we maybe won't merge your pull request or take some to cleanup your pull request before merging. Depending on how bad we wan't your code.
+```powershell
+dotnet format host\VitaMoonlight.Host\VitaMoonlight.Host.csproj --verify-no-changes
+dotnet build host\VitaMoonlight.Host\VitaMoonlight.Host.csproj -c Release
+dotnet run --project host\VitaMoonlight.Host\VitaMoonlight.Host.csproj -c Release --no-build -- self-test
+```
+
+Vita changes require VitaSDK and the dependencies listed in
+`.github/workflows/cmake-psvita.yml`. The GitHub Vita workflow is the canonical
+clean build, but it does not replace testing on a physical Vita. Complete the
+relevant sections of `host/END_TO_END_TEST.md`; release candidates must also
+pass `host/FINAL_RELEASE_CHECKLIST.md`.
+
+Full local toolchain and fork instructions are in `docs/BUILDING.md`. Release
+versioning, code signing, checksums, and provenance are documented in
+`docs/RELEASING.md`.

@@ -27,7 +27,6 @@
 #include <getopt.h>
 #include <ini.h>
 #include "input/vita.h"
-#include "debug.h"
 
 extern char* strdup(const char*);
 
@@ -37,6 +36,15 @@ extern char* strdup(const char*);
 #define USER_PATHS "."
 #define DEFAULT_CONFIG_DIR "/.config"
 #define DEFAULT_CACHE_DIR "/.cache"
+#define CURRENT_CONFIG_VERSION 5
+#define DEFAULT_STREAM_WIDTH 960
+#define DEFAULT_STREAM_HEIGHT 544
+#define DEFAULT_STREAM_FPS 60
+#define DEFAULT_PACKET_SIZE 1024
+#define MIN_BITRATE_KBPS 1000
+#define MAX_BITRATE_KBPS 30000
+#define VITA_TOUCH_WIDTH 960
+#define VITA_TOUCH_HEIGHT 544
 
 #define write_config_string(fd, key, value) fprintf(fd, "%s = %s\n", key, value)
 #define write_config_int(fd, key, value) fprintf(fd, "%s = %d\n", key, value)
@@ -47,6 +55,168 @@ extern char* strdup(const char*);
 
 CONFIGURATION config;
 char *config_path;
+
+int config_recommended_bitrate(int width, int height, int fps) {
+  (void)width;
+
+  if (height <= 544) {
+    return fps >= 60 ? 8000 : 5000;
+  }
+  if (height <= 720) {
+    return fps >= 60 ? 10000 : 6000;
+  }
+  if (height < 1080) {
+    return fps >= 60 ? 12000 : 8000;
+  }
+  return fps >= 60 ? 16000 : 10000;
+}
+
+static bool stream_preset_base_matches(void) {
+  return config.stream.width == 960 &&
+         config.stream.height == 544 &&
+         config.stream.packetSize == 1024 &&
+         config.stream.audioConfiguration == AUDIO_CONFIGURATION_STEREO &&
+         config.stream.supportedVideoFormats == VIDEO_FORMAT_H264 &&
+         config.stream.clientRefreshRateX100 == 6000 &&
+         config.stream.colorSpace == COLORSPACE_REC_709 &&
+         config.stream.colorRange == COLOR_RANGE_LIMITED &&
+         config.sops &&
+         !config.localaudio &&
+         config.enable_ref_frame_invalidation &&
+         config.enable_frame_pacer &&
+         !config.enable_vita_vblank_wait &&
+         !config.center_region_only &&
+         config.disable_powersave;
+}
+
+int config_detect_stream_preset(void) {
+  if (!stream_preset_base_matches()) return STREAM_PRESET_CUSTOM;
+
+  if (config.stream.fps == 30 &&
+      config.stream.bitrate == 5000 &&
+      config.stream.streamingRemotely == STREAM_CFG_AUTO) {
+    return STREAM_PRESET_RELIABLE;
+  }
+  if (config.stream.fps == 60 &&
+      config.stream.bitrate == 8000 &&
+      config.stream.streamingRemotely == STREAM_CFG_AUTO) {
+    return STREAM_PRESET_RECOMMENDED;
+  }
+  if (config.stream.fps == 60 &&
+      config.stream.bitrate == 12000 &&
+      config.stream.streamingRemotely == STREAM_CFG_AUTO) {
+    return STREAM_PRESET_QUALITY;
+  }
+  if (config.stream.fps == 30 &&
+      config.stream.bitrate == 4000 &&
+      config.stream.streamingRemotely == STREAM_CFG_REMOTE) {
+    return STREAM_PRESET_REMOTE;
+  }
+  return STREAM_PRESET_CUSTOM;
+}
+
+void config_apply_stream_preset(int preset) {
+  if (preset < STREAM_PRESET_RELIABLE || preset > STREAM_PRESET_REMOTE) {
+    preset = STREAM_PRESET_RECOMMENDED;
+  }
+
+  config.stream.width = 960;
+  config.stream.height = 544;
+  config.stream.packetSize = 1024;
+  config.stream.streamingRemotely =
+      preset == STREAM_PRESET_REMOTE ? STREAM_CFG_REMOTE : STREAM_CFG_AUTO;
+  config.stream.audioConfiguration = AUDIO_CONFIGURATION_STEREO;
+  config.stream.supportedVideoFormats = VIDEO_FORMAT_H264;
+  config.stream.clientRefreshRateX100 = 6000;
+  config.stream.colorSpace = COLORSPACE_REC_709;
+  config.stream.colorRange = COLOR_RANGE_LIMITED;
+  config.sops = true;
+  config.localaudio = false;
+  config.enable_ref_frame_invalidation = true;
+  config.enable_frame_pacer = true;
+  config.enable_vita_vblank_wait = false;
+  config.center_region_only = false;
+  config.disable_powersave = true;
+
+  switch (preset) {
+    case STREAM_PRESET_RELIABLE:
+      config.stream.fps = 30;
+      config.stream.bitrate = 5000;
+      break;
+    case STREAM_PRESET_QUALITY:
+      config.stream.fps = 60;
+      config.stream.bitrate = 12000;
+      break;
+    case STREAM_PRESET_REMOTE:
+      config.stream.fps = 30;
+      config.stream.bitrate = 4000;
+      break;
+    default:
+      config.stream.fps = 60;
+      config.stream.bitrate = 8000;
+      break;
+  }
+}
+
+const char *config_stream_preset_name(int preset) {
+  switch (preset) {
+    case STREAM_PRESET_RELIABLE: return "Reliable";
+    case STREAM_PRESET_RECOMMENDED: return "Recommended";
+    case STREAM_PRESET_QUALITY: return "High quality";
+    case STREAM_PRESET_REMOTE: return "Remote / VPN";
+    default: return "Custom";
+  }
+}
+
+int config_detect_controller_profile(void) {
+  bool common = !config.swap_shoulder_buttons &&
+                config.mapping == NULL &&
+                !config.enable_double_tap_sprint;
+  if (common &&
+      config.controller_type == 1 &&
+      !config.enable_motion_controls &&
+      config.touchscreen_mode == 0 &&
+      config.psbutton_mode == PSBUTTON_MODE_LOCAL_ESCAPE) {
+    return CONTROLLER_PROFILE_COMPATIBILITY;
+  }
+  if (common &&
+      config.controller_type == 2 &&
+      config.enable_motion_controls &&
+      config.touchscreen_mode == 1 &&
+      config.psbutton_mode == PSBUTTON_MODE_SAFE_GUIDE) {
+    return CONTROLLER_PROFILE_STEAM;
+  }
+  return CONTROLLER_PROFILE_CUSTOM;
+}
+
+void config_apply_controller_profile(int profile) {
+  if (config.mapping) {
+    free(config.mapping);
+    config.mapping = NULL;
+  }
+  config.swap_shoulder_buttons = false;
+  config.enable_double_tap_sprint = false;
+
+  if (profile == CONTROLLER_PROFILE_STEAM) {
+    config.controller_type = 2;
+    config.enable_motion_controls = true;
+    config.touchscreen_mode = 1;
+    config.psbutton_mode = PSBUTTON_MODE_SAFE_GUIDE;
+  } else {
+    config.controller_type = 1;
+    config.enable_motion_controls = false;
+    config.touchscreen_mode = 0;
+    config.psbutton_mode = PSBUTTON_MODE_LOCAL_ESCAPE;
+  }
+}
+
+const char *config_controller_profile_name(int profile) {
+  switch (profile) {
+    case CONTROLLER_PROFILE_COMPATIBILITY: return "Maximum compatibility";
+    case CONTROLLER_PROFILE_STEAM: return "Steam / DS4 + gyro";
+    default: return "Custom";
+  }
+}
 
 bool inputAdded = false;
 static bool mapped = true;
@@ -94,8 +264,12 @@ static int ini_handle(void *out, const char *section, const char *name,
       config->special_keys.size = INT(value);
     }
   } else {
-    if (strcmp(name, "address") == 0) {
+    if (strcmp(name, "config_version") == 0) {
+      config->config_version = INT(value);
+    } else if (strcmp(name, "address") == 0) {
       config->address = STR(value);
+    } else if (strcmp(name, "app") == 0) {
+      config->app = STR(value);
     } else if (strcmp(name, "width") == 0) {
       config->stream.width = INT(value);
     } else if (strcmp(name, "height") == 0) {
@@ -104,6 +278,8 @@ static int ini_handle(void *out, const char *section, const char *name,
       config->stream.fps = INT(value);
     } else if (strcmp(name, "bitrate") == 0) {
       config->stream.bitrate = INT(value);
+    } else if (strcmp(name, "packetsize") == 0) {
+      config->stream.packetSize = INT(value);
     } else if (strcmp(name, "sops") == 0) {
       config->sops = BOOL(value);
     } else if (strcmp(name, "localaudio") == 0) {
@@ -118,8 +294,11 @@ static int ini_handle(void *out, const char *section, const char *name,
       config->jp_layout = BOOL(value);
     } else if (strcmp(name, "show_fps") == 0) {
       config->show_fps = BOOL(value);
+    } else if (strcmp(name, "performance_overlay_mode") == 0) {
+      config->performance_overlay_mode = INT(value);
     } else if (strcmp(name, "save_debug_log") == 0) {
-      config->save_debug_log = BOOL(value);
+      /* Legacy preference: support-log capture is now always opt-in per run. */
+      config->save_debug_log = false;
     } else if (strcmp(name, "mapping") == 0) {
       config->mapping = STR(value);
     } else if (strcmp(name, "mouse_acceleration") == 0) {
@@ -134,8 +313,12 @@ static int ini_handle(void *out, const char *section, const char *name,
       config->enable_motion_controls = BOOL(value);
     } else if (strcmp(name, "enable_front_touchzones") == 0) {
       config->enable_front_touchzones = BOOL(value);
+    } else if (strcmp(name, "psbutton_mode") == 0) {
+      config->psbutton_mode = INT(value);
     } else if(strcmp(name, "enable_psbutton_capture") == 0) {
-      config->enable_psbutton_capture = BOOL(value);
+      // Migrate the old boolean to the safest equivalent. Captured PS presses
+      // stay local by default instead of becoming a Windows Guide press.
+      config->psbutton_mode = BOOL(value) ? PSBUTTON_MODE_LOCAL_ESCAPE : PSBUTTON_MODE_SYSTEM;
     } else if (strcmp(name, "enable_double_tap_sprint") == 0) {
       config->enable_double_tap_sprint = BOOL(value);
     } else if (strcmp(name, "double_tap_sprint_step_time") == 0) {
@@ -158,15 +341,118 @@ static int ini_handle(void *out, const char *section, const char *name,
 }
 
 bool config_file_parse(char* filename, PCONFIGURATION config) {
-  return ini_parse(filename, ini_handle, config);
+  return ini_parse(filename, ini_handle, config) == 0;
+}
+
+static int clamp_int(int value, int minimum, int maximum) {
+  if (value < minimum) {
+    return minimum;
+  }
+  if (value > maximum) {
+    return maximum;
+  }
+  return value;
+}
+
+/*
+ * Keep the usable area at least one pixel wide while retaining the relative
+ * shape of an invalid legacy deadzone as closely as possible.
+ */
+static void sanitize_deadzone_axis(int *leading, int *trailing, int extent) {
+  *leading = clamp_int(*leading, 0, extent - 1);
+  *trailing = clamp_int(*trailing, 0, extent - 1);
+
+  int total = *leading + *trailing;
+  if (total >= extent) {
+    int usable_margin = extent - 1;
+    int scaled_leading = (*leading * usable_margin) / total;
+    *leading = scaled_leading;
+    *trailing = usable_margin - scaled_leading;
+  }
+}
+
+void config_sanitize(PCONFIGURATION config) {
+  if (config->stream.width < 64 || config->stream.width > 1920 ||
+      config->stream.height < 64 || config->stream.height > 1080) {
+    config->stream.width = DEFAULT_STREAM_WIDTH;
+    config->stream.height = DEFAULT_STREAM_HEIGHT;
+  }
+  if (config->stream.fps < 24 || config->stream.fps > 60) {
+    config->stream.fps = DEFAULT_STREAM_FPS;
+  }
+  if (config->stream.bitrate != -1 &&
+      (config->stream.bitrate < MIN_BITRATE_KBPS || config->stream.bitrate > MAX_BITRATE_KBPS)) {
+    config->stream.bitrate = -1;
+  }
+  if (config->stream.packetSize < 512 || config->stream.packetSize > 1400) {
+    config->stream.packetSize = DEFAULT_PACKET_SIZE;
+  }
+  if (config->performance_overlay_mode < 0 ||
+      config->performance_overlay_mode > 3) {
+    config->performance_overlay_mode = 0;
+  }
+  if (config->stream.streamingRemotely < STREAM_CFG_LOCAL ||
+      config->stream.streamingRemotely > STREAM_CFG_AUTO) {
+    config->stream.streamingRemotely = STREAM_CFG_AUTO;
+  }
+  if (config->controller_type != 1 && config->controller_type != 2) {
+    config->controller_type = 1;
+  }
+  if (config->touchscreen_mode < 0 || config->touchscreen_mode > 3) {
+    config->touchscreen_mode = 0;
+  }
+  if (config->psbutton_mode < 0 || config->psbutton_mode >= PSBUTTON_MODE_COUNT) {
+    config->psbutton_mode = PSBUTTON_MODE_LOCAL_ESCAPE;
+  }
+  if (config->mouse_acceleration < 15 || config->mouse_acceleration > 300) {
+    config->mouse_acceleration = 150;
+  }
+  if (!(config->motion_controls_scalar_x >= 0.1f && config->motion_controls_scalar_x <= 5.0f)) {
+    config->motion_controls_scalar_x = 1.2f;
+  }
+  if (!(config->motion_controls_scalar_y >= 0.1f && config->motion_controls_scalar_y <= 5.0f)) {
+    config->motion_controls_scalar_y = 0.8f;
+  }
+  if (config->double_tap_sprint_step_time < 50 || config->double_tap_sprint_step_time > 1000) {
+    config->double_tap_sprint_step_time = 200;
+  }
+
+  sanitize_deadzone_axis(&config->back_deadzone.left,
+                         &config->back_deadzone.right,
+                         VITA_TOUCH_WIDTH);
+  sanitize_deadzone_axis(&config->back_deadzone.top,
+                         &config->back_deadzone.bottom,
+                         VITA_TOUCH_HEIGHT);
+
+  /*
+   * Special zones are square and mirrored into all four corners. Restrict
+   * their offset and size to the smaller Vita touch dimension so every
+   * generated rectangle remains positive and on-screen.
+   */
+  int special_extent =
+      VITA_TOUCH_WIDTH < VITA_TOUCH_HEIGHT ? VITA_TOUCH_WIDTH : VITA_TOUCH_HEIGHT;
+  config->special_keys.offset =
+      clamp_int(config->special_keys.offset, 0, special_extent - 1);
+  config->special_keys.size =
+      clamp_int(config->special_keys.size, 1,
+                special_extent - config->special_keys.offset);
 }
 
 void config_save(const char* filename, PCONFIGURATION config) {
+  /*
+   * Settings can be edited after initial parsing. Validate again before
+   * persisting so an invalid UI or legacy value cannot be used for the next
+   * input configuration in this process.
+   */
+  config_sanitize(config);
+
   FILE* fd = fopen(filename, "w");
   if (fd == NULL) {
     fprintf(stderr, "Can't open configuration file: %s\n", filename);
     exit(EXIT_FAILURE);
   }
+
+  write_config_int(fd, "config_version", CURRENT_CONFIG_VERSION);
 
   if (config->address)
     write_config_string(fd, "address", config->address);
@@ -175,9 +461,9 @@ void config_save(const char* filename, PCONFIGURATION config) {
   if (config->mapping)
     write_config_string(fd, "mapping", config->mapping);
 
-  if (config->stream.width != 1280)
+  if (config->stream.width != 960)
     write_config_int(fd, "width", config->stream.width);
-  if (config->stream.height != 720)
+  if (config->stream.height != 544)
     write_config_int(fd, "height", config->stream.height);
   if (config->stream.fps != 60)
     write_config_int(fd, "fps", config->stream.fps);
@@ -199,7 +485,7 @@ void config_save(const char* filename, PCONFIGURATION config) {
   write_config_bool(fd, "disable_powersave", config->disable_powersave);
   write_config_bool(fd, "jp_layout", config->jp_layout);
   write_config_bool(fd, "show_fps", config->show_fps);
-  write_config_bool(fd, "save_debug_log", config->save_debug_log);
+  write_config_int(fd, "performance_overlay_mode", config->performance_overlay_mode);
   write_config_bool(fd, "enable_front_touchzones", config->enable_front_touchzones);
 
   write_config_int(fd, "mouse_acceleration", config->mouse_acceleration);
@@ -207,7 +493,7 @@ void config_save(const char* filename, PCONFIGURATION config) {
   write_config_int(fd, "enable_remote_stream_optimization", config->stream.streamingRemotely);
   write_config_bool(fd, "enable_vita_vblank_wait", config->enable_vita_vblank_wait);
   write_config_bool(fd, "enable_motion_controls", config->enable_motion_controls);
-  write_config_bool(fd, "enable_psbutton_capture", config->enable_psbutton_capture);
+  write_config_int(fd, "psbutton_mode", config->psbutton_mode);
   write_config_bool(fd, "enable_double_tap_sprint", config->enable_double_tap_sprint);
   write_config_int(fd, "double_tap_sprint_step_time", config->double_tap_sprint_step_time);
   write_config_float(fd, "motion_controls_scalar_x", config->motion_controls_scalar_x);
@@ -249,14 +535,18 @@ void update_layout() {
 void config_parse(int argc, char* argv[], PCONFIGURATION config) {
   LiInitializeStreamConfiguration(&config->stream);
 
-  config->stream.width = 1280;
-  config->stream.height = 720;
-  config->stream.fps = 60;
+  config->config_version = 0;
+  config->stream.width = DEFAULT_STREAM_WIDTH;
+  config->stream.height = DEFAULT_STREAM_HEIGHT;
+  config->stream.fps = DEFAULT_STREAM_FPS;
   config->stream.bitrate = -1;
-  config->stream.packetSize = 1024;
-  config->stream.streamingRemotely = 0;
+  config->stream.packetSize = DEFAULT_PACKET_SIZE;
+  config->stream.streamingRemotely = STREAM_CFG_AUTO;
   config->stream.audioConfiguration = AUDIO_CONFIGURATION_STEREO;
   config->stream.supportedVideoFormats = VIDEO_FORMAT_H264;
+  config->stream.clientRefreshRateX100 = 6000;
+  config->stream.colorSpace = COLORSPACE_REC_709;
+  config->stream.colorRange = COLOR_RANGE_LIMITED;
 
   config->platform = "vita";
   config->model = sceKernelGetModelForCDialog();
@@ -272,6 +562,7 @@ void config_parse(int argc, char* argv[], PCONFIGURATION config) {
   config->disable_powersave = true;
   config->jp_layout = false;
   config->show_fps = false;
+  config->performance_overlay_mode = 0;
   config->enable_frame_pacer = true;
   config->center_region_only = false;
 
@@ -282,10 +573,14 @@ void config_parse(int argc, char* argv[], PCONFIGURATION config) {
   config->special_keys.size = 150;
 
   config->mouse_acceleration = 150;
-  config->enable_ref_frame_invalidation = false;
+  config->enable_ref_frame_invalidation = true;
   config->enable_vita_vblank_wait = false;
-  config->enable_psbutton_capture = true;
+  config->enable_motion_controls = false;
+  config->psbutton_mode = PSBUTTON_MODE_LOCAL_ESCAPE;
   config->enable_double_tap_sprint = false;
+  config->touchscreen_mode = 0;
+  config->controller_type = 1;
+  config->keyboard_layout = 0;
 
   config->double_tap_sprint_step_time = 200;
 
@@ -296,18 +591,52 @@ void config_parse(int argc, char* argv[], PCONFIGURATION config) {
   config->mapping = NULL;
   // No sobrescribir key_dir si ya fue asignado por main.c
   // config->key_dir[0] = 0;
-  // Valor por defecto: PS si no está asignado
-  if (config->controller_type < 1 || config->controller_type > 4) {
-    config->controller_type = 2;
-  }
-  // Valor por defecto: swap desactivado
-  // (si no está presente en config, será false por defecto)
-  // No es necesario forzar nada aquí
+  // Xbox/XInput is the compatibility-first controller default. Explicit saved
+  // selections are loaded below and preserved.
 
   char* config_file = config_path;
   if (config_file) {
     config_file_parse(config_file, config);
-    vita_debug_log("[DEBUG] Configuración cargada: key_dir = %s, touchscreen_mode = %d, show_fps = %d", config->key_dir, config->touchscreen_mode, config->show_fps);
+  }
+
+  // Preserve the old FPS-counter preference without drawing both overlays.
+  if (config->show_fps && config->performance_overlay_mode == 0) {
+    config->performance_overlay_mode = 1;
+    config->show_fps = false;
+  }
+
+  config_sanitize(config);
+
+  if (config->config_version < CURRENT_CONFIG_VERSION) {
+    // Version 4 exposed network routing as a boolean. Migrate configurations
+    // matching the old built-in profiles to the safer automatic route without
+    // changing genuinely custom or explicit remote configurations.
+    if (config->config_version < 5 &&
+        config->stream.streamingRemotely == STREAM_CFG_LOCAL &&
+        stream_preset_base_matches() &&
+        ((config->stream.fps == 30 && config->stream.bitrate == 5000) ||
+         (config->stream.fps == 60 && config->stream.bitrate == 8000) ||
+         (config->stream.fps == 60 && config->stream.bitrate == 12000))) {
+      config->stream.streamingRemotely = STREAM_CFG_AUTO;
+    }
+    if (config->config_version < 5 &&
+        config->controller_type == 1 &&
+        config->touchscreen_mode == 0 &&
+        config->psbutton_mode == PSBUTTON_MODE_LOCAL_ESCAPE &&
+        !config->swap_shoulder_buttons &&
+        config->mapping == NULL &&
+        !config->enable_double_tap_sprint) {
+      config->enable_motion_controls = false;
+    }
+    if (config->config_version < 2 &&
+        config->stream.width <= 960 && config->stream.height <= 544 &&
+        config->stream.bitrate > 0 && config->stream.bitrate <= 5000) {
+      config->stream.bitrate = 8000;
+    }
+    config->config_version = CURRENT_CONFIG_VERSION;
+    if (config_file) {
+      config_save(config_file, config);
+    }
   }
 
   update_layout();
@@ -333,14 +662,8 @@ void config_parse(int argc, char* argv[], PCONFIGURATION config) {
   if (config->stream.fps == -1)
     config->stream.fps = config->stream.height >= 1080 ? 30 : 60;
 
-  if (config->stream.bitrate == -1) {
-    if (config->stream.height >= 1080 && config->stream.fps >= 60)
-      config->stream.bitrate = 20000;
-    else if (config->stream.height >= 1080 || config->stream.fps >= 60)
-      config->stream.bitrate = 10000;
-    else
-      config->stream.bitrate = 5000;
-  }
+  if (config->stream.bitrate == -1)
+    config->stream.bitrate = config_recommended_bitrate(config->stream.width, config->stream.height, config->stream.fps);
 
   if (inputAdded) {
     if (!mapped) {

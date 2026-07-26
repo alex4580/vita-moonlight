@@ -19,6 +19,7 @@
 
 #include <psp2common/ctrl.h>
 #include <psp2/shellutil.h>
+#include <psp2/power.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -29,10 +30,10 @@
 #include <sys/types.h>
 #include <openssl/rand.h>
 #include <openssl/evp.h>
+#include <pthread.h>
 
 #include "../connection.h"
 #include "../config.h"
-#include "../debug.h"
 #include "psp2/kernel/threadmgr/thread.h"
 #include "psp2common/types.h"
 #include "vita.h"
@@ -43,7 +44,9 @@
 
 #include "touchabsolute.h"
 #include "shortcuts.h"
+#include "motion.h"
 #include "../connection_overlay.h"
+#include "../gui/ui_stream_overlay.h"
 
 #include <Limelight.h>
 
@@ -68,7 +71,7 @@ struct mapping map = {0};
 SceFQuaternion deviceQuat_old = {0.0f, 0.0f, 0.0f, 0.0f};
 
 typedef struct input_data {
-    short button;
+    int32_t button;
     short lx;
     short ly;
     short rx;
@@ -84,7 +87,8 @@ static inline void update_touch_points();
 
 double mouse_multiplier;
 
-#define PSBTN_DOUBLETAP_DELAY 250000 // 100ms
+#define PSBTN_DOUBLETAP_DELAY 250000 // 250 ms
+#define PSBTN_GUIDE_PULSE_DELAY 50000 // 50 ms
 
 #define MOUSE_ACTION_DELAY 100000 // 100ms
 #define MOTION_ACTION_DELAY 200000 // 200ms
@@ -154,6 +158,14 @@ inline void move_wheel(TouchData old, TouchData cur) {
 }
 
 SceCtrlData pad, pad_old;
+static SceCtrlData shortcut_pad_old;
+/*
+ * Closing the local stream menu must not turn its closing X/O/START/chord
+ * into a fresh remote button press on the following 2 ms input tick. Keep
+ * this latch across stream reconnects so a button held through reconnect is
+ * still consumed when the new virtual controller arrives.
+ */
+static bool suppress_remote_input_until_release = false;
 TouchData touch;
 TouchData touch_old, swipe;
 SceTouchData front, back;
@@ -185,8 +197,15 @@ static int HORIZONTAL;
 Section BACK_SECTIONS[4];
 Section FRONT_SECTIONS[4];
 
+static inline size_t touch_report_count(const SceTouchData *data) {
+  size_t count = data->reportNum;
+  size_t capacity = sizeof(data->report) / sizeof(data->report[0]);
+  return count < capacity ? count : capacity;
+}
+
 inline uint8_t read_backscreen() {
-  for (int i = 0; i < back.reportNum; i++) {
+  size_t report_count = touch_report_count(&back);
+  for (size_t i = 0; i < report_count; i++) {
     int x = lerp(back.report[i].x, 1919, WIDTH);
     int y = lerp(back.report[i].y, 1087, HEIGHT);
 
@@ -224,18 +243,24 @@ inline uint8_t read_backscreen() {
 
 // Nueva función: solo actualiza touch.points y touch.finger
 static inline void update_touch_points() {
-  touch.finger = 0;
-  for (int i = 0; i < front.reportNum; i++) {
+  size_t report_count = touch_report_count(&front);
+  size_t point_capacity = sizeof(touch.points) / sizeof(touch.points[0]);
+  if (report_count > point_capacity) {
+    report_count = point_capacity;
+  }
+
+  for (size_t i = 0; i < report_count; i++) {
     int x = lerp(front.report[i].x, 1919, WIDTH);
     int y = lerp(front.report[i].y, 1087, HEIGHT);
-    touch.points[touch.finger].x = x;
-    touch.points[touch.finger].y = y;
-    touch.finger += 1;
+    touch.points[i].x = x;
+    touch.points[i].y = y;
   }
+  touch.finger = (short)report_count;
 }
 
 inline uint8_t read_frontscreen() {
-  for (int i = 0; i < front.reportNum; i++) {
+  size_t report_count = touch_report_count(&front);
+  for (size_t i = 0; i < report_count; i++) {
     int x = lerp(front.report[i].x, 1919, WIDTH);
     int y = lerp(front.report[i].y, 1087, HEIGHT);
 
@@ -356,7 +381,7 @@ inline void special(uint32_t defined, uint32_t pressed, uint32_t old_pressed) {
         // Enviar frame vacío al host para limpiar estado
         LiSendMultiControllerEvent(0, 1, 0, 0, 0, 0, 0, 0, 0);
         if (dev_val == INPUT_SPECIAL_KEY_PAUSE) {
-          connection_minimize();
+          stream_overlay_open();
           // Limpiar input físico DESPUÉS de overlays/eventos modales
           memset(&curr, 0, sizeof(input_data));
           curr.lt = 0;
@@ -426,9 +451,6 @@ float QuatLength(SceFQuaternion v1, SceFQuaternion v2) {
 }
 
 inline void check_for_double_click(input_data *curr) {
-//can uncomment this if I ever need to debug this
-//#define DOUBLETAP_DEBUG
-
   uint64_t current_time = sceKernelGetSystemTimeWide();
   uint32_t doubleclick_step_time = 0;
   if (config.double_tap_sprint_step_time) {
@@ -437,50 +459,25 @@ inline void check_for_double_click(input_data *curr) {
 
 //Condition 1: Y is maximum
   if (curr->ly < Y_MAXIMIUM_DEADZONE && !dc_tracker.y_max_once && !dc_tracker.currently_sprinting) {
-    #ifdef DOUBLETAP_DEBUG
-    vita_debug_log("Condition one triggered, current Y: %d", curr.ly);
-    #endif
     dc_tracker.y_max_once = true;  
     dc_tracker.y_max_once_time = current_time;
-    #ifdef DOUBLETAP_DEBUG
-    vita_debug_log("Stamping y_max_once_time at: %llu", dc_tracker.y_max_once_time);
-    #endif
   }
 
   //Condition 2: Y is minimum and less than doubleclicksteptime ms has passed
   if (dc_tracker.y_max_once && curr->ly > Y_MINIMUM_DEADZONE && !dc_tracker.returned_to_center && !dc_tracker.currently_sprinting) {
-    #ifdef DOUBLETAP_DEBUG
-    vita_debug_log("Condition two triggered, current Y: %d", curr.ly);
-    #endif
     if ((current_time - dc_tracker.y_max_once_time) < doubleclick_step_time) {
-      #ifdef DOUBLETAP_DEBUG
-      vita_debug_log("Condition two: Y max once was less than step time, delta: %llu", current_time-dc_tracker.y_max_once_time);
-      #endif
       dc_tracker.returned_to_center = true;
       dc_tracker.returned_to_center_time = current_time;
-      #ifdef DOUBLETAP_DEBUG
-      vita_debug_log("Condition two: Stamping returned_to_center_time at: %llu", dc_tracker.returned_to_center_time);
-      #endif
     } else {
-      #ifdef DOUBLETAP_DEBUG
-      vita_debug_log("Condition two: Y Max once was more than step time, delta: %llu", current_time-dc_tracker.y_max_once_time);
-      #endif
       dc_tracker.y_max_once = false;
     }
   }
 
   //Condition 3: Y is maximium and condition 2 passed
   if (dc_tracker.returned_to_center && curr->ly < Y_MAXIMIUM_DEADZONE && !dc_tracker.currently_sprinting) {
-    #ifdef DOUBLETAP_DEBUG
-    vita_debug_log("Condition three triggered, current Y: %d", curr.ly);
-    #endif
     dc_tracker.y_max_once = false;
     dc_tracker.returned_to_center = false;
     if ((current_time - dc_tracker.returned_to_center_time) < doubleclick_step_time) {
-      #ifdef DOUBLETAP_DEBUG
-      vita_debug_log("Condition three: return to center was less than step time, delta: %llu", current_time - dc_tracker.returned_to_center_time);
-      vita_debug_log("Should be sprinting");
-      #endif
       dc_tracker.currently_sprinting = true;
     }
   }
@@ -499,10 +496,6 @@ inline void check_for_double_click(input_data *curr) {
         dc_tracker.sprinting_returned_center = false;
       }
     }
-    //Mark that we've returned to center
-    #ifdef DOUBLETAP_DEBUG
-    vita_debug_log("We stopped sprinting");
-    #endif
     dc_tracker.currently_sprinting = false;
 
   } else {
@@ -555,48 +548,149 @@ void unlock_psbutton() {
   }
 }
 
-SceUInt64 psbutton_pressed_time = 0;
+typedef enum psbutton_state {
+  PSBUTTON_STATE_IDLE = 0,
+  PSBUTTON_STATE_FIRST_DOWN,
+  PSBUTTON_STATE_FIRST_UP,
+  PSBUTTON_STATE_GUIDE_HELD,
+  PSBUTTON_STATE_GUIDE_PULSE,
+  PSBUTTON_STATE_LOCAL_HELD,
+  PSBUTTON_STATE_ESCAPE_RELEASE
+} psbutton_state;
+
+static psbutton_state current_psbutton_state = PSBUTTON_STATE_IDLE;
+static SceUInt64 psbutton_deadline = 0;
+static SceUInt64 psbutton_last_release = 0;
+
+static void reset_psbutton_state() {
+  current_psbutton_state = PSBUTTON_STATE_IDLE;
+  psbutton_deadline = 0;
+  psbutton_last_release = 0;
+}
+
+static void begin_psbutton_escape(SceUInt64 time) {
+  unlock_psbutton();
+  current_psbutton_state = PSBUTTON_STATE_ESCAPE_RELEASE;
+  psbutton_deadline = time + PSBTN_DOUBLETAP_DELAY;
+  psbutton_last_release = 0;
+}
+
 void handle_psbutton() {
   SceUInt64 time = sceKernelGetSystemTimeWide();
+  bool pressed = is_pressed(SCE_CTRL_PSBUTTON | INPUT_TYPE_GAMEPAD) != 0;
 
-  if(!config.enable_psbutton_capture) {
-    if(psbutton_locked)
-      unlock_psbutton();
+  if (config.psbutton_mode == PSBUTTON_MODE_SYSTEM) {
+    reset_psbutton_state();
+    unlock_psbutton();
     return;
   }
 
-  if(is_pressed(SCE_CTRL_PSBUTTON | INPUT_TYPE_GAMEPAD)) {
-    if(!is_old_pressed(SCE_CTRL_PSBUTTON | INPUT_TYPE_GAMEPAD)) {
-      if(time - psbutton_pressed_time < PSBTN_DOUBLETAP_DELAY)
-        unlock_psbutton();
-      else
-        special(SPECIAL_FLAG | INPUT_TYPE_GAMEPAD, 1, 0);
-    }
-    else {
-      if(psbutton_locked)
-        special(SPECIAL_FLAG | INPUT_TYPE_GAMEPAD, 1, 1);
-      else
-        special(SPECIAL_FLAG | INPUT_TYPE_GAMEPAD, 0, 1);
-    }
-
-    psbutton_pressed_time = time;
-  } else {
-    if(is_old_pressed(SCE_CTRL_PSBUTTON | INPUT_TYPE_GAMEPAD))
-      special(SPECIAL_FLAG | INPUT_TYPE_GAMEPAD, 0, 1);
-
-    if(!psbutton_locked && time - psbutton_pressed_time > PSBTN_DOUBLETAP_DELAY)
+  if (current_psbutton_state == PSBUTTON_STATE_ESCAPE_RELEASE) {
+    if (pressed) {
+      // Keep the Vita shell unlocked until the second press has been released.
+      psbutton_deadline = time + PSBTN_DOUBLETAP_DELAY;
+    } else if (time >= psbutton_deadline) {
       lock_psbutton();
+      reset_psbutton_state();
+    }
+    return;
+  }
+
+  if (!psbutton_locked) {
+    lock_psbutton();
+  }
+
+  if (config.psbutton_mode == PSBUTTON_MODE_IMMEDIATE_GUIDE) {
+    if (current_psbutton_state == PSBUTTON_STATE_GUIDE_HELD) {
+      if (pressed) {
+        special(SPECIAL_FLAG | INPUT_TYPE_GAMEPAD, 1, 1);
+      } else {
+        current_psbutton_state = PSBUTTON_STATE_IDLE;
+        psbutton_last_release = time;
+      }
+    } else if (pressed) {
+      if (psbutton_last_release != 0 &&
+          time - psbutton_last_release < PSBTN_DOUBLETAP_DELAY) {
+        begin_psbutton_escape(time);
+      } else {
+        current_psbutton_state = PSBUTTON_STATE_GUIDE_HELD;
+        special(SPECIAL_FLAG | INPUT_TYPE_GAMEPAD, 1, 0);
+      }
+    }
+    return;
+  }
+
+  switch (current_psbutton_state) {
+    case PSBUTTON_STATE_IDLE:
+      if (pressed) {
+        current_psbutton_state = PSBUTTON_STATE_FIRST_DOWN;
+        psbutton_deadline = time + PSBTN_DOUBLETAP_DELAY;
+      }
+      break;
+    case PSBUTTON_STATE_FIRST_DOWN:
+      if (!pressed) {
+        current_psbutton_state = PSBUTTON_STATE_FIRST_UP;
+        psbutton_deadline = time + PSBTN_DOUBLETAP_DELAY;
+      } else if (time >= psbutton_deadline) {
+        if (config.psbutton_mode == PSBUTTON_MODE_SAFE_GUIDE) {
+          current_psbutton_state = PSBUTTON_STATE_GUIDE_HELD;
+          special(SPECIAL_FLAG | INPUT_TYPE_GAMEPAD, 1, 0);
+        } else {
+          current_psbutton_state = PSBUTTON_STATE_LOCAL_HELD;
+        }
+      }
+      break;
+    case PSBUTTON_STATE_FIRST_UP:
+      if (pressed && time < psbutton_deadline) {
+        begin_psbutton_escape(time);
+      } else if (time >= psbutton_deadline) {
+        // A short single tap becomes a brief Guide pulse only in Safe Guide.
+        // Local double-tap intentionally discards every single PS press.
+        if (config.psbutton_mode == PSBUTTON_MODE_SAFE_GUIDE) {
+          special(SPECIAL_FLAG | INPUT_TYPE_GAMEPAD, 1, 0);
+          current_psbutton_state = PSBUTTON_STATE_GUIDE_PULSE;
+          psbutton_deadline = time + PSBTN_GUIDE_PULSE_DELAY;
+          break;
+        }
+        current_psbutton_state = PSBUTTON_STATE_IDLE;
+      }
+      break;
+    case PSBUTTON_STATE_GUIDE_HELD:
+      if (pressed) {
+        special(SPECIAL_FLAG | INPUT_TYPE_GAMEPAD, 1, 1);
+      } else {
+        current_psbutton_state = PSBUTTON_STATE_IDLE;
+      }
+      break;
+    case PSBUTTON_STATE_GUIDE_PULSE:
+      if (time < psbutton_deadline) {
+        special(SPECIAL_FLAG | INPUT_TYPE_GAMEPAD, 1, 1);
+      } else {
+        current_psbutton_state = PSBUTTON_STATE_IDLE;
+      }
+      break;
+    case PSBUTTON_STATE_LOCAL_HELD:
+      if (!pressed) {
+        current_psbutton_state = PSBUTTON_STATE_IDLE;
+      }
+      break;
+    case PSBUTTON_STATE_ESCAPE_RELEASE:
+      // Handled before mode dispatch.
+      break;
   }
 }
 
 bool in_front_touchzone() {
-  for (int i = 0; i < touch.finger; i++) {
-    int x = touch.points[i].x;
-    int y = touch.points[i].y;
-    for (int s = 0; s < 4; s++) {
-      if (has_specialkey(s) && IN_SECTION(FRONT_SECTIONS[s], x, y)) {
-        return true;
-      }
+  static const uint16_t touchzone_flags[] = {
+    TOUCHSEC_SPECIAL_NW,
+    TOUCHSEC_SPECIAL_NE,
+    TOUCHSEC_SPECIAL_SW,
+    TOUCHSEC_SPECIAL_SE
+  };
+
+  for (size_t i = 0; i < sizeof(touchzone_flags) / sizeof(touchzone_flags[0]); i++) {
+    if (has_specialkey((int)i) && (touch.button & touchzone_flags[i])) {
+      return true;
     }
   }
 
@@ -628,6 +722,7 @@ void process_buttons() {
   curr.button |= is_pressed(map.btn_dpad_right) ? RIGHT_FLAG  : 0;
   curr.button |= is_pressed(map.btn_start)      ? PLAY_FLAG   : 0;
   curr.button |= is_pressed(map.btn_select)     ? BACK_FLAG   : 0;
+  curr.button |= is_pressed(map.btn_mode)       ? SPECIAL_FLAG : 0;
   curr.button |= is_pressed(map.btn_north)      ? Y_FLAG      : 0;
   curr.button |= is_pressed(map.btn_east)       ? B_FLAG      : 0;
   curr.button |= is_pressed(map.btn_south)      ? A_FLAG      : 0;
@@ -642,63 +737,67 @@ void process_buttons() {
 }
 
 void process_triggers() {
+  short left_trigger = read_analog(map.btn_tl);
+  short right_trigger = read_analog(map.btn_tr);
+
   // Swap L1<=>L2 y R1<=>R2 correctamente
   if (swap_shoulder_buttons) {
     // Físicos: L1 manda L2 (analógico), rear touch L2 manda L1 (digital)
-    if (is_pressed(map.btn_thumbl)) {
-      curr.lt = 0xff; // L1 físico activa L2 analógico
-    }
-    if (is_pressed(map.btn_tl)) {
+    curr.lt = is_pressed(map.btn_thumbl) ? 0xff : 0;
+    if (left_trigger != 0) {
       curr.button |= LB_FLAG; // rear touch L2 activa L1 digital
-    }
-    if (!is_pressed(map.btn_tl)) {
+    } else {
       curr.button &= ~LB_FLAG;
     }
-    if (!is_pressed(map.btn_thumbl)) {
-      curr.lt = 0;
-    }
     // Físicos: R1 manda R2 (analógico), rear touch R2 manda R1 (digital)
-    if (is_pressed(map.btn_thumbr)) {
-      curr.rt = 0xff; // R1 físico activa R2 analógico
-    }
-    if (is_pressed(map.btn_tr)) {
+    curr.rt = is_pressed(map.btn_thumbr) ? 0xff : 0;
+    if (right_trigger != 0) {
       curr.button |= RB_FLAG; // rear touch R2 activa R1 digital
-    }
-    if (!is_pressed(map.btn_tr)) {
+    } else {
       curr.button &= ~RB_FLAG;
-    }
-    if (!is_pressed(map.btn_thumbr)) {
-      curr.rt = 0;
     }
   } else {
     // Físicos: L1 manda L1 (digital), L2 manda L2 (analógico)
     if (is_pressed(map.btn_thumbl)) {
       curr.button |= LB_FLAG;
     }
-    if (is_pressed(map.btn_tl)) {
-      curr.lt = 0xff;
-      // No modificar curr.button aquí
-    }
+    curr.lt = (char)left_trigger;
     // Físicos: R1 manda R1 (digital), R2 manda R2 (analógico)
     if (is_pressed(map.btn_thumbr)) {
       curr.button |= RB_FLAG;
     }
-    if (is_pressed(map.btn_tr)) {
-      curr.rt = 0xff;
-      // No modificar curr.button aquí
-    }
+    curr.rt = (char)right_trigger;
   }
 }
 
 extern bool keyboardsystem_is_open(void);
 
 void process_touch() {
+  static int processed_touchscreen_mode = -1;
+
+  if (processed_touchscreen_mode != config.touchscreen_mode) {
+    if (front_state == SCREEN_TAP) {
+      mouse_click(finger_count, false);
+    }
+    front_state = NO_TOUCH_ACTION;
+    finger_count = 0;
+    touchabsolute_enable(config.touchscreen_mode == 2);
+    processed_touchscreen_mode = config.touchscreen_mode;
+  }
+
   if (config.enable_double_tap_sprint) {
     check_for_double_click(&curr);
   }
 
-  if(in_front_touchzone())
+  if (in_front_touchzone()) {
+    if (front_state == SCREEN_TAP) {
+      mouse_click(finger_count, false);
+    }
+    front_state = NO_TOUCH_ACTION;
+    finger_count = 0;
+    touchabsolute_release_all();
     return;
+  }
 
   // --- PROCESAMIENTO DE MODOS TÁCTILES EXCLUSIVOS ---
 
@@ -775,6 +874,8 @@ inline void vitainput_process(void) {
   memset(&curr, 0, sizeof(input_data));
   sceCtrlSetSamplingModeExt(SCE_CTRL_MODE_ANALOG_WIDE);
   sceCtrlPeekBufferPositiveExt2(controller_port, &pad, 1);
+  SceCtrlData raw_pad;
+  memcpy(&raw_pad, &pad, sizeof(SceCtrlData));
   sceTouchPeek(SCE_TOUCH_PORT_FRONT, &front, 1);
   sceTouchPeek(SCE_TOUCH_PORT_BACK, &back, 1);
   // Siempre actualizar los puntos táctiles del frente
@@ -782,12 +883,33 @@ inline void vitainput_process(void) {
   // Siempre procesar las esquinas del back (para compatibilidad o futuros usos)
   read_backscreen();
 
+  if (suppress_remote_input_until_release) {
+    memcpy(&pad_old, &raw_pad, sizeof(SceCtrlData));
+    memcpy(&shortcut_pad_old, &raw_pad, sizeof(SceCtrlData));
+    memset(&old, 0, sizeof(input_data));
+    if (raw_pad.buttons == 0) {
+      suppress_remote_input_until_release = false;
+      reset_physical_shortcuts();
+    }
+    return;
+  }
+
   sceRtcGetCurrentTick(&current);
-  // analogs: solo asignar si no están activos por rear touch
-  if (!swap_shoulder_buttons && !is_pressed(map.btn_tl2))
-    curr.lt = read_analog(map.btn_tl); // l2
-  if (!swap_shoulder_buttons && !is_pressed(map.btn_tr2))
-    curr.rt = read_analog(map.btn_tr); // r2
+  bool overlay_was_open = stream_overlay_is_open();
+  if (!overlay_was_open) {
+    process_physical_shortcuts(&pad, &shortcut_pad_old);
+    overlay_was_open = stream_overlay_is_open();
+  }
+  memcpy(&shortcut_pad_old, &raw_pad, sizeof(SceCtrlData));
+  if (overlay_was_open) {
+    stream_overlay_handle_input(&pad, &pad_old);
+    if (!stream_overlay_is_open()) {
+      suppress_remote_input_until_release = true;
+    }
+    memcpy(&pad_old, &pad, sizeof(SceCtrlData));
+    memset(&old, 0, sizeof(input_data));
+    return;
+  }
   if (config.enable_front_touchzones) {
     process_touchzones();
   }
@@ -795,19 +917,20 @@ inline void vitainput_process(void) {
 
   process_buttons();
   handle_psbutton();
+  if (stream_overlay_is_open()) {
+    memcpy(&pad_old, &pad, sizeof(SceCtrlData));
+    return;
+  }
   process_triggers();
 
   // --- GESTIÓN DE LIMPIEZA DE INPUT AL ABRIR/CERRAR TECLADO VIRTUAL Y PAUSA ---
   static bool keyboard_overlay_active = false;
-  static bool pause_overlay_active = false;
   static SceCtrlData pad_snapshot = {0};
   static input_data curr_snapshot = {0};
 
   // Hook para saber si el teclado virtual está abierto
 
-  bool shortcut_triggered = process_physical_shortcuts(&pad, &pad_old);
   bool keyboard_now = keyboardsystem_is_open();
-  bool pause_now = pause_overlay_is_open();
 
   // --- BLOQUEO Y LIMPIEZA DE INPUT AL ABRIR TECLADO VIRTUAL ---
   if (keyboard_now && !keyboard_overlay_active) {
@@ -820,40 +943,12 @@ inline void vitainput_process(void) {
     curr.lx = 128; curr.ly = 128; curr.rx = 128; curr.ry = 128;
     curr.lt = 0;
     curr.rt = 0;
-    vita_debug_log("[VITA.C] Overlay activo: ABRIR teclado, input bloqueado (sticks centrados, sin enviar frame vacío)");
     keyboard_overlay_active = true;
   } else if (!keyboard_now && keyboard_overlay_active) {
-    vita_debug_log("[VITA.C] Teclado virtual CERRADO: restaurando snapshot (sin enviar frame vacío)");
     memcpy(&pad, &pad_snapshot, sizeof(SceCtrlData));
     memcpy(&curr, &curr_snapshot, sizeof(input_data));
     keyboard_overlay_active = false;
   } else if (keyboard_overlay_active) {
-    memset(&pad, 0, sizeof(SceCtrlData));
-    memset(&curr, 0, sizeof(input_data));
-    pad.lx = 128; pad.ly = 128; pad.rx = 128; pad.ry = 128;
-    curr.lx = 128; curr.ly = 128; curr.rx = 128; curr.ry = 128;
-    curr.lt = 0;
-    curr.rt = 0;
-  }
-
-  // --- BLOQUEO Y LIMPIEZA DE INPUT AL ABRIR/CERRAR MENÚ DE PAUSA ---
-  if (pause_now && !pause_overlay_active) {
-    memcpy(&pad_snapshot, &pad, sizeof(SceCtrlData));
-    memcpy(&curr_snapshot, &curr, sizeof(input_data));
-    memset(&pad, 0, sizeof(SceCtrlData));
-    memset(&curr, 0, sizeof(input_data));
-    pad.lx = 128; pad.ly = 128; pad.rx = 128; pad.ry = 128;
-    curr.lx = 128; curr.ly = 128; curr.rx = 128; curr.ry = 128;
-    curr.lt = 0;
-    curr.rt = 0;
-    vita_debug_log("[VITA.C] Overlay activo: ABRIR menú de pausa, input bloqueado (sticks centrados, sin enviar frame vacío)");
-    pause_overlay_active = true;
-  } else if (!pause_now && pause_overlay_active) {
-    vita_debug_log("[VITA.C] Menú de pausa CERRADO: restaurando snapshot (sin enviar frame vacío)");
-    memcpy(&pad, &pad_snapshot, sizeof(SceCtrlData));
-    memcpy(&curr, &curr_snapshot, sizeof(input_data));
-    pause_overlay_active = false;
-  } else if (pause_overlay_active) {
     memset(&pad, 0, sizeof(SceCtrlData));
     memset(&curr, 0, sizeof(input_data));
     pad.lx = 128; pad.ly = 128; pad.rx = 128; pad.ry = 128;
@@ -885,12 +980,143 @@ inline void vitainput_process(void) {
 }
 
 static uint8_t active_input_thread = 0;
+static pthread_mutex_t input_process_mutex;
+static bool input_mutex_initialized = false;
+
+static void update_front_sections(const CONFIGURATION *input_config) {
+  FRONT_SECTIONS[0].left.x = input_config->special_keys.offset;
+  FRONT_SECTIONS[0].left.y = input_config->special_keys.offset;
+  FRONT_SECTIONS[0].right.x =
+      input_config->special_keys.offset + input_config->special_keys.size;
+  FRONT_SECTIONS[0].right.y =
+      input_config->special_keys.offset + input_config->special_keys.size;
+
+  FRONT_SECTIONS[1].left.x =
+      WIDTH - input_config->special_keys.offset -
+      input_config->special_keys.size;
+  FRONT_SECTIONS[1].left.y = input_config->special_keys.offset;
+  FRONT_SECTIONS[1].right.x =
+      WIDTH - input_config->special_keys.offset;
+  FRONT_SECTIONS[1].right.y =
+      input_config->special_keys.offset + input_config->special_keys.size;
+
+  FRONT_SECTIONS[2].left.x = input_config->special_keys.offset;
+  FRONT_SECTIONS[2].left.y =
+      HEIGHT - input_config->special_keys.offset -
+      input_config->special_keys.size;
+  FRONT_SECTIONS[2].right.x =
+      input_config->special_keys.offset + input_config->special_keys.size;
+  FRONT_SECTIONS[2].right.y =
+      HEIGHT - input_config->special_keys.offset;
+
+  FRONT_SECTIONS[3].left.x =
+      WIDTH - input_config->special_keys.offset -
+      input_config->special_keys.size;
+  FRONT_SECTIONS[3].left.y =
+      HEIGHT - input_config->special_keys.offset -
+      input_config->special_keys.size;
+  FRONT_SECTIONS[3].right.x =
+      WIDTH - input_config->special_keys.offset;
+  FRONT_SECTIONS[3].right.y =
+      HEIGHT - input_config->special_keys.offset;
+}
+
+void vitainput_default_mapping(struct mapping *target, uint32_t model) {
+  if (!target) {
+    return;
+  }
+
+  memset(target, 0, sizeof(*target));
+  target->abs_x = LEFTX | INPUT_TYPE_ANALOG;
+  target->abs_y = LEFTY | INPUT_TYPE_ANALOG;
+  target->abs_rx = RIGHTX | INPUT_TYPE_ANALOG;
+  target->abs_ry = RIGHTY | INPUT_TYPE_ANALOG;
+  target->abs_z = UINT32_MAX;
+  target->abs_rz = UINT32_MAX;
+  target->abs_dpad_x = -1;
+  target->abs_dpad_y = -1;
+
+  target->btn_dpad_up = SCE_CTRL_UP | INPUT_TYPE_GAMEPAD;
+  target->btn_dpad_down = SCE_CTRL_DOWN | INPUT_TYPE_GAMEPAD;
+  target->btn_dpad_left = SCE_CTRL_LEFT | INPUT_TYPE_GAMEPAD;
+  target->btn_dpad_right = SCE_CTRL_RIGHT | INPUT_TYPE_GAMEPAD;
+  target->btn_south = SCE_CTRL_CROSS | INPUT_TYPE_GAMEPAD;
+  target->btn_east = SCE_CTRL_CIRCLE | INPUT_TYPE_GAMEPAD;
+  target->btn_north = SCE_CTRL_TRIANGLE | INPUT_TYPE_GAMEPAD;
+  target->btn_west = SCE_CTRL_SQUARE | INPUT_TYPE_GAMEPAD;
+
+  target->btn_select = SCE_CTRL_SELECT | INPUT_TYPE_GAMEPAD;
+  target->btn_start = SCE_CTRL_START | INPUT_TYPE_GAMEPAD;
+  target->btn_mode = 0;
+
+  target->btn_thumbl = SCE_CTRL_L1 | INPUT_TYPE_GAMEPAD;
+  target->btn_thumbr = SCE_CTRL_R1 | INPUT_TYPE_GAMEPAD;
+
+  if (model == SCE_KERNEL_MODEL_VITATV) {
+    target->btn_tl = LEFT_TRIGGER | INPUT_TYPE_ANALOG;
+    target->btn_tr = RIGHT_TRIGGER | INPUT_TYPE_ANALOG;
+    target->btn_tl2 = SCE_CTRL_L3 | INPUT_TYPE_GAMEPAD;
+    target->btn_tr2 = SCE_CTRL_R3 | INPUT_TYPE_GAMEPAD;
+  } else {
+    target->btn_tl =
+        TOUCHSEC_NORTHWEST | INPUT_TYPE_TOUCHSCREEN;
+    target->btn_tr =
+        TOUCHSEC_NORTHEAST | INPUT_TYPE_TOUCHSCREEN;
+    target->btn_tl2 =
+        TOUCHSEC_SOUTHWEST | INPUT_TYPE_TOUCHSCREEN;
+    target->btn_tr2 =
+        TOUCHSEC_SOUTHEAST | INPUT_TYPE_TOUCHSCREEN;
+  }
+}
+
+void vitainput_get_mapping(struct mapping *target) {
+  if (!target) {
+    return;
+  }
+
+  if (input_mutex_initialized) {
+    pthread_mutex_lock(&input_process_mutex);
+  }
+  *target = map;
+  if (input_mutex_initialized) {
+    pthread_mutex_unlock(&input_process_mutex);
+  }
+}
+
+void vitainput_apply_mapping(const struct mapping *source) {
+  if (!source) {
+    return;
+  }
+
+  if (input_mutex_initialized) {
+    pthread_mutex_lock(&input_process_mutex);
+  }
+  map = *source;
+  if (input_mutex_initialized) {
+    pthread_mutex_unlock(&input_process_mutex);
+  }
+}
+
+void vitainput_refresh_touchzones(void) {
+  CONFIGURATION sanitized = config;
+  config_sanitize(&sanitized);
+
+  if (input_mutex_initialized) {
+    pthread_mutex_lock(&input_process_mutex);
+  }
+  update_front_sections(&sanitized);
+  if (input_mutex_initialized) {
+    pthread_mutex_unlock(&input_process_mutex);
+  }
+}
 
 int vitainput_thread(SceSize args, void *argp) {
   while (1) {
+    pthread_mutex_lock(&input_process_mutex);
     if (active_input_thread) {
       vitainput_process();
     }
+    pthread_mutex_unlock(&input_process_mutex);
 
     sceKernelDelayThread(2000); // 2 ms
   }
@@ -903,56 +1129,51 @@ bool vitainput_init() {
   sceTouchSetSamplingState(SCE_TOUCH_PORT_FRONT, SCE_TOUCH_SAMPLING_STATE_START);
   sceTouchSetSamplingState(SCE_TOUCH_PORT_BACK, SCE_TOUCH_SAMPLING_STATE_START);
 
+  if (pthread_mutex_init(&input_process_mutex, NULL) != 0) {
+    return false;
+  }
+  input_mutex_initialized = true;
+
   SceUID thid = sceKernelCreateThread("vitainput_thread", vitainput_thread, 0, 0x40000, 0, 0, NULL);
   if (thid >= 0) {
-    sceKernelStartThread(thid, 0, NULL);
-    return true;
+    if (sceKernelStartThread(thid, 0, NULL) >= 0) {
+      return true;
+    }
+    sceKernelDeleteThread(thid);
   }
 
+  pthread_mutex_destroy(&input_process_mutex);
+  input_mutex_initialized = false;
   return false;
 }
 
 void vitainput_config(CONFIGURATION config) {
+  /*
+   * Callers normally pass the already-validated global configuration, but
+   * validate this local copy too so input rectangles are safe even if a
+   * settings path invokes us before saving.
+   */
+  config_sanitize(&config);
+
   // Sincroniza el modo swap global con la configuración cargada
   swap_shoulder_buttons = config.swap_shoulder_buttons;
-  map.abs_x           = LEFTX               | INPUT_TYPE_ANALOG;
-  map.abs_y           = LEFTY               | INPUT_TYPE_ANALOG;
-  map.abs_rx          = RIGHTX              | INPUT_TYPE_ANALOG;
-  map.abs_ry          = RIGHTY              | INPUT_TYPE_ANALOG;
+  struct mapping configured_mapping;
+  vitainput_default_mapping(&configured_mapping, config.model);
 
-  map.btn_dpad_up     = SCE_CTRL_UP         | INPUT_TYPE_GAMEPAD;
-  map.btn_dpad_down   = SCE_CTRL_DOWN       | INPUT_TYPE_GAMEPAD;
-  map.btn_dpad_left   = SCE_CTRL_LEFT       | INPUT_TYPE_GAMEPAD;
-  map.btn_dpad_right  = SCE_CTRL_RIGHT      | INPUT_TYPE_GAMEPAD;
-  map.btn_south       = SCE_CTRL_CROSS      | INPUT_TYPE_GAMEPAD;
-  map.btn_east        = SCE_CTRL_CIRCLE     | INPUT_TYPE_GAMEPAD;
-  map.btn_north       = SCE_CTRL_TRIANGLE   | INPUT_TYPE_GAMEPAD;
-  map.btn_west        = SCE_CTRL_SQUARE     | INPUT_TYPE_GAMEPAD;
-
-  map.btn_select      = SCE_CTRL_SELECT     | INPUT_TYPE_GAMEPAD;
-  map.btn_start       = SCE_CTRL_START      | INPUT_TYPE_GAMEPAD;
-
-  map.btn_thumbl      = SCE_CTRL_L1         | INPUT_TYPE_GAMEPAD;
-  map.btn_thumbr      = SCE_CTRL_R1         | INPUT_TYPE_GAMEPAD;
-
-  if (config.model == SCE_KERNEL_MODEL_VITATV) {
-    map.btn_tl        = LEFT_TRIGGER        | INPUT_TYPE_ANALOG;
-    map.btn_tr        = RIGHT_TRIGGER       | INPUT_TYPE_ANALOG;
-    map.btn_tl2       = SCE_CTRL_L3         | INPUT_TYPE_GAMEPAD;
-    map.btn_tr2       = SCE_CTRL_R3         | INPUT_TYPE_GAMEPAD;
-  } else {
-    map.btn_tl        = TOUCHSEC_NORTHWEST  | INPUT_TYPE_TOUCHSCREEN;
-    map.btn_tr        = TOUCHSEC_NORTHEAST  | INPUT_TYPE_TOUCHSCREEN;
-    map.btn_tl2       = TOUCHSEC_SOUTHWEST  | INPUT_TYPE_TOUCHSCREEN;
-    map.btn_tr2       = TOUCHSEC_SOUTHEAST  | INPUT_TYPE_TOUCHSCREEN;
+  if (config.mapping) {
+    char mapping_file_path[4096];
+    size_t key_dir_length = strlen(config.key_dir);
+    snprintf(mapping_file_path, sizeof(mapping_file_path), "%s%s%s",
+             config.key_dir,
+             key_dir_length > 0 &&
+                     config.key_dir[key_dir_length - 1] != '/'
+                 ? "/"
+                 : "",
+             config.mapping);
+    printf("Loading mapping at %s\n", mapping_file_path);
+    mapping_load(mapping_file_path, &configured_mapping);
   }
-
-    if (config.mapping) {
-        char mapping_file_path[256];
-        snprintf(mapping_file_path, sizeof(mapping_file_path), "%s/%s", config.key_dir, config.mapping);
-        printf("Loading mapping at %s\n", mapping_file_path);
-        mapping_load(mapping_file_path, &map);
-    }
+  vitainput_apply_mapping(&configured_mapping);
 
   controller_port = config.model == SCE_KERNEL_MODEL_VITATV ? 1 : 0;
 
@@ -981,37 +1202,27 @@ void vitainput_config(CONFIGURATION config) {
   BACK_SECTIONS[3].right.x = WIDTH - config.back_deadzone.right;
   BACK_SECTIONS[3].right.y = HEIGHT - config.back_deadzone.bottom;
 
-  FRONT_SECTIONS[0].left.x  = config.special_keys.offset;
-  FRONT_SECTIONS[0].left.y  = config.special_keys.offset;
-  FRONT_SECTIONS[0].right.x = config.special_keys.offset + config.special_keys.size;
-  FRONT_SECTIONS[0].right.y = config.special_keys.offset + config.special_keys.size;
-
-  FRONT_SECTIONS[1].left.x  = WIDTH - config.special_keys.offset - config.special_keys.size;
-  FRONT_SECTIONS[1].left.y  = config.special_keys.offset;
-  FRONT_SECTIONS[1].right.x = WIDTH - config.special_keys.offset;
-  FRONT_SECTIONS[1].right.y = config.special_keys.offset + config.special_keys.size;
-
-  FRONT_SECTIONS[2].left.x  = config.special_keys.offset;
-  FRONT_SECTIONS[2].left.y  = HEIGHT - config.special_keys.offset - config.special_keys.size;
-  FRONT_SECTIONS[2].right.x = config.special_keys.offset + config.special_keys.size;
-  FRONT_SECTIONS[2].right.y = HEIGHT - config.special_keys.offset;
-
-  FRONT_SECTIONS[3].left.x  = WIDTH - config.special_keys.offset - config.special_keys.size;
-  FRONT_SECTIONS[3].left.y  = HEIGHT - config.special_keys.offset - config.special_keys.size;
-  FRONT_SECTIONS[3].right.x = WIDTH - config.special_keys.offset;
-  FRONT_SECTIONS[3].right.y = HEIGHT - config.special_keys.offset;
+  if (input_mutex_initialized) {
+    pthread_mutex_lock(&input_process_mutex);
+  }
+  update_front_sections(&config);
+  if (input_mutex_initialized) {
+    pthread_mutex_unlock(&input_process_mutex);
+  }
 
   mouse_multiplier = 1 + (0.01 * config.mouse_acceleration);
 }
 
-extern bool active_motion_threads;
-
 void vitainput_start(void) {
+  pthread_mutex_lock(&input_process_mutex);
+  keyboardsystem_prepare_for_stream();
+  memset(&pad_old, 0, sizeof(pad_old));
+  memset(&shortcut_pad_old, 0, sizeof(shortcut_pad_old));
+  memset(&old, 0, sizeof(old));
+  reset_physical_shortcuts();
   uint16_t gamepadMask = 1;
-  uint32_t gamepadCapabilites = LI_CCAP_GYRO | LI_CCAP_BATTERY_STATE | LI_CCAP_ACCEL | LI_CCAP_TOUCHPAD;
-
+  uint16_t gamepadCapabilities = LI_CCAP_BATTERY_STATE;
   uint32_t gamepadSupportedButtonFlags = 0xffff;
-  gamepadSupportedButtonFlags |= TOUCHPAD_FLAG;
   gamepadSupportedButtonFlags |= MISC_FLAG;
 
   // Determinar tipo de control a enviar según config.controller_type
@@ -1023,19 +1234,58 @@ void vitainput_start(void) {
     case 4: controller_type = LI_CTYPE_UNKNOWN; break;
     default: controller_type = LI_CTYPE_PS; break;
   }
-  LiSendControllerArrivalEvent(0, gamepadMask, controller_type, gamepadSupportedButtonFlags, gamepadCapabilites);
+  // Keep Xbox mode strictly XInput-compatible. Sunshine's automatic controller
+  // selection promotes motion-capable clients to DS4, so gyro and touchpad are
+  // only advertised by the PlayStation profile that can represent them.
+  if (controller_type == LI_CTYPE_PS) {
+    if (config.enable_motion_controls) {
+      gamepadCapabilities |= LI_CCAP_GYRO | LI_CCAP_ACCEL;
+    }
+    if (config.touchscreen_mode == 1) {
+      gamepadCapabilities |= LI_CCAP_TOUCHPAD;
+      gamepadSupportedButtonFlags |= TOUCHPAD_FLAG;
+    }
+  }
 
-  LiSendControllerBatteryEvent(0, LI_BATTERY_STATE_FULL, 100);
+  vita_motion_begin_stream((gamepadCapabilities & (LI_CCAP_GYRO | LI_CCAP_ACCEL)) != 0);
+  LiSendControllerArrivalEvent(0, gamepadMask, controller_type, gamepadSupportedButtonFlags, gamepadCapabilities);
 
-  if(config.enable_psbutton_capture)
+  int battery_percent = scePowerGetBatteryLifePercent();
+  if (battery_percent < 0 || battery_percent > 100) {
+    LiSendControllerBatteryEvent(0, LI_BATTERY_STATE_UNKNOWN, LI_BATTERY_PERCENTAGE_UNKNOWN);
+  } else {
+    uint8_t battery_state = scePowerIsBatteryCharging()
+        ? LI_BATTERY_STATE_CHARGING
+        : (battery_percent == 100 ? LI_BATTERY_STATE_FULL : LI_BATTERY_STATE_DISCHARGING);
+    LiSendControllerBatteryEvent(0, battery_state, (uint8_t)battery_percent);
+  }
+
+  reset_psbutton_state();
+  if(config.psbutton_mode != PSBUTTON_MODE_SYSTEM)
     lock_psbutton();
 
   active_input_thread = true;
-  active_motion_threads = true;
+  pthread_mutex_unlock(&input_process_mutex);
 }
 
 void vitainput_stop(void) {
-  unlock_psbutton();
+  /*
+   * Close the blocking Vita IME before waiting for a worker tick that may be
+   * inside its update loop. Taking the mutex then guarantees the releases
+   * below occur after every in-flight input event.
+   */
+  keyboardsystem_close_keyboard();
+  pthread_mutex_lock(&input_process_mutex);
   active_input_thread = false;
-  active_motion_threads = false;
+  touchabsolute_release_all();
+  // Release all controls and remove the virtual pad while the connection is
+  // still alive. This prevents a held button surviving pause or disconnect.
+  LiSendMultiControllerEvent(0, 1, 0, 0, 0, 0, 0, 0, 0);
+  LiSendMultiControllerEvent(0, 0, 0, 0, 0, 0, 0, 0, 0);
+  memset(&old, 0, sizeof(old));
+  unlock_psbutton();
+  reset_psbutton_state();
+  reset_physical_shortcuts();
+  pthread_mutex_unlock(&input_process_mutex);
+  vita_motion_end_stream();
 }

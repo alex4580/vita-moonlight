@@ -5,6 +5,8 @@
 #include "guilib.h"
 #include "ime.h"
 #include "ui_settings.h"
+#include "ui_diagnostics.h"
+#include "ui_stream_overlay.h"
 
 #include "../connection.h"
 #include "../configuration.h"
@@ -32,6 +34,18 @@
 #include <psp2/ctrl.h>
 #include <psp2/io/stat.h>
 #include <vita2d.h>
+
+static void send_host_rescue_hotkey(int virtual_key) {
+  LiSendMultiControllerEvent(0, 1, 0, 0, 0, 0, 0, 0, 0);
+  LiSendKeyboardEvent(0x11, KEY_ACTION_DOWN, 0); // Control
+  LiSendKeyboardEvent(0x12, KEY_ACTION_DOWN, 0); // Alt
+  LiSendKeyboardEvent(0x10, KEY_ACTION_DOWN, 0); // Shift
+  LiSendKeyboardEvent(virtual_key, KEY_ACTION_DOWN, 0);
+  LiSendKeyboardEvent(virtual_key, KEY_ACTION_UP, 0);
+  LiSendKeyboardEvent(0x10, KEY_ACTION_UP, 0);
+  LiSendKeyboardEvent(0x12, KEY_ACTION_UP, 0);
+  LiSendKeyboardEvent(0x11, KEY_ACTION_UP, 0);
+}
 
 SERVER_DATA server;
 PAPP_LIST server_applist;
@@ -62,9 +76,17 @@ int get_app_name(PAPP_LIST list, int id, char *name) {
 
 void ui_connect_stream(int appId) {
   // TODO support force controller id
-  vita_debug_log("Running gs_start_app...");
+  vita_debug_event(
+      VITA_DEBUG_LEVEL_INFO, "stream.action",
+      "action=connect state=starting phase=app_start width=%d height=%d "
+      "fps=%d bitrate_kbps=%d",
+      config.stream.width, config.stream.height,
+      config.stream.fps, config.stream.bitrate);
   int ret = gs_start_app(&server, &config.stream, appId, config.sops, config.localaudio, 1);
   if (ret < 0) {
+    vita_debug_event(
+        VITA_DEBUG_LEVEL_ERROR, "stream.action",
+        "action=connect state=failed phase=app_start code=%d", ret);
     if (ret == GS_NOT_SUPPORTED_4K)
       display_error("Server doesn't support 4K\n");
     else if (ret == GS_NOT_SUPPORTED_MODE)
@@ -74,7 +96,9 @@ void ui_connect_stream(int appId) {
 
     return;
   }
-  vita_debug_log("App started.");
+  vita_debug_event(
+      VITA_DEBUG_LEVEL_INFO, "stream.action",
+      "action=connect state=ready phase=app_start");
 
   enum platform system = VITA;
   int drFlags = 0;
@@ -91,24 +115,35 @@ void ui_connect_stream(int appId) {
 
   // --- Ajuste para soporte Host Resolution: no modificar resolución si es -1 ---
   // Eliminados g_requested_width y g_requested_height, lógica simplificada
+  UiDiagnosticsReconnectSettings active_settings;
+  ui_diagnostics_capture_reconnect_settings(&active_settings);
   int orig_width = config.stream.width;
   int orig_height = config.stream.height;
   // Si se seleccionó una resolución específica, se mantiene; si es -1, se deja al host
   // (No se modifica config.stream.width/height aquí)
 
-  vita_debug_log("Running LiStartConnection...");
+  vita_debug_event(
+      VITA_DEBUG_LEVEL_INFO, "stream.action",
+      "action=connect state=starting phase=stream_start");
   ret = LiStartConnection(&server.serverInfo, &config.stream, &connection_callbacks,
                           video_callback, platform_get_audio(system),
                           NULL, drFlags, NULL, 0);
-  vita_debug_log("Connection started.");
 
   // Restaurar resolución real para el framebuffer/render
   config.stream.width = orig_width;
   config.stream.height = orig_height;
 
   if (ret == 0) {
+    vita_debug_event(
+        VITA_DEBUG_LEVEL_INFO, "stream.action",
+        "action=connect state=complete phase=stream_start");
+    ui_diagnostics_set_active_stream(&active_settings);
     server.currentGame = appId;
   } else {
+    vita_debug_event(
+        VITA_DEBUG_LEVEL_ERROR, "stream.action",
+        "action=connect state=failed phase=stream_start stage_id=%d code=%d",
+        connection_stage, ret);
     
     const char* connection_failed_stage_name = LiGetStageName(connection_stage);
 
@@ -164,9 +199,7 @@ int ui_connect_loop(int id, void *context, const input_data *input) {
       sprintf(pin, "%d%d%d%d",
               (uint32_t)rand() % 10, (uint32_t)rand() % 10, (uint32_t)rand() % 10, (uint32_t)rand() % 10);
       flash_message("Please enter the following PIN\non the target PC:\n\n%s", pin);
-      vita_debug_log("[UI] gs_pair: calling gs_pair at %u", (unsigned)time(NULL));
       ret = gs_pair(&server, &pin[0]);
-      vita_debug_log("[UI] gs_pair: returned ret=%d at %u", ret, (unsigned)time(NULL));
       if (ret == 0) {
         connection_paired();
         // After pairing, save server MAC into known device if present
@@ -177,17 +210,11 @@ int ui_connect_loop(int id, void *context, const input_data *input) {
           if (gs_get_server_mac(&server, mac, sizeof(mac)) == GS_OK && mac[0]) {
             strncpy(dev->mac, mac, 17);
             dev->mac[17] = '\0';
-            vita_debug_log("[PAIR] MAC obtenida y guardada en device.ini: %s for device %s", dev->mac, dev->name);
-          } else {
-            vita_debug_log("[PAIR] No se encontró MAC en serverinfo para %s", server.serverInfo.address);
           }
           save_device_info(dev);
-          vita_debug_log("[PAIR] After save_device_info(dev) - time: %u", (unsigned)time(NULL));
           // Notify user pairing succeeded: show a short message so the PIN dialog
           // (which was drawn earlier) is replaced by a success message.
           flash_message("Paired: %s", dev->name);
-        } else {
-          vita_debug_log("[PAIR] Dispositivo no encontrado para la IP %s al guardar MAC", server.serverInfo.address);
         }
         if (connection_terminate()) {
           display_error("Reconnect failed: %d", -2);
@@ -233,7 +260,107 @@ int ui_connect_loop(int id, void *context, const input_data *input) {
 
 //mainloop:
       while (connection_is_connected()) {
-        sceKernelDelayThread(500 * 1000);
+        int display_virtual_key = 0;
+        bool apply_display =
+            stream_overlay_take_apply_display_request(&display_virtual_key);
+        bool apply_input = stream_overlay_take_apply_input_request();
+        if (apply_display || apply_input) {
+          int reconnect_app = server.currentGame != 0
+              ? server.currentGame
+              : id;
+          if (apply_display) {
+            vita_debug_event(
+                VITA_DEBUG_LEVEL_INFO, "stream.action",
+                "action=reconnect state=requested reason=display_settings "
+                "width=%d height=%d "
+                "fps=%d",
+                config.stream.width, config.stream.height, config.stream.fps);
+
+            // Change the active VDD first, then resume the same Sunshine app
+            // so both the Windows desktop and encoder renegotiate to this
+            // mode.
+            send_host_rescue_hotkey(display_virtual_key);
+            sceKernelDelayThread(750 * 1000);
+          } else {
+            vita_debug_event(
+                VITA_DEBUG_LEVEL_INFO, "stream.action",
+                "action=reconnect state=requested reason=input_settings");
+          }
+          connection_terminate();
+          sceKernelDelayThread(500 * 1000);
+
+          ret = gs_refresh(&server);
+          if (ret != GS_OK) {
+            vita_debug_event(
+                VITA_DEBUG_LEVEL_ERROR, "stream.action",
+                "action=reconnect state=failed phase=refresh reason=%s code=%d",
+                apply_display ? "display_settings" : "input_settings", ret);
+            display_error(
+                "%s reconnect refresh failed: %d\n%s",
+                apply_display ? "Display" : "Input", ret, gs_error);
+            break;
+          }
+
+          if (connection_reset() != 0 || connection_paired() != 0) {
+            vita_debug_event(
+                VITA_DEBUG_LEVEL_ERROR, "stream.action",
+                "action=reconnect state=failed phase=state_reset reason=%s",
+                apply_display ? "display_settings" : "input_settings");
+            break;
+          }
+          vitapower_config(config);
+          vitainput_config(config);
+          ui_connect_stream(reconnect_app);
+          if (!connection_is_connected()) {
+            vita_debug_event(
+                VITA_DEBUG_LEVEL_ERROR, "stream.action",
+                "action=reconnect state=failed phase=stream_start reason=%s",
+                apply_display ? "display_settings" : "input_settings");
+            break;
+          }
+          vita_debug_event(
+              VITA_DEBUG_LEVEL_INFO, "stream.action",
+              "action=reconnect state=complete reason=%s",
+              apply_display ? "display_settings" : "input_settings");
+          continue;
+        }
+        if (stream_overlay_take_close_game_request()) {
+          vita_debug_event(
+              VITA_DEBUG_LEVEL_INFO, "stream.action",
+              "action=close_foreground_game state=requested");
+          send_host_rescue_hotkey(0x7B); // F12
+        }
+        if (stream_overlay_take_quit_app_request()) {
+          vita_debug_event(
+              VITA_DEBUG_LEVEL_INFO, "stream.action",
+              "action=stop_stream_app state=requested");
+          ret = gs_quit_app(&server);
+          if (ret == GS_OK) {
+            vita_debug_event(
+                VITA_DEBUG_LEVEL_INFO, "stream.action",
+                "action=stop_stream_app state=complete");
+            server.currentGame = 0;
+            connection_terminate();
+            break;
+          }
+          vita_debug_event(
+              VITA_DEBUG_LEVEL_ERROR, "stream.action",
+              "action=stop_stream_app state=failed code=%d", ret);
+        }
+        if (stream_overlay_take_recover_host_request()) {
+          vita_debug_event(
+              VITA_DEBUG_LEVEL_WARNING, "stream.action",
+              "action=recover_display state=requested");
+          send_host_rescue_hotkey(0x7A); // F11
+          sceKernelDelayThread(350 * 1000);
+          connection_terminate();
+          break;
+        }
+        if (stream_overlay_take_disconnect_request()) {
+          connection_terminate();
+          break;
+        }
+        sceKernelDelayThread(50 * 1000);
       }
 
       int status = connection_get_status();
@@ -256,11 +383,21 @@ int ui_connect(char *name, char *address, uint16_t port) {
   int ret;
   if (!connection_is_ready()) {
     flash_message("Connecting to:\n %s:%d...", address, port);
+    vita_debug_event(
+        VITA_DEBUG_LEVEL_INFO, "stream.action",
+        "action=connect state=starting phase=host_init");
 
     char key_dir[4096];
     sprintf(key_dir, "%s/%s", config.key_dir, name);
 
-    ret = gs_init(&server, address, port, key_dir, 0, true);
+    ret = gs_init(
+        &server, address, port, key_dir,
+        vita_debug_is_logging_enabled() ? 3 : 0, true);
+    if (ret != GS_OK && ret != GS_UNSUPPORTED_VERSION) {
+      vita_debug_event(
+          VITA_DEBUG_LEVEL_ERROR, "stream.action",
+          "action=connect state=failed phase=host_init code=%d", ret);
+    }
     if (ret == GS_OUT_OF_MEMORY) {
       display_error("Not enough memory");
       return 0;
@@ -269,6 +406,9 @@ int ui_connect(char *name, char *address, uint16_t port) {
       return 0;
     } else if (ret == GS_UNSUPPORTED_VERSION) {
       if (!config.unsupported_version) {
+        vita_debug_event(
+            VITA_DEBUG_LEVEL_ERROR, "stream.action",
+            "action=connect state=failed phase=host_init code=%d", ret);
         display_error("Unsupported version: %s\n", gs_error);
         return 0;
       }
@@ -280,6 +420,10 @@ int ui_connect(char *name, char *address, uint16_t port) {
       return 0;
     }
 
+    vita_debug_event(
+        ret == GS_OK ? VITA_DEBUG_LEVEL_INFO : VITA_DEBUG_LEVEL_WARNING,
+        "stream.action",
+        "action=connect state=ready phase=host_init code=%d", ret);
     connection_reset();
   }
   return 1;
@@ -389,17 +533,26 @@ int ui_connected_menu() {
     }
   }
 
-  return display_menu(menu, idx, NULL, &ui_connect_loop, NULL, NULL, &menu);
+  return display_menu(menu, idx, NULL, &ui_connect_loop, NULL, NULL, menu);
 }
 
 device_info_t* ui_connect_and_pairing(device_info_t *info) {
   flash_message("Test connecting to:\n %s...", info->internal);
-  vita_debug_log("[CONNECT] Intentando conectar: name=%s, ip=%s, port=%d", info->name, info->internal, info->port);
+  vita_debug_event(
+      VITA_DEBUG_LEVEL_INFO, "stream.action",
+      "action=connect state=starting phase=host_init");
   char key_dir[4096];
   sprintf(key_dir, "%s/%s", config.key_dir, info->name);
   sceIoMkdir(key_dir, 0777);
 
-  int ret = gs_init(&server, info->internal, info->port, key_dir, 0, true);
+  int ret = gs_init(
+      &server, info->internal, info->port, key_dir,
+      vita_debug_is_logging_enabled() ? 3 : 0, true);
+  if (ret != GS_OK && ret != GS_UNSUPPORTED_VERSION) {
+    vita_debug_event(
+        VITA_DEBUG_LEVEL_ERROR, "stream.action",
+        "action=connect state=failed phase=host_init code=%d", ret);
+  }
 
   if (ret == GS_OUT_OF_MEMORY) {
     display_error("Not enough memory");
@@ -409,6 +562,9 @@ device_info_t* ui_connect_and_pairing(device_info_t *info) {
     return NULL;
   } else if (ret == GS_UNSUPPORTED_VERSION) {
     if (!config.unsupported_version) {
+      vita_debug_event(
+          VITA_DEBUG_LEVEL_ERROR, "stream.action",
+          "action=connect state=failed phase=host_init code=%d", ret);
       display_error("Unsupported version: %s\n", gs_error);
       return NULL;
     }
@@ -420,6 +576,10 @@ device_info_t* ui_connect_and_pairing(device_info_t *info) {
     return NULL;
   }
 
+  vita_debug_event(
+      ret == GS_OK ? VITA_DEBUG_LEVEL_INFO : VITA_DEBUG_LEVEL_WARNING,
+      "stream.action",
+      "action=connect state=ready phase=host_init code=%d", ret);
   connection_reset();
 
   device_info_t *p = append_device(info);
@@ -435,7 +595,6 @@ device_info_t* ui_connect_and_pairing(device_info_t *info) {
 
   // connectable address
   save_device_info(info);
-  vita_debug_log("[PAIR] After save_device_info(info) - time: %u", (unsigned)time(NULL));
   // Notify user pairing succeeded
   flash_message("Paired: %s", info->name);
 
@@ -455,7 +614,6 @@ device_info_t* ui_connect_and_pairing(device_info_t *info) {
     connection_terminate();
     return NULL;
   }
-
 paired:
   connection_paired();
 
@@ -466,9 +624,6 @@ paired:
   if (gs_get_server_mac(&server, mac, sizeof(mac)) == GS_OK && mac[0]) {
     strncpy(info->mac, mac, 17);
     info->mac[17] = '\0';
-    vita_debug_log("[PAIR] MAC obtenida tras pairing (serverinfo): %s", info->mac);
-  } else {
-    vita_debug_log("[PAIR] No se encontró MAC en serverinfo; no se guarda MAC automáticamente");
   }
   save_device_info(info);
 
@@ -505,7 +660,7 @@ bool check_connection(const char *name, char *addr, uint16_t port) {
   flash_message("Check connecting to:\n %s:%d...", addr, port);
 
   int log_level = 0;
-  if (config.save_debug_log) {
+  if (vita_debug_is_logging_enabled()) {
     log_level = 3;
   }
 
@@ -516,9 +671,7 @@ bool check_connection(const char *name, char *addr, uint16_t port) {
     return false;
   }
 
-  vita_debug_log("Connection check succeded.");
-
-  connection_terminate();
+  /* A gs_init reachability probe never enters the stream state machine. */
   return true;
 }
 

@@ -23,22 +23,143 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define write_config(fd, key, value) fprintf(fd, "%s = %x\n", key, value)
-#define write_config_bool(fd, key, value) fprintf(fd, "%s = %s\n", key, value?"true":"false");
+#ifdef __vita__
+#include <psp2/io/fcntl.h>
+#endif
 
-void mapping_load(char* fileName, struct mapping* map) {
-  FILE* fd = fopen(fileName, "r");
+#define write_config(fd, key, value) \
+  fprintf((fd), "%s = %x\n", (key), (unsigned int)(value))
+#define write_config_bool(fd, key, value) \
+  fprintf((fd), "%s = %s\n", (key), (value) ? "true" : "false")
+#define MAPPING_SERIALIZED_FIELD_COUNT 32
+
+static char* mapping_sibling_name(const char* fileName,
+                                  const char* suffix) {
+  size_t file_name_length;
+  size_t suffix_length;
+  char* sibling;
+
+  if (!fileName || !suffix) {
+    return NULL;
+  }
+  file_name_length = strlen(fileName);
+  suffix_length = strlen(suffix);
+  if (file_name_length > SIZE_MAX - suffix_length - 1) {
+    return NULL;
+  }
+
+  sibling = malloc(file_name_length + suffix_length + 1);
+  if (!sibling) {
+    return NULL;
+  }
+  memcpy(sibling, fileName, file_name_length);
+  memcpy(
+      sibling + file_name_length, suffix, suffix_length + 1);
+  return sibling;
+}
+
+static bool mapping_path_exists(const char* path) {
+  FILE* file = fopen(path, "r");
+  if (!file) {
+    return false;
+  }
+  fclose(file);
+  return true;
+}
+
+static int mapping_rename_file(const char* old_path,
+                               const char* new_path) {
+#ifdef __vita__
+  /*
+   * VitaSDK's C rename() removes an existing destination before calling
+   * sceIoRename(). Use the kernel operation directly so journal promotion
+   * never deletes the destination implicitly.
+   */
+  return sceIoRename(old_path, new_path);
+#else
+  return rename(old_path, new_path);
+#endif
+}
+
+static int mapping_remove_file(const char* path) {
+#ifdef __vita__
+  return sceIoRemove(path);
+#else
+  return remove(path);
+#endif
+}
+
+static bool mapping_temporary_file_complete(const char* path) {
+  static const char completion_marker[] = "# mapping_complete";
+  char line[64];
+  bool complete = false;
+  size_t assignment_count = 0;
+  FILE* file = fopen(path, "r");
+
+  if (!file) {
+    return false;
+  }
+  while (fgets(line, sizeof(line), file)) {
+    if (strstr(line, " = ")) {
+      assignment_count++;
+    }
+    if (strncmp(
+            line, completion_marker,
+            sizeof(completion_marker) - 1) == 0) {
+      complete = true;
+    }
+  }
+  if (fclose(file) != 0) {
+    complete = false;
+  }
+  return complete &&
+      assignment_count == MAPPING_SERIALIZED_FIELD_COUNT;
+}
+
+bool mapping_load(const char* fileName, struct mapping* map) {
+  char* temporary_name;
+  char* backup_name;
+  const char* load_path;
+  bool load_path_is_main = true;
+
+  if (!fileName || !map) {
+    return false;
+  }
+
+  temporary_name = mapping_sibling_name(fileName, ".tmp");
+  backup_name = mapping_sibling_name(fileName, ".bak");
+  load_path = fileName;
+
+  if (!mapping_path_exists(fileName)) {
+    if (backup_name && mapping_path_exists(backup_name)) {
+      if (mapping_rename_file(backup_name, fileName) != 0) {
+        load_path = backup_name;
+        load_path_is_main = false;
+      }
+    } else if (temporary_name &&
+               mapping_path_exists(temporary_name) &&
+               mapping_temporary_file_complete(temporary_name)) {
+      if (mapping_rename_file(temporary_name, fileName) != 0) {
+        load_path = temporary_name;
+        load_path_is_main = false;
+      }
+    }
+  }
+
+  FILE* fd = fopen(load_path, "r");
   if (fd == NULL) {
     printf("Can't open mapping file: %s\n", fileName);
-    return;
+    free(temporary_name);
+    free(backup_name);
+    return false;
   }
 
   char *line = NULL;
   size_t len = 0;
   while (__getline(&line, &len, fd) != -1) {
     char key[256], value[256];
-    if (sscanf(line, "%s = %s", (char *)&key, (char *)&value) == 2) {
-      long int_value = strtol(value, NULL, 16);
+    if (sscanf(line, "%255s = %255s", key, value) == 2) {
+      unsigned long int_value = strtoul(value, NULL, 16);
       if (strcmp("abs_x", key) == 0)
         map->abs_x = int_value;
       else if (strcmp("abs_y", key) == 0)
@@ -108,14 +229,55 @@ void mapping_load(char* fileName, struct mapping* map) {
     }
   }
   free(line);
-  fclose(fd);
+  bool succeeded = fclose(fd) == 0;
+  if (succeeded && load_path_is_main) {
+    if (temporary_name) {
+      mapping_remove_file(temporary_name);
+    }
+    if (backup_name) {
+      mapping_remove_file(backup_name);
+    }
+  }
+  free(temporary_name);
+  free(backup_name);
+  return succeeded;
 }
 
-void mapping_save(char* fileName, struct mapping* map) {
-  FILE* fd = fopen(fileName, "w");
+bool mapping_save(const char* fileName, const struct mapping* map) {
+  char* temporary_name;
+  char* backup_name;
+  bool had_live_file;
+
+  if (!fileName || !map) {
+    return false;
+  }
+
+  temporary_name = mapping_sibling_name(fileName, ".tmp");
+  backup_name = mapping_sibling_name(fileName, ".bak");
+  if (!temporary_name || !backup_name) {
+    free(temporary_name);
+    free(backup_name);
+    return false;
+  }
+
+  /*
+   * Finish recovery from an interrupted earlier save before starting a new
+   * transaction. A .bak file is always the last known live mapping.
+   */
+  if (!mapping_path_exists(fileName) &&
+      mapping_path_exists(backup_name) &&
+      mapping_rename_file(backup_name, fileName) != 0) {
+    free(temporary_name);
+    free(backup_name);
+    return false;
+  }
+
+  FILE* fd = fopen(temporary_name, "w");
   if (fd == NULL) {
     fprintf(stderr, "Can't open mapping file: %s\n", fileName);
-    exit(EXIT_FAILURE);
+    free(temporary_name);
+    free(backup_name);
+    return false;
   }
 
   write_config(fd, "abs_x", map->abs_x);
@@ -161,6 +323,52 @@ void mapping_save(char* fileName, struct mapping* map) {
   write_config(fd, "btn_dpad_down", map->btn_dpad_down);
   write_config(fd, "btn_dpad_left", map->btn_dpad_left);
   write_config(fd, "btn_dpad_right", map->btn_dpad_right);
+  fprintf(fd, "# mapping_complete\n");
 
-  fclose(fd);
+  bool succeeded = ferror(fd) == 0;
+  if (fclose(fd) != 0) {
+    succeeded = false;
+  }
+  if (!succeeded) {
+    mapping_remove_file(temporary_name);
+    free(temporary_name);
+    free(backup_name);
+    return false;
+  }
+
+  had_live_file = mapping_path_exists(fileName);
+  if (had_live_file) {
+    if (mapping_path_exists(backup_name) &&
+        mapping_remove_file(backup_name) != 0) {
+      mapping_remove_file(temporary_name);
+      free(temporary_name);
+      free(backup_name);
+      return false;
+    }
+    if (mapping_rename_file(fileName, backup_name) != 0) {
+      mapping_remove_file(temporary_name);
+      free(temporary_name);
+      free(backup_name);
+      return false;
+    }
+  }
+
+  if (mapping_rename_file(temporary_name, fileName) != 0) {
+    if (had_live_file &&
+        mapping_rename_file(backup_name, fileName) == 0) {
+      mapping_remove_file(temporary_name);
+    } else if (!had_live_file) {
+      mapping_remove_file(temporary_name);
+    }
+    free(temporary_name);
+    free(backup_name);
+    return false;
+  }
+
+  if (had_live_file) {
+    mapping_remove_file(backup_name);
+  }
+  free(temporary_name);
+  free(backup_name);
+  return true;
 }

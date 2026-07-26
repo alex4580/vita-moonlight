@@ -6,15 +6,32 @@ on:
   pull_request:
     branches: [ vita ]
   workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       VITASDK: ${{ github.workspace }}/vitasdk
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.x"
+
+      - name: Verify release version consistency
+        run: python3 tools/check-version-consistency.py
+
+      - name: Test privacy-safe support-log summarizer
+        run: python3 tools/summarize-vita-log.py --self-test
 
       - name: Set up dependencies
         run: |
@@ -25,36 +42,59 @@ jobs:
         run: |
           rm -rf $GITHUB_WORKSPACE/vitasdk
 
-      - name: Install VitaSDK and packages manually
+      - name: Install pinned VitaSDK and verified packages
         run: |
-          set -e
-          # Download and extract the base SDK
-          SDK_URL=$(wget -qO- https://github.com/vitasdk/vita-headers/raw/master/.travis.d/last_built_toolchain.py | python3 - master linux)
-          echo "Downloading VitaSDK: $SDK_URL"
-          mkdir -p $GITHUB_WORKSPACE/vitasdk
-          wget -O- "$SDK_URL" | tar xj -C $GITHUB_WORKSPACE/vitasdk --strip-components=1
-          export VITASDK=$GITHUB_WORKSPACE/vitasdk
-          export PATH=$VITASDK/bin:$PATH
-          echo "VITASDK: $VITASDK"
-          echo "PATH: $PATH"
-          # Install all main packages
-          git clone https://github.com/vitasdk/vdpm.git
-          for p in zlib bzip2 libzip libpng libexif libjpeg-turbo jansson yaml-cpp freetype harfbuzz fftw libvita2d libvita2d_ext libmad libogg libvorbis flac libtheora libtremor libmikmod libftpvita henkaku taihen kubridge libk libdebugnet onigmo libwebp sdl sdl_image sdl_mixer sdl_net sdl_ttf sdl_gfx sdl2 sdl2_image sdl2_mixer sdl2_net sdl2_ttf sdl2_gfx openal-soft openssl curl curlpp expat opus opusfile unrar glm libxml2 speexdsp pixman TinyGL kuio taipool mpg123 libmpeg2 soloud quirc Box2D libsndfile xz libarchive bullet libimagequant libmodplug libconfig libsodium vitaShaRK libmathneon vitaGL imgui imgui-vita2d libbaremetal minizip jsoncpp lame ffmpeg physfs vita-rss-libdl luajit tinyxml2 cpython cpython3 asio assimp opensles cpr libintl libopenmpt libvpx zstd libpcre2 fribidi libass websocketpp wslay SceShaccCgExt boost pib libxmp libxmp-lite sdl3 sdl3_image sdl3_ttf; do
-            ./vdpm/vdpm -f $p
+          set -euo pipefail
+
+          sdk_archive="$RUNNER_TEMP/vitasdk.tar.bz2"
+          sdk_url="https://github.com/vitasdk/autobuilds/releases/download/master-linux-v2.540/vitasdk-x86_64-linux-gnu-2026-05-24_12-05-02.tar.bz2"
+          sdk_sha256="b1a8f4d6e41460c9ecf2c3c4590eb7eb3ea6b690767f508bd5696dbc77a4272e"
+          curl --fail --location --retry 3 --output "$sdk_archive" "$sdk_url"
+          echo "$sdk_sha256  $sdk_archive" | sha256sum --check --strict
+
+          mkdir -p "$VITASDK"
+          tar xjf "$sdk_archive" -C "$VITASDK" --strip-components=1
+          export PATH="$VITASDK/bin:$PATH"
+
+          vdpm_commit="e423be457622a9ba517858f4831566dcd263729a"
+          git clone --filter=blob:none --no-checkout https://github.com/vitasdk/vdpm.git "$RUNNER_TEMP/vdpm"
+          git -C "$RUNNER_TEMP/vdpm" checkout --detach "$vdpm_commit"
+          test "$(git -C "$RUNNER_TEMP/vdpm" rev-parse HEAD)" = "$vdpm_commit"
+
+          package_dir="$RUNNER_TEMP/vitasdk-packages"
+          mkdir -p "$package_dir"
+          packages=(
+            "490392817|zlib.tar.xz|cb4f0fe965c94882ef58e1dd3962abc57db3ec40ce8d171bd404e4d3b8c4eeda"
+            "490392593|bzip2.tar.xz|5f1372b4a0e3c693343006c4548168b726b76e0e5ca86aea9c567887b329a67d"
+            "490392819|zstd.tar.xz|ea5b79959b2a23ebb844cbc442d179028b9fc4e5e75abca52c404646fae5a9cf"
+            "490392686|libpng.tar.xz|8ab0621443cd0b5d6a922dc38e0f48aca4c885e42f27a4162b2dab1f5b61281d"
+            "490392667|libjpeg-turbo.tar.xz|f844cebe37967883aa965ba635597e21a5ee4c6fca69120231d4eb34463f5ab3"
+            "490392625|freetype.tar.xz|45b40a5766c6b49585985630e06f4543eafd0572f1658b12c3394e8203c3c49c"
+            "490392707|libvita2d.tar.xz|945eb1a85e80bc7fa41cadafb57e625b8282819ab69ab72ccb0dcbc957dcabd5"
+            "490392743|openssl.tar.xz|a16ec551aa2c468e4f060132dff3445a017ea4f03e03b9d10d8137b2a7bf3e8e"
+            "490392607|curl.tar.xz|d22eea861f4d362dbbaa611e9cf27b30726287f31b8b12286da226546e58e356"
+            "490392613|expat.tar.xz|d81425baafd29a976e5253ccaf628b697e874061bbddfd43509f10a053c589db"
+            "490392745|opus.tar.xz|d1e8b2d7584a8410329ca7c20a25a50c03c2d6efa5bc1ff2e478fc5661ffbb0c"
+          )
+          for package in "${packages[@]}"; do
+            IFS='|' read -r asset_id asset_name asset_sha256 <<< "$package"
+            archive="$package_dir/$asset_name"
+            curl \
+              --fail \
+              --location \
+              --retry 3 \
+              --header "Accept: application/octet-stream" \
+              --output "$archive" \
+              "https://api.github.com/repos/vitasdk/packages/releases/assets/$asset_id"
+            echo "$asset_sha256  $archive" | sha256sum --check --strict
+            "$RUNNER_TEMP/vdpm/vdpm" -f "$archive"
           done
-          # Explicitly install mbedtls
-          ./vdpm/vdpm -f mbedtls
-          echo "Contents of $VITASDK after installing packages:"
-          ls -l $VITASDK
-          echo "Contents of $VITASDK/arm-vita-eabi:"
-          ls -l $VITASDK/arm-vita-eabi || echo "arm-vita-eabi does not exist"
-          echo "Contents of $VITASDK/share:"
-          ls -l $VITASDK/share || echo "share does not exist"
+
+          test -f "$VITASDK/share/vita.toolchain.cmake"
           echo "$VITASDK/bin" >> $GITHUB_PATH
 
       - name: Update submodules and build
         run: |
-          git submodule update --init
           cmake -S . -B build -DCMAKE_TOOLCHAIN_FILE="${{ env.VITASDK }}/share/vita.toolchain.cmake"
           cd build
           make
@@ -64,7 +104,8 @@ jobs:
           ls -lh build
 
       - name: Upload VPK artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: moonlight-vpk
           path: build/*.vpk
+          if-no-files-found: error

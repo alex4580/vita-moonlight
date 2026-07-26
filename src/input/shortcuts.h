@@ -5,4 +5,5 @@
 
 // Devuelve true si se ejecutó un acceso directo y se debe limpiar el input
 typedef struct SceCtrlData SceCtrlData;
-bool process_physical_shortcuts(const SceCtrlData* pad, const SceCtrlData* pad_old);
+void reset_physical_shortcuts(void);
+bool process_physical_shortcuts(SceCtrlData* pad, const SceCtrlData* pad_old);

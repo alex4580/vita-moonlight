@@ -35,6 +35,8 @@
 
 #define MILLISECOND 1000
 #define SECOND      (1000 * MILLISECOND)
+#define MAX_DISCOVERED_DEVICES 60
+#define DEVICE_SUFFIX_LENGTH 128
 
 enum {
   DEVICE_EXIT_SEARCH = 100,
@@ -54,8 +56,9 @@ enum {
 
 int search_thread_status = SEARCH_THREAD_IDLE;
 
-static device_info_t devices[64];
-static int DEVICE_ENTRY_IDX[64];
+static device_info_t devices[MAX_DISCOVERED_DEVICES];
+static int DEVICE_ENTRY_IDX[MAX_DISCOVERED_DEVICES + 1];
+static char device_suffixes[MAX_DISCOVERED_DEVICES][DEVICE_SUFFIX_LENGTH];
 static int found_device = 0;
 
 void ipv4_address_to_string(const struct sockaddr_in *addr, char *ip, const size_t len) {
@@ -93,6 +96,10 @@ static void moonlight_found_callback(int idx, const char* host, const char* pcna
         }
     }
     // Si el nombre es igual pero la IP es diferente, sí se agrega
+    if (found_device >= MAX_DISCOVERED_DEVICES) {
+        vita_debug_log("[mDNS] Device limit reached; ignoring %s\n", pcname);
+        return;
+    }
     memset(&devices[found_device], 0, sizeof(device_info_t));
     strncpy(devices[found_device].name, pcname, sizeof(devices[found_device].name)-1);
     strncpy(devices[found_device].internal, ip, sizeof(devices[found_device].internal)-1);
@@ -129,6 +136,7 @@ int mdns_discovery_main(SceSize args, void *argp) {
 }
 
 static SceUID search_thread_id = -1;
+static int end_search_thread(SceUID thid);
 
 void stop_search_thread_if_running() {
   vita_debug_log("[mDNS] stop_search_thread_if_running: status=%d, thid=%d\n", search_thread_status, search_thread_id);
@@ -143,6 +151,7 @@ void stop_search_thread_if_running() {
 static void clear_devices() {
   vita_debug_log("[mDNS] Limpiando lista de dispositivos\n");
   memset(devices, 0, sizeof(devices));
+  memset(device_suffixes, 0, sizeof(device_suffixes));
   found_device = 0;
 }
 
@@ -160,10 +169,7 @@ SceUID start_search_thread() {
   return thid;
 }
 
-// Prototipo adelantado para evitar warning
-int end_search_thread(SceUID thid);
-
-int end_search_thread(SceUID thid) {
+static int end_search_thread(SceUID thid) {
   vita_debug_log("[mDNS] end_search_thread: solicitando parada de hilo %d\n", thid);
   search_thread_status = SEARCH_THREAD_REQ_STOP;
 
@@ -229,7 +235,7 @@ static int ui_search_device_back(void *context) {
 
 int ui_search_device_loop() {
   int idx = 0;
-  menu_entry menu[64];
+  menu_entry menu[MAX_DISCOVERED_DEVICES + 4];
   memset(DEVICE_ENTRY_IDX, 0, sizeof(DEVICE_ENTRY_IDX));
 
 #define MENU_CATEGORY(NAME) \
@@ -267,18 +273,25 @@ int ui_search_device_loop() {
       continue;
     }
     // Mostrar MAC en el sufijo si está disponible
-    char suffix[64] = {0};
     if (devices[i].mac[0]) {
-      snprintf(suffix, sizeof(suffix), "%s [%s]", devices[i].internal, devices[i].mac);
+      snprintf(
+          device_suffixes[i], sizeof(device_suffixes[i]), "%s [%s]",
+          devices[i].internal, devices[i].mac);
     } else {
-      snprintf(suffix, sizeof(suffix), "%s", devices[i].internal);
+      snprintf(
+          device_suffixes[i], sizeof(device_suffixes[i]), "%s",
+          devices[i].internal);
     }
-    MENU_ENTRY(DEVICE_ITEM + i, DEVICE_VIEW_ITEM + i, devices[i].name, suffix);
+    MENU_ENTRY(
+        DEVICE_ITEM + i, DEVICE_VIEW_ITEM + i,
+        devices[i].name, device_suffixes[i]);
   }
   MENU_SEPARATOR();
   MENU_ENTRY(DEVICE_EXIT_SEARCH, DEVICE_VIEW_EXIT_SEARCH, "Return", "");
 
-  return display_menu(menu, idx, NULL, &ui_search_device_callback, &ui_search_device_back, NULL, &menu);
+  return display_menu(
+      menu, idx, NULL, &ui_search_device_callback,
+      &ui_search_device_back, NULL, menu);
 }
 
 void ui_search_device() {

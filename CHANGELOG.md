@@ -1,3 +1,183 @@
+## 0.14.6
+
+* Removed obsolete Circle/O transition counters from real-time diagnostics.
+  Normal Circle input and disconnect release safety are unchanged.
+* Fixed clipped and overlapping Vita menu text, made long help dialogs
+  scrollable, and hardened host-discovery labels and touch-zone previews.
+* Bounded every stored front-touch contact, sanitized legacy touch geometry,
+  and released mouse, DS4-touchpad, and tablet contacts when changing modes,
+  entering a mapped corner, or ending a stream.
+* Corrected the VPK build identity to 0.14.6 and added tag/version validation,
+  signed-release enforcement, exact release-asset checks, and SHA-256
+  manifests to the publishing workflow.
+* Rebuilt Windows uninstall around verified physical-display recovery. Shared
+  Sunshine, ViGEmBus, and VDD installations are retained by default, optional
+  removal is explicit, Vita-managed host state is cleaned, and silent
+  automation remains noninteractive.
+* Added an on-device graphical controller mapper for every remote gamepad
+  button and a live front-touch-zone editor with gamepad, mouse, keyboard, and
+  local actions. Mapping changes apply immediately and use Vita-safe
+  journaled saves with interrupted-write recovery.
+* Hardened the virtual-display driver's fixed configuration path. Install or
+  repair now replaces legacy entries without following them, creates the
+  protected directory atomically, pins its Windows file identity, and rejects
+  substitutions during reload, verification, or uninstall.
+* Added the `emergency reset-display-driver` recovery alias and packaged the
+  beta smoke-test, build/fork, and signed-release guides with both Windows
+  distributions.
+* Replaced input-by-input diagnostics with an optional, privacy-safe support
+  log. Each capture starts a fresh structured session, keeps one previous
+  capture, records concise system/connection/decoder/network summaries, and
+  can be converted into a shareable report with the bundled summarizer.
+* Added structured public issue and pull-request templates plus signed GitHub
+  provenance attestations for the VPK, Windows packages, and checksum
+  manifest.
+* Reorganized the Vita settings and Windows control panel around ordinary
+  setup, streaming, controller, touch, recovery, and support tasks instead of
+  developer diagnostics.
+* Rewrote the quick start, minimum beta test, full end-to-end test, logging
+  guide, and community report template for clean installs, in-place upgrades,
+  same-version repairs, and both shared-component uninstall choices.
+* Made the Windows installer lifecycle-aware, added a reviewable one-click host
+  support report, and packaged the matching user, testing, logging, build, and
+  release documentation with both Windows distributions.
+
+## 0.14.5
+
+* Added explicit **Diagnostic file logging** and **Open on-screen keyboard**
+  rows to the in-stream menu. Logging remains off by default and the existing
+  Triangle and START + Left shortcuts remain available.
+
+## 0.14.4
+
+* Fixed repair installs racing Windows display-target re-enumeration after the
+  existing VDD device stack restarts. Native verification now waits up to 30
+  seconds for the already-installed target to return before changing any
+  display topology.
+* Kept every physical display active during the new wait and added a specific
+  timeout that distinguishes a delayed/absent target from a real display-name
+  mismatch.
+
+## 0.14.3
+
+* Fixed **Apply recommended setup** on an existing VDD installation. Repair
+  now stages the driver package first, then reapplies and normalizes the
+  existing configuration so a real upgrade cannot overwrite Vita modes with
+  the stock XML.
+* Removed duplicate effective modes created when a resolution contained an
+  explicit 60 Hz entry and the upstream driver also replicated global 60 Hz
+  onto it. Other user resolutions, refresh rates, and driver options remain
+  intact.
+* Fixed native-mode verification using `CDS_UPDATEREGISTRY` on its temporary
+  extended-display topology. Verification now uses the same non-persistent
+  live change as streaming, which was validated against an upgraded
+  `ROOT\MttVDD` device at 960x544/60.
+* Mode failures now distinguish an absent mode from a Windows rejection and
+  report the current mode plus the closest modes actually advertised by the
+  active display source.
+
+## 0.14.2
+
+* Fixed driver setup and repair temporarily making the Vita virtual display
+  the only active screen while checking 960x544. Verification now preserves
+  every active physical monitor, adds VDD as an extended display, retries the
+  native mode in place with a fresh driver mode enumeration, and restores the
+  exact original topology once.
+* Replaced the generic ten-second enumeration failure and repeated restart
+  advice with the final Windows mode error. A failed native-mode check now
+  stops setup as a real error after restoring the physical desktop.
+
+## 0.14.1
+
+* Added a dedicated real-time diagnostics screen and optional append-only Vita
+  log. Logging is off by default, opens no file until enabled, and can be
+  toggled before or during a stream.
+* Added top-right performance overlays for frame rate, frame rate plus network,
+  and advanced stream/decode statistics. The overlays use a 50%-alpha
+  background and avoid extended metric collection when it is not needed.
+* Replaced partial bitrate-only choices with complete Reliable, Recommended,
+  High quality, and Remote / VPN streaming presets. Added matching preset and
+  input controls before and during a stream, clearer tradeoff explanations, and
+  a full recommended-settings reset.
+* Made native 960x544/60 the first-run client and virtual-display mode. Added
+  managed 960x540 and 1280x720 compatibility modes and a controlled in-stream
+  display change that updates the active VDD, reconnects Moonlight, and leaves
+  the Windows game running.
+* Hardened virtual-display provisioning, verification, rescue hotkeys, and
+  physical-display recovery across clean installs and repair installs.
+* Made the Windows installer and **Apply recommended setup** verify or repair
+  Sunshine, ViGEmBus, and native VDD readiness with checked failures and an
+  explicit stop-and-resume path when Windows requires a reboot.
+* Fixed repair installs failing on Windows builds where PnPUtil reports error
+  50 for an already-enabled VDD. That result is accepted only for the
+  enable-device step and is followed by device restart and native-mode
+  verification. Installer failures now include the host's concrete error
+  breadcrumb instead of only a numeric exit code.
+
+## 0.14.0
+
+* Added a Steam / DS4 controller preset that enables Vita gyro, DS4 touchpad,
+  and delayed Steam Guide behavior together while retaining double-PS as the
+  forced LiveArea escape. The in-stream overlay can also change PS behavior
+  independently.
+* Fixed unsynchronized host motion requests and concurrent Vita sensor reads
+  that could leave Steam seeing a gyro-capable DS4 without receiving motion.
+  The stream overlay now reports requested/live/error gyro state.
+* Hardened controller release handling: button flags use the protocol's full
+  width, stream start clears stale state, and pause/disconnect explicitly send
+  a neutral state and controller removal. Circle down/up counters in the
+  overlay make held-input faults observable during testing.
+* Fixed START + L + R failing when a shoulder was sampled before START or the
+  original 300 ms window expired. The overlay now accepts any button order and
+  gives the non-leaking START-led sequence a one-second window.
+* Changed the default PS-button policy so single presses remain local and can
+  no longer trigger Windows/Steam Guide shortcuts such as media play/pause.
+  Double-PS still provides the forced LiveArea escape. Added delayed Safe PC
+  Guide, legacy Immediate PC Guide, and direct System / LiveArea modes.
+* Fixed Sunshine falling back to the physical monitor when the VDD lacked a
+  Vita-selectable mode such as 960x540/60. Existing and new installations now
+  provision the safe 960x540, 960x544, and 1280x720 desktop modes at 60 Hz;
+  client FPS remains independently configurable. Doctor verifies the runtime
+  mode set and rejects an incomplete Sunshine display mapping.
+* The START, L, and R overlay chord is now captured locally. Holding START and
+  pressing L + R within one second opens the overlay without sending any of
+  those buttons to the Windows game; other button orders also open it.
+* Added Reliable, Balanced, and High quality Vita streaming presets plus
+  on-device explanations for resolution, FPS, bitrate, frame pacing, vblank,
+  controller, and touch tradeoffs.
+* New installations default to the compatibility-first Xbox/XInput controller,
+  H.264 at native 960x544/60 and 8 Mbps, frame pacing, and H.264 packet-loss
+  recovery. Existing explicit controller and video selections are preserved.
+* Hardened legacy configuration parsing and validation so corrupt or obsolete
+  resolution, bitrate, packet-size, controller, touch, and motion values fall
+  back safely instead of destabilizing the Vita client.
+* Improved Windows portability across custom Sunshine locations, reordered
+  display logs, laptops on battery, multiple physical monitors, and stale
+  rescue-agent processes. Doctor now rejects unsupported OS/architecture
+  combinations explicitly.
+* Added Windows 2022/2025 build/self-test coverage and packaged compatibility
+  and Vita tuning guides.
+* Added an in-stream Vita overlay opened with START + L + R. It provides
+  resume, disconnect, resolution, bitrate, frame-rate, controller, touch-mode,
+  and FPS-counter controls. Double-press PS remains the forced LiveArea escape.
+* Added double-confirmed overlay actions to close or force-close the foreground
+  Windows game, end Sunshine's app session, or recover a failed display stack.
+  A protected highest-privilege agent handles the host actions without exposing
+  a network control service.
+* Sunshine's native display lifecycle now covers every application by default,
+  including Desktop and Steam Big Picture, and restores the physical layout
+  when all clients disconnect even if the application stays open.
+* Vita virtual-display sessions force SDR by default to prevent an HDR physical
+  desktop from appearing washed out on the Vita.
+* Raised the 960x544/60 recommended bitrate from 5 Mbps to 8 Mbps and migrate
+  older native-resolution configurations to reduce motion artifacts.
+* Reworked the Windows host control panel into task-oriented Overview,
+  Streaming, Displays, and Help & recovery pages.
+* Added GUI settings for all-application integration, SDR enforcement, display
+  matching, safe display previews, and recovery.
+* Rewrote the installation and end-to-end test documentation around the GUI
+  workflow and current release behavior.
+
 ## 0.13.2
 
 * added PS button capture
