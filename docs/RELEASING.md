@@ -3,6 +3,27 @@
 This fork can be released independently. A merge into the original upstream
 repository is not required.
 
+## Code signing policy
+
+Every public download or GitHub release page must use the term **Code signing
+policy** and link to:
+
+<https://github.com/alex4580/vita-moonlight/blob/vita/docs/CODE_SIGNING_POLICY.md>
+
+The matching privacy disclosure is:
+
+<https://github.com/alex4580/vita-moonlight/blob/vita/PRIVACY.md>
+
+For a Windows artifact that actually verifies with SignPath Foundation as its
+Authenticode signer:
+
+> Free code signing provided by SignPath.io, certificate by SignPath Foundation.
+
+Do not use that statement to describe unsigned developer builds or a release
+made before SignPath enrollment and provider integration are complete. Team
+roles, approval rules, artifact scope, third-party boundaries, and incident
+handling are defined in the linked policy.
+
 ## Release trust model
 
 A public Windows package has three separate trust layers:
@@ -59,7 +80,9 @@ certificate, password, token, or generated signing wrapper.
 
 ## Candidate process
 
-1. Update the version with `release.py`, finish `CHANGELOG.md`, and commit.
+1. Update the version with `release.py`, finish `CHANGELOG.md`, and include a
+   **Code signing policy** link in that version's notes so the generated GitHub
+   release page preserves the required disclosure.
 2. Push the candidate branch and require both Vita and Windows workflows to
    pass.
 3. Run `host/BETA_SMOKE_TEST.md` on the primary PC/Vita and then on the laptop.
@@ -115,3 +138,5 @@ during the Inno build and verified before packaging.
 
 Do not publish the release if the expected legal publisher name, a valid
 timestamp, the checksums, or either provenance verification is missing.
+For a SignPath-covered release, the expected Authenticode publisher is
+**SignPath Foundation**.

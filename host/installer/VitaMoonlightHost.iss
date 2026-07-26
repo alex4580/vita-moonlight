@@ -66,6 +66,7 @@ Source: "{#ViGEmBusDir}\*"; DestDir: "{app}\tools\ViGEmBus"; Flags: ignoreversio
 Source: "{#SunshineDir}\*"; DestDir: "{app}\tools\Sunshine"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "..\..\tools\summarize-vita-log.py"; DestDir: "{app}\tools\SupportLog"; Flags: ignoreversion
 Source: "..\..\README.md"; DestDir: "{app}"; DestName: "README.md"; Flags: ignoreversion
+Source: "..\..\PRIVACY.md"; DestDir: "{app}"; DestName: "PRIVACY.md"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}\host"; Flags: ignoreversion
 Source: "..\BETA_SMOKE_TEST.md"; DestDir: "{app}\host"; Flags: ignoreversion
 Source: "..\END_TO_END_TEST.md"; DestDir: "{app}\host"; Flags: ignoreversion
@@ -76,6 +77,7 @@ Source: "..\..\docs\BUILDING.md"; DestDir: "{app}\docs"; Flags: ignoreversion
 Source: "..\..\docs\COMMUNITY_TESTING.md"; DestDir: "{app}\docs"; Flags: ignoreversion
 Source: "..\..\docs\LOGGING_AND_SUPPORT.md"; DestDir: "{app}\docs"; Flags: ignoreversion
 Source: "..\..\docs\RELEASING.md"; DestDir: "{app}\docs"; Flags: ignoreversion
+Source: "..\..\docs\CODE_SIGNING_POLICY.md"; DestDir: "{app}\docs"; Flags: ignoreversion
 Source: "..\..\docs\VITA_SETTINGS_GUIDE.md"; DestDir: "{app}\docs"; Flags: ignoreversion
 Source: "..\..\LICENSE"; DestDir: "{app}"; DestName: "LICENSE-VitaMoonlight.txt"; Flags: ignoreversion
 

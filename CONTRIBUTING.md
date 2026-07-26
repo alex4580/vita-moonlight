@@ -44,4 +44,7 @@ pass `host/FINAL_RELEASE_CHECKLIST.md`.
 
 Full local toolchain and fork instructions are in `docs/BUILDING.md`. Release
 versioning, code signing, checksums, and provenance are documented in
-`docs/RELEASING.md`.
+`docs/RELEASING.md`. Anyone assigned an Author, Reviewer, or Approver role is
+also bound by the project's
+[Code signing policy](docs/CODE_SIGNING_POLICY.md), including its
+multi-factor-authentication and manual release-approval requirements.
