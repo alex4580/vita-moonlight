@@ -20,6 +20,14 @@ You need:
 Save your work before setup. The display may briefly blink while Windows
 checks the virtual display.
 
+Publisher and data-handling details are in the
+[Code signing policy](https://github.com/alex4580/vita-moonlight/blob/vita/docs/CODE_SIGNING_POLICY.md)
+and [Privacy policy](https://github.com/alex4580/vita-moonlight/blob/vita/PRIVACY.md).
+For Windows releases whose Authenticode signatures identify SignPath
+Foundation: **Free code signing provided by SignPath.io, certificate by
+SignPath Foundation.** Unsigned previews, if any, are labeled explicitly and
+are not covered by that statement.
+
 ## Install for the first time
 
 1. On the PC, run `Vita-Moonlight-Host-Setup-win-x64.exe` and accept the

@@ -87,6 +87,43 @@ def main() -> int:
         version,
     )
     expect(
+        "Windows host product name",
+        extract(
+            "host/VitaMoonlight.Host/VitaMoonlight.Host.csproj",
+            r"<Product>([^<]+)</Product>",
+            "Product element",
+        ),
+        "Vita Moonlight Host",
+    )
+    expect(
+        "Windows host title",
+        extract(
+            "host/VitaMoonlight.Host/VitaMoonlight.Host.csproj",
+            r"<AssemblyTitle>([^<]+)</AssemblyTitle>",
+            "AssemblyTitle element",
+        ),
+        "Vita Moonlight Host",
+    )
+    expect(
+        "Windows host informational version",
+        extract(
+            "host/VitaMoonlight.Host/VitaMoonlight.Host.csproj",
+            r"<InformationalVersion>([^<]+)</InformationalVersion>",
+            "InformationalVersion element",
+        ),
+        version,
+    )
+    expect(
+        "Windows host source-revision suffix setting",
+        extract(
+            "host/VitaMoonlight.Host/VitaMoonlight.Host.csproj",
+            r"<IncludeSourceRevisionInInformationalVersion>"
+            r"([^<]+)</IncludeSourceRevisionInInformationalVersion>",
+            "IncludeSourceRevisionInInformationalVersion element",
+        ),
+        "false",
+    )
+    expect(
         "Windows host assembly version",
         extract(
             "host/VitaMoonlight.Host/VitaMoonlight.Host.csproj",
@@ -113,6 +150,16 @@ def main() -> int:
             re.MULTILINE,
         ),
         version,
+    )
+    expect(
+        "Windows installer product name",
+        extract(
+            "host/installer/VitaMoonlightHost.iss",
+            r"^AppName=(.+?)\s*$",
+            "AppName declaration",
+            re.MULTILINE,
+        ),
+        "Vita Moonlight Host",
     )
     expect(
         "Windows installer file version",

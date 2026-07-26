@@ -41,6 +41,9 @@
 * Made the Windows installer lifecycle-aware, added a reviewable one-click host
   support report, and packaged the matching user, testing, logging, build, and
   release documentation with both Windows distributions.
+* **Code signing policy:** see the
+  [public policy](https://github.com/alex4580/vita-moonlight/blob/vita/docs/CODE_SIGNING_POLICY.md)
+  and [privacy disclosure](https://github.com/alex4580/vita-moonlight/blob/vita/PRIVACY.md).
 
 ## 0.14.5
 
