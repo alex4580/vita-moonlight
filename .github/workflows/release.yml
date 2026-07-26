@@ -332,6 +332,7 @@ jobs:
           subject-path: release-dist/*
 
       - name: Create draft GitHub release
+        id: create_release
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
           body_path: release-notes.md
@@ -347,11 +348,16 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          DRAFT_RELEASE_ID: ${{ steps.create_release.outputs.id }}
         run: |
           set -euo pipefail
+          if [[ ! "$DRAFT_RELEASE_ID" =~ ^[1-9][0-9]*$ ]]; then
+            echo "The release action did not return a valid draft release ID." >&2
+            exit 1
+          fi
           release_json="$RUNNER_TEMP/draft-release.json"
           gh api \
-            "repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME" \
+            "repos/$GITHUB_REPOSITORY/releases/$DRAFT_RELEASE_ID" \
             > "$release_json"
 
           expected_prerelease=false
@@ -360,8 +366,10 @@ jobs:
           fi
           if ! jq --exit-status \
             --arg tag "$GITHUB_REF_NAME" \
+            --argjson release_id "$DRAFT_RELEASE_ID" \
             --argjson prerelease "$expected_prerelease" \
-            '.tag_name == $tag and
+            '.id == $release_id and
+             .tag_name == $tag and
              .draft == true and
              .prerelease == $prerelease' \
             "$release_json" > /dev/null; then
@@ -451,18 +459,73 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          DRAFT_RELEASE_ID: ${{ steps.create_release.outputs.id }}
         run: |
           set -euo pipefail
+          if [[ ! "$DRAFT_RELEASE_ID" =~ ^[1-9][0-9]*$ ]]; then
+            echo "The release action did not return a valid draft release ID." >&2
+            exit 1
+          fi
+
+          tag_ref="$(
+            gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$GITHUB_REF_NAME"
+          )"
+          tag_type="$(jq --raw-output '.object.type' <<<"$tag_ref")"
+          tag_sha="$(jq --raw-output '.object.sha' <<<"$tag_ref")"
+          if [[ "$tag_type" != "tag" || -z "$tag_sha" || "$tag_sha" == "null" ]]; then
+            echo "The release tag is no longer an annotated tag." >&2
+            exit 1
+          fi
+          tag_object="$(
+            gh api "repos/$GITHUB_REPOSITORY/git/tags/$tag_sha"
+          )"
+          tag_target_type="$(jq --raw-output '.object.type' <<<"$tag_object")"
+          tag_target_sha="$(jq --raw-output '.object.sha' <<<"$tag_object")"
+          if [[ "$tag_target_type" != "commit" ||
+                "$tag_target_sha" != "$GITHUB_SHA" ]]; then
+            echo "The release tag changed while the release was being built." >&2
+            exit 1
+          fi
+          tag_verified="$(jq --raw-output '.verification.verified' <<<"$tag_object")"
+          if [[ "$tag_verified" != "true" &&
+                ! ( "$GITHUB_REPOSITORY" == "alex4580/vita-moonlight" &&
+                    "$GITHUB_REF_NAME" == "v0.14.6-beta.1" ) ]]; then
+            echo "The release tag no longer has a GitHub-verified signature." >&2
+            exit 1
+          fi
+
+          release_json="$RUNNER_TEMP/published-release.json"
           if [[ "$GITHUB_REF_NAME" == *-* ]]; then
-            gh release edit "$GITHUB_REF_NAME" \
-              --draft=false \
-              --prerelease \
-              --latest=false \
-              --verify-tag
+            gh api \
+              --method PATCH \
+              "repos/$GITHUB_REPOSITORY/releases/$DRAFT_RELEASE_ID" \
+              -F draft=false \
+              -F prerelease=true \
+              -f make_latest=false \
+              > "$release_json"
           else
-            gh release edit "$GITHUB_REF_NAME" \
-              --draft=false \
-              --prerelease=false \
-              --latest \
-              --verify-tag
+            gh api \
+              --method PATCH \
+              "repos/$GITHUB_REPOSITORY/releases/$DRAFT_RELEASE_ID" \
+              -F draft=false \
+              -F prerelease=false \
+              -f make_latest=true \
+              > "$release_json"
+          fi
+
+          expected_prerelease=false
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            expected_prerelease=true
+          fi
+          if ! jq --exit-status \
+            --arg tag "$GITHUB_REF_NAME" \
+            --argjson release_id "$DRAFT_RELEASE_ID" \
+            --argjson prerelease "$expected_prerelease" \
+            '.id == $release_id and
+             .tag_name == $tag and
+             .draft == false and
+             .prerelease == $prerelease' \
+            "$release_json" > /dev/null; then
+            echo "The verified draft was not published with the expected state." >&2
+            exit 1
           fi
