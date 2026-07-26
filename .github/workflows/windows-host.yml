@@ -5,13 +5,27 @@ on:
     branches: [vita]
     paths:
       - "host/**"
+      - "CMakeLists.txt"
+      - "CHANGELOG.md"
       - "docs/VITA_SETTINGS_GUIDE.md"
+      - "docs/CMakeLists.txt"
+      - "docs/README.pod"
+      - "resources/changeinfo.xml"
+      - "sce_sys/livearea/contents/template.xml"
+      - "tools/check-version-consistency.py"
       - ".github/workflows/windows-host.yml"
   pull_request:
     branches: [vita]
     paths:
       - "host/**"
+      - "CMakeLists.txt"
+      - "CHANGELOG.md"
       - "docs/VITA_SETTINGS_GUIDE.md"
+      - "docs/CMakeLists.txt"
+      - "docs/README.pod"
+      - "resources/changeinfo.xml"
+      - "sce_sys/livearea/contents/template.xml"
+      - "tools/check-version-consistency.py"
       - ".github/workflows/windows-host.yml"
   workflow_dispatch:
   workflow_call:
@@ -20,6 +34,9 @@ on:
         required: false
       WINDOWS_CERTIFICATE_PASSWORD:
         required: false
+
+permissions:
+  contents: read
 
 jobs:
   compatibility:
@@ -30,31 +47,55 @@ jobs:
         os: [windows-2022, windows-2025]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          dotnet-version: "8.0.x"
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.x"
+      - name: Verify release version consistency
+        run: python tools/check-version-consistency.py
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: "8.0.423"
       - name: Build with warnings as errors
         run: dotnet build host/VitaMoonlight.Host/VitaMoonlight.Host.csproj --configuration Release
       - name: Portable logic self-test
         run: dotnet run --project host/VitaMoonlight.Host/VitaMoonlight.Host.csproj --configuration Release --no-build -- self-test
 
   build:
-    runs-on: windows-latest
+    runs-on: windows-2025
     env:
-      HAS_WINDOWS_SIGNING_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 != '' }}
+      HAS_WINDOWS_SIGNING_CERTIFICATE: ${{ startsWith(github.ref, 'refs/tags/v') && secrets.WINDOWS_CERTIFICATE_BASE64 != '' && secrets.WINDOWS_CERTIFICATE_PASSWORD != '' }}
+      INNO_SETUP_COMPILER: C:\Program Files (x86)\Inno Setup 6\ISCC.exe
+      INNO_SETUP_VERSION: "6.7.3"
+      INNO_SETUP_SHA256: 9c73c3bae7ed48d44112a0f48e66742c00090bdb5bef71d9d3c056c66e97b732
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          dotnet-version: "8.0.x"
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.x"
+      - name: Verify release version consistency
+        run: python tools/check-version-consistency.py
+      - name: Require Windows signing credentials for releases
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          if ($env:HAS_WINDOWS_SIGNING_CERTIFICATE -ne 'true') {
+            throw 'Tagged releases require WINDOWS_CERTIFICATE_BASE64 and WINDOWS_CERTIFICATE_PASSWORD secrets.'
+          }
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: "8.0.423"
       - name: Build
         run: dotnet build host/VitaMoonlight.Host/VitaMoonlight.Host.csproj --configuration Release
       - name: Self-test
         run: dotnet run --project host/VitaMoonlight.Host/VitaMoonlight.Host.csproj --configuration Release --no-build -- self-test
       - name: Publish
         run: dotnet publish host/VitaMoonlight.Host/VitaMoonlight.Host.csproj --configuration Release --runtime win-x64 --self-contained true -p:PublishSingleFile=true -p:DebugType=None -p:DebugSymbols=false --output artifacts/host
-      - name: Restore optional Windows signing certificate
+      - name: Restore host signing certificate
         if: env.HAS_WINDOWS_SIGNING_CERTIFICATE == 'true'
         shell: pwsh
         env:
@@ -74,6 +115,15 @@ jobs:
           if ($null -eq $signTool) { throw "signtool.exe was not found." }
           & $signTool.FullName sign /fd SHA256 /td SHA256 /tr http://timestamp.digicert.com /f "$env:RUNNER_TEMP\vita-moonlight-signing.pfx" /p $env:WINDOWS_CERTIFICATE_PASSWORD artifacts/host/VitaMoonlight.Host.exe
           if ($LASTEXITCODE -ne 0) { throw "Signing the host companion failed." }
+      - name: Remove host signing certificate
+        if: ${{ always() && env.HAS_WINDOWS_SIGNING_CERTIFICATE == 'true' }}
+        shell: pwsh
+        run: |
+          $certificatePath = "$env:RUNNER_TEMP\vita-moonlight-signing.pfx"
+          Remove-Item -LiteralPath $certificatePath -Force -ErrorAction SilentlyContinue
+          if (Test-Path -LiteralPath $certificatePath) {
+            throw "The temporary host signing certificate could not be removed."
+          }
       - name: Test published executable
         run: artifacts/host/VitaMoonlight.Host.exe self-test
       - name: Prepare pinned signed display-driver bundle
@@ -85,12 +135,52 @@ jobs:
       - name: Prepare pinned Sunshine bundle
         shell: pwsh
         run: host/installer/prepare-sunshine.ps1
-      - name: Install Inno Setup
-        run: choco install innosetup --no-progress -y
-      - name: Build Windows installer
+      - name: Install pinned Inno Setup
         shell: pwsh
-        run: '& "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" host\installer\VitaMoonlightHost.iss'
-      - name: Sign Windows installer
+        run: |
+          $installerPath = "$env:RUNNER_TEMP\innosetup-$env:INNO_SETUP_VERSION.exe"
+          $installerUri = "https://github.com/jrsoftware/issrc/releases/download/is-6_7_3/innosetup-6.7.3.exe"
+          try {
+            Invoke-WebRequest -UseBasicParsing -Uri $installerUri -OutFile $installerPath
+            $actualHash = (Get-FileHash -LiteralPath $installerPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actualHash -ne $env:INNO_SETUP_SHA256) {
+              throw "Inno Setup SHA-256 mismatch: expected $env:INNO_SETUP_SHA256, found $actualHash."
+            }
+
+            $process = Start-Process `
+              -FilePath $installerPath `
+              -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-') `
+              -WindowStyle Hidden `
+              -Wait `
+              -PassThru
+            if ($process.ExitCode -ne 0) {
+              throw "Inno Setup $env:INNO_SETUP_VERSION installation failed with exit code $($process.ExitCode)."
+            }
+          }
+          finally {
+            Remove-Item -LiteralPath $installerPath -Force -ErrorAction SilentlyContinue
+          }
+
+          if (-not (Test-Path -LiteralPath $env:INNO_SETUP_COMPILER)) {
+            throw "Inno Setup compiler was not installed at the pinned path: $env:INNO_SETUP_COMPILER"
+          }
+      - name: Build unsigned Windows installer
+        if: env.HAS_WINDOWS_SIGNING_CERTIFICATE != 'true'
+        shell: pwsh
+        run: |
+          & $env:INNO_SETUP_COMPILER "host\installer\VitaMoonlightHost.iss"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Building the unsigned Windows installer failed."
+          }
+      - name: Restore installer signing certificate
+        if: env.HAS_WINDOWS_SIGNING_CERTIFICATE == 'true'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
+        run: |
+          $certificateBytes = [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_BASE64)
+          [IO.File]::WriteAllBytes("$env:RUNNER_TEMP\vita-moonlight-signing.pfx", $certificateBytes)
+      - name: Build signed Windows installer and uninstaller
         if: env.HAS_WINDOWS_SIGNING_CERTIFICATE == 'true'
         shell: pwsh
         env:
@@ -100,8 +190,107 @@ jobs:
             Sort-Object FullName -Descending |
             Select-Object -First 1
           if ($null -eq $signTool) { throw "signtool.exe was not found." }
-          & $signTool.FullName sign /fd SHA256 /td SHA256 /tr http://timestamp.digicert.com /f "$env:RUNNER_TEMP\vita-moonlight-signing.pfx" /p $env:WINDOWS_CERTIFICATE_PASSWORD artifacts/installer/Vita-Moonlight-Host-Setup-win-x64.exe
-          if ($LASTEXITCODE -ne 0) { throw "Signing the Windows installer failed." }
+
+          $powerShell = Get-Command pwsh.exe -ErrorAction Stop
+          $signingWrapper = "$env:RUNNER_TEMP\vita-moonlight-inno-sign.ps1"
+          $signingLog = "$env:RUNNER_TEMP\vita-moonlight-inno-sign-targets.txt"
+          $env:VITA_MOONLIGHT_SIGNTOOL_PATH = $signTool.FullName
+          $env:VITA_MOONLIGHT_CERTIFICATE_PATH = "$env:RUNNER_TEMP\vita-moonlight-signing.pfx"
+          $env:VITA_MOONLIGHT_INNO_SIGN_LOG = $signingLog
+
+          @'
+          param(
+            [Parameter(Mandatory = $true)]
+            [string] $FilePath
+          )
+
+          $ErrorActionPreference = 'Stop'
+          $signToolPath = $env:VITA_MOONLIGHT_SIGNTOOL_PATH
+          $certificatePath = $env:VITA_MOONLIGHT_CERTIFICATE_PATH
+          $certificatePassword = $env:WINDOWS_CERTIFICATE_PASSWORD
+          $signingLog = $env:VITA_MOONLIGHT_INNO_SIGN_LOG
+
+          if ([string]::IsNullOrWhiteSpace($signToolPath) -or
+              [string]::IsNullOrWhiteSpace($certificatePath) -or
+              [string]::IsNullOrWhiteSpace($certificatePassword) -or
+              [string]::IsNullOrWhiteSpace($signingLog)) {
+            throw 'Inno signing environment is incomplete.'
+          }
+
+          & $signToolPath sign /fd SHA256 /td SHA256 /tr http://timestamp.digicert.com /f $certificatePath /p $certificatePassword $FilePath
+          if ($LASTEXITCODE -ne 0) {
+            throw "Authenticode signing failed for $FilePath."
+          }
+
+          & $signToolPath verify /pa /all /v $FilePath
+          if ($LASTEXITCODE -ne 0) {
+            throw "Authenticode verification failed for $FilePath."
+          }
+
+          [IO.File]::AppendAllText(
+            $signingLog,
+            [IO.Path]::GetFullPath($FilePath) + [Environment]::NewLine)
+          '@ | Set-Content -LiteralPath $signingWrapper -Encoding utf8
+
+          $innoSignCommand =
+            '$q' + $powerShell.Source +
+            '$q -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $q' +
+            $signingWrapper +
+            '$q $f'
+          $compilerArguments = @(
+            "/DVitaMoonlightSignedBuild",
+            "/SVitaMoonlightReleaseAuthenticode=$innoSignCommand",
+            "host\installer\VitaMoonlightHost.iss"
+          )
+
+          & $env:INNO_SETUP_COMPILER @compilerArguments
+          if ($LASTEXITCODE -ne 0) {
+            throw "Building the signed Windows installer failed."
+          }
+
+          if (-not (Test-Path -LiteralPath $signingLog)) {
+            throw "Inno Setup did not invoke the configured SignTool."
+          }
+          $signedTargets = @(
+            Get-Content -LiteralPath $signingLog |
+              Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+          )
+          if ($signedTargets.Count -lt 2) {
+            throw "Expected Inno Setup to sign Setup and its uninstaller; observed $($signedTargets.Count) signing target(s)."
+          }
+          Write-Host "Inno Setup produced and verified $($signedTargets.Count) signed target(s), including its uninstaller."
+      - name: Remove installer signing material
+        if: ${{ always() && env.HAS_WINDOWS_SIGNING_CERTIFICATE == 'true' }}
+        shell: pwsh
+        run: |
+          $signingMaterial = @(
+            "$env:RUNNER_TEMP\vita-moonlight-signing.pfx",
+            "$env:RUNNER_TEMP\vita-moonlight-inno-sign.ps1",
+            "$env:RUNNER_TEMP\vita-moonlight-inno-sign-targets.txt"
+          )
+          Remove-Item -LiteralPath $signingMaterial -Force -ErrorAction SilentlyContinue
+          $remainingMaterial = @($signingMaterial | Where-Object { Test-Path -LiteralPath $_ })
+          if ($remainingMaterial.Count -ne 0) {
+            throw "Temporary Windows signing material could not be removed."
+          }
+      - name: Verify release signatures
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $signTool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+          if ($null -eq $signTool) { throw "signtool.exe was not found." }
+          $signedFiles = @(
+            "artifacts/host/VitaMoonlight.Host.exe",
+            "artifacts/installer/Vita-Moonlight-Host-Setup-win-x64.exe"
+          )
+          foreach ($signedFile in $signedFiles) {
+            & $signTool.FullName verify /pa /all /v $signedFile
+            if ($LASTEXITCODE -ne 0) {
+              throw "Authenticode verification failed for $signedFile."
+            }
+          }
       - name: Build portable archive
         shell: pwsh
         run: |
@@ -112,12 +301,8 @@ jobs:
           Copy-Item artifacts/sunshine artifacts/portable/tools/Sunshine -Recurse -Force
           Copy-Item host/README.md,host/END_TO_END_TEST.md,host/FINAL_RELEASE_CHECKLIST.md,host/COMPATIBILITY.md,docs/VITA_SETTINGS_GUIDE.md,host/THIRD_PARTY_NOTICES.md,LICENSE artifacts/portable -Force
           Compress-Archive -Path artifacts/portable/* -DestinationPath artifacts/installer/Vita-Moonlight-Host-Portable-win-x64.zip -CompressionLevel Optimal
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: vita-moonlight-windows-host
           path: artifacts/installer/*
           if-no-files-found: error
-      - name: Remove temporary signing certificate
-        if: ${{ always() && env.HAS_WINDOWS_SIGNING_CERTIFICATE == 'true' }}
-        shell: pwsh
-        run: Remove-Item -LiteralPath "$env:RUNNER_TEMP\vita-moonlight-signing.pfx" -Force -ErrorAction SilentlyContinue

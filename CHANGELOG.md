@@ -2,6 +2,14 @@
 
 * Removed obsolete Circle/O transition counters from real-time diagnostics.
   Normal Circle input and disconnect release safety are unchanged.
+* Fixed clipped and overlapping Vita menu text, made long help dialogs
+  scrollable, and hardened host-discovery labels and touch-zone previews.
+* Bounded every stored front-touch contact, sanitized legacy touch geometry,
+  and released mouse, DS4-touchpad, and tablet contacts when changing modes,
+  entering a mapped corner, or ending a stream.
+* Corrected the VPK build identity to 0.14.6 and added tag/version validation,
+  signed-release enforcement, exact release-asset checks, and SHA-256
+  manifests to the publishing workflow.
 
 ## 0.14.5
 

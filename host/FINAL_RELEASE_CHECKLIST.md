@@ -169,10 +169,11 @@ release notes.
       `THIRD_PARTY_NOTICES.md`.
 - [ ] Scan release assets with Microsoft Defender and VirusTotal or document
       why an external scan was not used.
-- [ ] Decide the Authenticode policy. For a polished public release, configure
-      `WINDOWS_CERTIFICATE_BASE64` and `WINDOWS_CERTIFICATE_PASSWORD` repository
-      secrets and verify signatures on the companion and installer. The VDD's
-      existing publisher signature is not a signature for this project's EXEs.
+- [ ] Configure the mandatory `WINDOWS_CERTIFICATE_BASE64` and
+      `WINDOWS_CERTIFICATE_PASSWORD` repository secrets. Tagged builds fail
+      closed without them. Verify Authenticode on the companion, installer, and
+      generated uninstaller; the VDD's publisher signature does not cover this
+      project's executables.
 
 ## GitHub and release gate
 
@@ -184,8 +185,8 @@ release notes.
       The release workflow builds both platforms and publishes their artifacts.
 - [ ] Download the published release, verify hashes/signatures again, and run a
       short install/pair/stream/disconnect smoke test from those public assets.
-- [ ] Publish known limitations, tested hardware, unsigned-binary status if
-      applicable, upgrade instructions, and rollback instructions.
+- [ ] Publish known limitations, tested hardware, signing-certificate
+      identity, upgrade instructions, and rollback instructions.
 
 ## Sign-off
 

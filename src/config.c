@@ -44,6 +44,8 @@ extern char* strdup(const char*);
 #define DEFAULT_PACKET_SIZE 1024
 #define MIN_BITRATE_KBPS 1000
 #define MAX_BITRATE_KBPS 30000
+#define VITA_TOUCH_WIDTH 960
+#define VITA_TOUCH_HEIGHT 544
 
 #define write_config_string(fd, key, value) fprintf(fd, "%s = %s\n", key, value)
 #define write_config_int(fd, key, value) fprintf(fd, "%s = %d\n", key, value)
@@ -342,7 +344,34 @@ bool config_file_parse(char* filename, PCONFIGURATION config) {
   return ini_parse(filename, ini_handle, config) == 0;
 }
 
-static void config_sanitize(PCONFIGURATION config) {
+static int clamp_int(int value, int minimum, int maximum) {
+  if (value < minimum) {
+    return minimum;
+  }
+  if (value > maximum) {
+    return maximum;
+  }
+  return value;
+}
+
+/*
+ * Keep the usable area at least one pixel wide while retaining the relative
+ * shape of an invalid legacy deadzone as closely as possible.
+ */
+static void sanitize_deadzone_axis(int *leading, int *trailing, int extent) {
+  *leading = clamp_int(*leading, 0, extent - 1);
+  *trailing = clamp_int(*trailing, 0, extent - 1);
+
+  int total = *leading + *trailing;
+  if (total >= extent) {
+    int usable_margin = extent - 1;
+    int scaled_leading = (*leading * usable_margin) / total;
+    *leading = scaled_leading;
+    *trailing = usable_margin - scaled_leading;
+  }
+}
+
+void config_sanitize(PCONFIGURATION config) {
   if (config->stream.width < 64 || config->stream.width > 1920 ||
       config->stream.height < 64 || config->stream.height > 1080) {
     config->stream.width = DEFAULT_STREAM_WIDTH;
@@ -387,9 +416,36 @@ static void config_sanitize(PCONFIGURATION config) {
   if (config->double_tap_sprint_step_time < 50 || config->double_tap_sprint_step_time > 1000) {
     config->double_tap_sprint_step_time = 200;
   }
+
+  sanitize_deadzone_axis(&config->back_deadzone.left,
+                         &config->back_deadzone.right,
+                         VITA_TOUCH_WIDTH);
+  sanitize_deadzone_axis(&config->back_deadzone.top,
+                         &config->back_deadzone.bottom,
+                         VITA_TOUCH_HEIGHT);
+
+  /*
+   * Special zones are square and mirrored into all four corners. Restrict
+   * their offset and size to the smaller Vita touch dimension so every
+   * generated rectangle remains positive and on-screen.
+   */
+  int special_extent =
+      VITA_TOUCH_WIDTH < VITA_TOUCH_HEIGHT ? VITA_TOUCH_WIDTH : VITA_TOUCH_HEIGHT;
+  config->special_keys.offset =
+      clamp_int(config->special_keys.offset, 0, special_extent - 1);
+  config->special_keys.size =
+      clamp_int(config->special_keys.size, 1,
+                special_extent - config->special_keys.offset);
 }
 
 void config_save(const char* filename, PCONFIGURATION config) {
+  /*
+   * Settings can be edited after initial parsing. Validate again before
+   * persisting so an invalid UI or legacy value cannot be used for the next
+   * input configuration in this process.
+   */
+  config_sanitize(config);
+
   FILE* fd = fopen(filename, "w");
   if (fd == NULL) {
     fprintf(stderr, "Can't open configuration file: %s\n", filename);

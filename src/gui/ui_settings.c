@@ -139,19 +139,20 @@ static int deadzone_loop(int cursor, void *context, const input_data *input) {
   int delta = left ? -15 : (right ? 15 : 0);
   switch (cursor) {
     case 0: config.back_deadzone.top += delta; break;
-    case 1: config.back_deadzone.right += delta; break;
+    case 1: config.back_deadzone.left += delta; break;
     case 2: config.back_deadzone.bottom += delta; break;
-    case 3: config.back_deadzone.left += delta; break;
+    case 3: config.back_deadzone.right += delta; break;
   }
+  config_sanitize(&config);
 
   settings_loop_setup = 0;
   char current[256];
 
   int numbers[] = {
     config.back_deadzone.top,
-    config.back_deadzone.right,
+    config.back_deadzone.left,
     config.back_deadzone.bottom,
-    config.back_deadzone.left
+    config.back_deadzone.right
   };
   for (int i = 0; i < 4; i++) {
     sprintf(current, "%dpx", numbers[i]);
@@ -162,6 +163,7 @@ static int deadzone_loop(int cursor, void *context, const input_data *input) {
 }
 
 static int deadzone_settings_menu() {
+  config_sanitize(&config);
   sceTouchSetSamplingState(SCE_TOUCH_PORT_BACK, SCE_TOUCH_SAMPLING_STATE_START);
 
   menu_entry menu[16];
@@ -233,6 +235,10 @@ enum {
 enum {
   SETTINGS_SPECIAL_KEYS_NW_VIEW = 3
 };
+
+static void clamp_special_keys_geometry(void) {
+  config_sanitize(&config);
+}
 
 static int select_special_key_loop(int id, void *context, const input_data *input) {
   int *code = context;
@@ -319,6 +325,7 @@ static int special_keys_loop(int id, void *context, const input_data *input) {
       }
       break;
   }
+  clamp_special_keys_geometry();
 
   menu_entry *menu = context;
 
@@ -336,50 +343,40 @@ static int special_keys_loop(int id, void *context, const input_data *input) {
 }
 
 static void special_keys_draw() {
+  clamp_special_keys_geometry();
   int special_offset = config.special_keys.offset,
       special_size = config.special_keys.size;
 
   unsigned int color = 0xff006000;
 
-  for (int i = TOUCHSEC_SPECIAL_NW; i <= TOUCHSEC_SPECIAL_SE; i++) {
-    switch (i) {
-      case TOUCHSEC_SPECIAL_SW:
-        vita2d_draw_rectangle(
-            special_offset,
-            HEIGHT - special_size - special_offset,
-            special_size,
-            special_size,
-            color);
-        // fallthrough
-      case TOUCHSEC_SPECIAL_SE:
-        vita2d_draw_rectangle(
-            WIDTH - special_size - special_offset,
-            HEIGHT - special_size - special_offset,
-            special_size,
-            special_size,
-            color);
-        // fallthrough
-      case TOUCHSEC_SPECIAL_NW:
-        vita2d_draw_rectangle(
-            special_offset,
-            special_offset,
-            special_size,
-            special_size,
-            color);
-        // fallthrough
-      case TOUCHSEC_SPECIAL_NE:
-        vita2d_draw_rectangle(
-            WIDTH - special_size - special_offset,
-            special_offset,
-            special_size,
-            special_size,
-            color);
-    }
-  }
-
+  vita2d_draw_rectangle(
+      special_offset,
+      special_offset,
+      special_size,
+      special_size,
+      color);
+  vita2d_draw_rectangle(
+      WIDTH - special_size - special_offset,
+      special_offset,
+      special_size,
+      special_size,
+      color);
+  vita2d_draw_rectangle(
+      special_offset,
+      HEIGHT - special_size - special_offset,
+      special_size,
+      special_size,
+      color);
+  vita2d_draw_rectangle(
+      WIDTH - special_size - special_offset,
+      HEIGHT - special_size - special_offset,
+      special_size,
+      special_size,
+      color);
 }
 
 static int special_keys_menu() {
+  clamp_special_keys_geometry();
   menu_entry menu[16];
   int idx = 0;
 
@@ -1051,11 +1048,11 @@ static int settings_loop(int id, void *context, const input_data *input) {
   sprintf(current, "%s", config.mapping != 0 ? "yes" : "no");
   MENU_REPLACE(SETTINGS_VIEW_ENABLE_MAPPING, current);
 
-  sprintf(current, "%dpx,%dpx,%dpx,%dpx",
+  sprintf(current, "T:%d L:%d B:%d R:%d",
           config.back_deadzone.top,
-          config.back_deadzone.right,
+          config.back_deadzone.left,
           config.back_deadzone.bottom,
-          config.back_deadzone.left);
+          config.back_deadzone.right);
   MENU_REPLACE(SETTINGS_VIEW_BACK_DEADZONE, current);
 
   sprintf(current, "%d", config.mouse_acceleration);

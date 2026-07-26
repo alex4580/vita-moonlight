@@ -14,6 +14,7 @@ typedef struct SceRtcTick SceRtcTick;
 
 void touchabsolute_enable(bool enable);
 bool touchabsolute_is_enabled();
+void touchabsolute_release_all(void);
 
 // Nuevas funciones para manejar los 3 modos de touchscreen
 void touchabsolute_handle_ds4(const TouchData* touch, SceRtcTick* current);

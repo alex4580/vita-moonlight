@@ -551,6 +551,14 @@ static void draw_row(int index,
   const int x = 190;
   const int y = first_y + index * row_height;
   const int width = 580;
+  const int padding = 12;
+  const int minimum_gap = 16;
+  char fitted_label[128];
+  char fitted_value[128];
+  int label_x = x + padding;
+  int value_width = 0;
+  int value_x = x + width - padding;
+  int label_max_width;
   unsigned int text_color = RGBA8(235, 240, 250, 255);
   if (selected_item == index) {
     vita2d_draw_rectangle(
@@ -558,16 +566,28 @@ static void draw_row(int index,
         RGBA8(47, 111, 237, 225));
     text_color = RGBA8(255, 255, 255, 255);
   }
-  vita2d_font_draw_text(font, x + 12, y, text_color, 17, label);
+
   if (value && value[0]) {
-    int value_width = vita2d_font_text_width(font, 17, value);
+    value_width = guilib_fit_text(
+        fitted_value, sizeof(fitted_value), value,
+        17, width / 2 - padding);
+    value_x -= value_width;
     vita2d_font_draw_text(
-        font, x + width - value_width - 12, y, text_color, 17, value);
+        font, value_x, y, text_color, 17, fitted_value);
   }
+
+  label_max_width = value_width > 0
+      ? value_x - minimum_gap - label_x
+      : x + width - padding - label_x;
+  guilib_fit_text(
+      fitted_label, sizeof(fitted_label), label,
+      17, label_max_width);
+  vita2d_font_draw_text(
+      font, label_x, y, text_color, 17, fitted_label);
 }
 
 static void draw_main_page(void) {
-  const int first_y = 119;
+  const int first_y = 137;
   const int row_height = 32;
   draw_row(MAIN_RESUME, first_y, row_height, "Resume stream", "X");
   draw_row(MAIN_STREAM, first_y, row_height, "Stream & virtual display", ">");
@@ -588,7 +608,7 @@ static void draw_main_page(void) {
 
 static void draw_stream_page(void) {
   char value[64];
-  const int first_y = 108;
+  const int first_y = 137;
   const int row_height = 29;
 
   draw_row(STREAM_BACK, first_y, row_height, "Back", "O");
@@ -633,7 +653,7 @@ static void draw_stream_page(void) {
 }
 
 static void draw_input_page(void) {
-  const int first_y = 115;
+  const int first_y = 137;
   const int row_height = 36;
   draw_row(INPUT_BACK, first_y, row_height, "Back", "O");
   draw_row(
@@ -708,6 +728,13 @@ void stream_overlay_draw(void) {
     draw_main_page();
   }
 
-  vita2d_font_draw_text(
-      font, 190, 486, RGBA8(166, 181, 208, 255), 14, footer_text());
+  {
+    char fitted_footer[160];
+    guilib_fit_text(
+        fitted_footer, sizeof(fitted_footer), footer_text(),
+        14, 580);
+    vita2d_font_draw_text(
+        font, 190, 486, RGBA8(166, 181, 208, 255),
+        14, fitted_footer);
+  }
 }

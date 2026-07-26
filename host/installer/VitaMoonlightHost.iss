@@ -18,6 +18,7 @@
 AppId={{D88FE6B4-D767-4A27-B192-E1DB4F6E835C}
 AppName=Vita Moonlight Host
 AppVersion=0.14.6
+VersionInfoVersion=0.14.6.0
 AppPublisher=Vita Moonlight contributors
 AppPublisherURL=https://github.com/alex4580/vita-moonlight
 DefaultDirName={autopf}\Vita Moonlight Host
@@ -34,6 +35,12 @@ WizardStyle=modern
 OutputDir={#OutputDir}
 OutputBaseFilename=Vita-Moonlight-Host-Setup-win-x64
 UninstallDisplayIcon={app}\VitaMoonlight.Host.exe
+#ifdef VitaMoonlightSignedBuild
+SignTool=VitaMoonlightReleaseAuthenticode
+SignedUninstaller=yes
+#else
+SignedUninstaller=no
+#endif
 
 [Tasks]
 Name: "gamepaddriver"; Description: "Install or repair ViGEmBus for Xbox/DS4 controller emulation"; GroupDescription: "Host setup:"

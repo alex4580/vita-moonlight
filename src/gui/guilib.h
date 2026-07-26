@@ -1,4 +1,5 @@
 #include <stdbool.h>
+#include <stddef.h>
 #include <vita2d.h>
 
 #include <psp2/touch.h>
@@ -68,6 +69,18 @@ void display_error(char *format, ...);
 void flash_message(char *format, ...);
 
 void guilib_init(gui_loop_callback global_loop_cb, gui_draw_callback global_draw_cb);
+
+/*
+ * Copies text into output, shortening it at a UTF-8 code-point boundary and
+ * appending "..." when it does not fit. Returns the rendered width.
+ */
+int guilib_fit_text(
+        char *output,
+        size_t output_size,
+        const char *text,
+        int font_size,
+        int max_width
+        );
 
 // Declaración de display_confirm para uso global
 int display_confirm(const char* message);

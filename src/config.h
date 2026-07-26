@@ -121,6 +121,7 @@ extern bool inputAdded;
 
 bool config_file_parse(char* filename, PCONFIGURATION config);
 void config_parse(int argc, char* argv[], PCONFIGURATION config);
+void config_sanitize(PCONFIGURATION config);
 void config_save(const char* filename, PCONFIGURATION config);
 int config_recommended_bitrate(int width, int height, int fps);
 int config_detect_stream_preset(void);

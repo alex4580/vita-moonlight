@@ -30,6 +30,7 @@
 #include <sys/types.h>
 #include <openssl/rand.h>
 #include <openssl/evp.h>
+#include <pthread.h>
 
 #include "../connection.h"
 #include "../config.h"
@@ -197,8 +198,15 @@ static int HORIZONTAL;
 Section BACK_SECTIONS[4];
 Section FRONT_SECTIONS[4];
 
+static inline size_t touch_report_count(const SceTouchData *data) {
+  size_t count = data->reportNum;
+  size_t capacity = sizeof(data->report) / sizeof(data->report[0]);
+  return count < capacity ? count : capacity;
+}
+
 inline uint8_t read_backscreen() {
-  for (int i = 0; i < back.reportNum; i++) {
+  size_t report_count = touch_report_count(&back);
+  for (size_t i = 0; i < report_count; i++) {
     int x = lerp(back.report[i].x, 1919, WIDTH);
     int y = lerp(back.report[i].y, 1087, HEIGHT);
 
@@ -236,18 +244,24 @@ inline uint8_t read_backscreen() {
 
 // Nueva función: solo actualiza touch.points y touch.finger
 static inline void update_touch_points() {
-  touch.finger = 0;
-  for (int i = 0; i < front.reportNum; i++) {
+  size_t report_count = touch_report_count(&front);
+  size_t point_capacity = sizeof(touch.points) / sizeof(touch.points[0]);
+  if (report_count > point_capacity) {
+    report_count = point_capacity;
+  }
+
+  for (size_t i = 0; i < report_count; i++) {
     int x = lerp(front.report[i].x, 1919, WIDTH);
     int y = lerp(front.report[i].y, 1087, HEIGHT);
-    touch.points[touch.finger].x = x;
-    touch.points[touch.finger].y = y;
-    touch.finger += 1;
+    touch.points[i].x = x;
+    touch.points[i].y = y;
   }
+  touch.finger = (short)report_count;
 }
 
 inline uint8_t read_frontscreen() {
-  for (int i = 0; i < front.reportNum; i++) {
+  size_t report_count = touch_report_count(&front);
+  for (size_t i = 0; i < report_count; i++) {
     int x = lerp(front.report[i].x, 1919, WIDTH);
     int y = lerp(front.report[i].y, 1087, HEIGHT);
 
@@ -700,13 +714,16 @@ void handle_psbutton() {
 }
 
 bool in_front_touchzone() {
-  for (int i = 0; i < touch.finger; i++) {
-    int x = touch.points[i].x;
-    int y = touch.points[i].y;
-    for (int s = 0; s < 4; s++) {
-      if (has_specialkey(s) && IN_SECTION(FRONT_SECTIONS[s], x, y)) {
-        return true;
-      }
+  static const uint16_t touchzone_flags[] = {
+    TOUCHSEC_SPECIAL_NW,
+    TOUCHSEC_SPECIAL_NE,
+    TOUCHSEC_SPECIAL_SW,
+    TOUCHSEC_SPECIAL_SE
+  };
+
+  for (size_t i = 0; i < sizeof(touchzone_flags) / sizeof(touchzone_flags[0]); i++) {
+    if (has_specialkey((int)i) && (touch.button & touchzone_flags[i])) {
+      return true;
     }
   }
 
@@ -803,12 +820,31 @@ void process_triggers() {
 extern bool keyboardsystem_is_open(void);
 
 void process_touch() {
+  static int processed_touchscreen_mode = -1;
+
+  if (processed_touchscreen_mode != config.touchscreen_mode) {
+    if (front_state == SCREEN_TAP) {
+      mouse_click(finger_count, false);
+    }
+    front_state = NO_TOUCH_ACTION;
+    finger_count = 0;
+    touchabsolute_enable(config.touchscreen_mode == 2);
+    processed_touchscreen_mode = config.touchscreen_mode;
+  }
+
   if (config.enable_double_tap_sprint) {
     check_for_double_click(&curr);
   }
 
-  if(in_front_touchzone())
+  if (in_front_touchzone()) {
+    if (front_state == SCREEN_TAP) {
+      mouse_click(finger_count, false);
+    }
+    front_state = NO_TOUCH_ACTION;
+    finger_count = 0;
+    touchabsolute_release_all();
     return;
+  }
 
   // --- PROCESAMIENTO DE MODOS TÁCTILES EXCLUSIVOS ---
 
@@ -997,13 +1033,16 @@ inline void vitainput_process(void) {
   }
 }
 
-static volatile uint8_t active_input_thread = 0;
+static uint8_t active_input_thread = 0;
+static pthread_mutex_t input_process_mutex;
 
 int vitainput_thread(SceSize args, void *argp) {
   while (1) {
+    pthread_mutex_lock(&input_process_mutex);
     if (active_input_thread) {
       vitainput_process();
     }
+    pthread_mutex_unlock(&input_process_mutex);
 
     sceKernelDelayThread(2000); // 2 ms
   }
@@ -1016,16 +1055,30 @@ bool vitainput_init() {
   sceTouchSetSamplingState(SCE_TOUCH_PORT_FRONT, SCE_TOUCH_SAMPLING_STATE_START);
   sceTouchSetSamplingState(SCE_TOUCH_PORT_BACK, SCE_TOUCH_SAMPLING_STATE_START);
 
-  SceUID thid = sceKernelCreateThread("vitainput_thread", vitainput_thread, 0, 0x40000, 0, 0, NULL);
-  if (thid >= 0) {
-    sceKernelStartThread(thid, 0, NULL);
-    return true;
+  if (pthread_mutex_init(&input_process_mutex, NULL) != 0) {
+    return false;
   }
 
+  SceUID thid = sceKernelCreateThread("vitainput_thread", vitainput_thread, 0, 0x40000, 0, 0, NULL);
+  if (thid >= 0) {
+    if (sceKernelStartThread(thid, 0, NULL) >= 0) {
+      return true;
+    }
+    sceKernelDeleteThread(thid);
+  }
+
+  pthread_mutex_destroy(&input_process_mutex);
   return false;
 }
 
 void vitainput_config(CONFIGURATION config) {
+  /*
+   * Callers normally pass the already-validated global configuration, but
+   * validate this local copy too so input rectangles are safe even if a
+   * settings path invokes us before saving.
+   */
+  config_sanitize(&config);
+
   // Sincroniza el modo swap global con la configuración cargada
   swap_shoulder_buttons = config.swap_shoulder_buttons;
   map.abs_x           = LEFTX               | INPUT_TYPE_ANALOG;
@@ -1118,6 +1171,8 @@ void vitainput_config(CONFIGURATION config) {
 }
 
 void vitainput_start(void) {
+  pthread_mutex_lock(&input_process_mutex);
+  keyboardsystem_prepare_for_stream();
   memset(&pad_old, 0, sizeof(pad_old));
   memset(&shortcut_pad_old, 0, sizeof(shortcut_pad_old));
   memset(&old, 0, sizeof(old));
@@ -1167,10 +1222,19 @@ void vitainput_start(void) {
     lock_psbutton();
 
   active_input_thread = true;
+  pthread_mutex_unlock(&input_process_mutex);
 }
 
 void vitainput_stop(void) {
+  /*
+   * Close the blocking Vita IME before waiting for a worker tick that may be
+   * inside its update loop. Taking the mutex then guarantees the releases
+   * below occur after every in-flight input event.
+   */
+  keyboardsystem_close_keyboard();
+  pthread_mutex_lock(&input_process_mutex);
   active_input_thread = false;
+  touchabsolute_release_all();
   // Release all controls and remove the virtual pad while the connection is
   // still alive. This prevents a held button surviving pause or disconnect.
   LiSendMultiControllerEvent(0, 1, 0, 0, 0, 0, 0, 0, 0);
@@ -1179,5 +1243,6 @@ void vitainput_stop(void) {
   unlock_psbutton();
   reset_psbutton_state();
   reset_physical_shortcuts();
+  pthread_mutex_unlock(&input_process_mutex);
   vita_motion_end_stream();
 }

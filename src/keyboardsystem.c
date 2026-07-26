@@ -27,7 +27,16 @@ static KeyboardLayout g_keyboard_layout = KB_LAYOUT_EN_US;
 
 
 // Estado interno del overlay de teclado virtual
-static bool _keyboard_overlay_open = false;
+static uint32_t keyboard_overlay_open = 0;
+static uint32_t keyboard_close_requested = 0;
+
+static bool keyboard_flag_load(const uint32_t *flag) {
+    return __atomic_load_n(flag, __ATOMIC_ACQUIRE) != 0;
+}
+
+static void keyboard_flag_store(uint32_t *flag, bool value) {
+    __atomic_store_n(flag, value ? 1U : 0U, __ATOMIC_RELEASE);
+}
 
 void keyboardsystem_set_layout(KeyboardLayout layout) {
     g_keyboard_layout = layout;
@@ -35,7 +44,15 @@ void keyboardsystem_set_layout(KeyboardLayout layout) {
 
 // Exponer el estado para otros módulos
 bool keyboardsystem_is_open(void) {
-    return _keyboard_overlay_open;
+    return keyboard_flag_load(&keyboard_overlay_open);
+}
+
+void keyboardsystem_close_keyboard(void) {
+    keyboard_flag_store(&keyboard_close_requested, true);
+}
+
+void keyboardsystem_prepare_for_stream(void) {
+    keyboard_flag_store(&keyboard_close_requested, false);
 }
 
 static int find_vk_for_char(wchar_t ch, int* vk, int* needs_shift) {
@@ -182,8 +199,17 @@ static void keyboardsystem_ime_event_handler(void *arg, const SceImeEventData *e
 }
 
 void keyboardsystem_open_keyboard(void) {
+    /*
+     * A disconnect may race a shortcut that was about to open the IME. Keep
+     * the close request latched until the next stream starts so teardown can
+     * never wait behind a newly opened keyboard.
+     */
+    if (keyboard_flag_load(&keyboard_close_requested)) {
+        return;
+    }
+
     // Marcar overlay como abierto
-    _keyboard_overlay_open = true;
+    keyboard_flag_store(&keyboard_overlay_open, true);
 
     // Asegura que el layout global esté sincronizado con la config antes de abrir el IME
     keyboardsystem_set_layout((KeyboardLayout)config.keyboard_layout);
@@ -239,7 +265,7 @@ void keyboardsystem_open_keyboard(void) {
     int res = sceImeOpen(&param);
     if (res < 0) {
         sceClibPrintf("Error al abrir IME: 0x%08X\n", res);
-        _keyboard_overlay_open = false;
+        keyboard_flag_store(&keyboard_overlay_open, false);
         return;
     }
     // Solo aquí es seguro llamar a setText y setCaret
@@ -247,6 +273,10 @@ void keyboardsystem_open_keyboard(void) {
     sceImeSetCaret(&caret_rev);
     // 5) Bucle de actualización: llamar a sceImeUpdate() hasta que devuelva < 0
     while (1) {
+        if (keyboard_flag_load(&keyboard_close_requested)) {
+            sceImeClose();
+            break;
+        }
         if (forzar_centro) {
             SceWChar16 dummy[4] = {1, 1, 1, 0};
             sceImeSetText(dummy, 4);
@@ -267,5 +297,5 @@ void keyboardsystem_open_keyboard(void) {
         sceKernelDelayThread(1000); // Esperar 1 ms
     }
     // Marcar overlay como cerrado al salir del bucle
-    _keyboard_overlay_open = false;
+    keyboard_flag_store(&keyboard_overlay_open, false);
 }
