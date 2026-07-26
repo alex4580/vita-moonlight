@@ -22,6 +22,7 @@ on:
       - "sce_sys/livearea/contents/template.xml"
       - "tools/check-version-consistency.py"
       - "tools/summarize-vita-log.py"
+      - ".github/workflows/release.yml"
       - ".github/workflows/windows-host.yml"
   pull_request:
     branches: [vita]
@@ -44,6 +45,7 @@ on:
       - "sce_sys/livearea/contents/template.xml"
       - "tools/check-version-consistency.py"
       - "tools/summarize-vita-log.py"
+      - ".github/workflows/release.yml"
       - ".github/workflows/windows-host.yml"
   workflow_dispatch:
   workflow_call:
@@ -51,6 +53,8 @@ on:
       WINDOWS_CERTIFICATE_BASE64:
         required: false
       WINDOWS_CERTIFICATE_PASSWORD:
+        required: false
+      WINDOWS_EXPECTED_SIGNER_SUBJECT:
         required: false
 
 permissions:
@@ -84,7 +88,13 @@ jobs:
   build:
     runs-on: windows-2025
     env:
+      IS_TAGGED_RELEASE: ${{ startsWith(github.ref, 'refs/tags/v') }}
+      IS_UNSIGNED_BOOTSTRAP: ${{ github.repository == 'alex4580/vita-moonlight' && github.ref == 'refs/tags/v0.14.6-beta.1' }}
+      HAS_WINDOWS_CERTIFICATE_DATA: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 != '' }}
+      HAS_WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD != '' }}
+      HAS_WINDOWS_EXPECTED_SIGNER_SUBJECT: ${{ secrets.WINDOWS_EXPECTED_SIGNER_SUBJECT != '' }}
       HAS_WINDOWS_SIGNING_CERTIFICATE: ${{ startsWith(github.ref, 'refs/tags/v') && secrets.WINDOWS_CERTIFICATE_BASE64 != '' && secrets.WINDOWS_CERTIFICATE_PASSWORD != '' }}
+      WINDOWS_EXPECTED_SIGNER_SUBJECT: ${{ secrets.WINDOWS_EXPECTED_SIGNER_SUBJECT }}
       INNO_SETUP_COMPILER: C:\Program Files (x86)\Inno Setup 6\ISCC.exe
       INNO_SETUP_VERSION: "6.7.3"
       INNO_SETUP_SHA256: 9c73c3bae7ed48d44112a0f48e66742c00090bdb5bef71d9d3c056c66e97b732
@@ -97,12 +107,45 @@ jobs:
           python-version: "3.x"
       - name: Verify release version consistency
         run: python tools/check-version-consistency.py
-      - name: Require Windows signing credentials for releases
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Select Windows release signing mode
+        if: env.IS_TAGGED_RELEASE == 'true'
         shell: pwsh
         run: |
-          if ($env:HAS_WINDOWS_SIGNING_CERTIFICATE -ne 'true') {
-            throw 'Tagged releases require WINDOWS_CERTIFICATE_BASE64 and WINDOWS_CERTIFICATE_PASSWORD secrets.'
+          if ($env:HAS_WINDOWS_CERTIFICATE_DATA -ne $env:HAS_WINDOWS_CERTIFICATE_PASSWORD) {
+            throw 'Windows signing configuration is incomplete: configure both certificate secrets or neither.'
+          }
+          if ($env:IS_UNSIGNED_BOOTSTRAP -eq 'true') {
+            if ($env:GITHUB_REPOSITORY -ne 'alex4580/vita-moonlight' -or
+                $env:GITHUB_REF -ne 'refs/tags/v0.14.6-beta.1') {
+              throw 'Unsigned-bootstrap context validation failed.'
+            }
+            if ($env:HAS_WINDOWS_CERTIFICATE_DATA -eq 'true' -or
+                $env:HAS_WINDOWS_CERTIFICATE_PASSWORD -eq 'true' -or
+                $env:HAS_WINDOWS_EXPECTED_SIGNER_SUBJECT -eq 'true') {
+              throw 'The one-time unsigned bootstrap must not receive Windows signing secrets.'
+            }
+            $projectText = Get-Content -LiteralPath host/VitaMoonlight.Host/VitaMoonlight.Host.csproj -Raw
+            $versionMatch = [regex]::Match($projectText, '<Version>([^<]+)</Version>')
+            if (-not $versionMatch.Success -or $versionMatch.Groups[1].Value -ne '0.14.6') {
+              throw 'The unsigned bootstrap is restricted to project version 0.14.6.'
+            }
+            Write-Warning 'v0.14.6-beta.1 will be published unsigned. Windows will identify it as an unknown publisher.'
+            @(
+              '## Windows signing mode'
+              ''
+              'This one-time bootstrap beta is intentionally **unsigned**. The release'
+              'workflow must add an Unknown publisher / SmartScreen warning and publish'
+              'the signing-status manifest, checksums, and GitHub provenance attestations.'
+            ) | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
+          }
+          elseif ($env:HAS_WINDOWS_SIGNING_CERTIFICATE -ne 'true') {
+            throw 'Every tagged release except v0.14.6-beta.1 requires both Windows signing certificate secrets.'
+          }
+          elseif ($env:HAS_WINDOWS_EXPECTED_SIGNER_SUBJECT -ne 'true') {
+            throw 'Signed releases require WINDOWS_EXPECTED_SIGNER_SUBJECT.'
+          }
+          else {
+            Write-Host 'This release will use Authenticode signing.'
           }
       - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
@@ -291,8 +334,8 @@ jobs:
           if ($remainingMaterial.Count -ne 0) {
             throw "Temporary Windows signing material could not be removed."
           }
-      - name: Verify release signatures
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Verify signed release artifacts
+        if: env.HAS_WINDOWS_SIGNING_CERTIFICATE == 'true'
         shell: pwsh
         run: |
           $signTool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
@@ -308,7 +351,88 @@ jobs:
             if ($LASTEXITCODE -ne 0) {
               throw "Authenticode verification failed for $signedFile."
             }
+            $signature = Get-AuthenticodeSignature -LiteralPath $signedFile
+            if ($signature.SignerCertificate.Subject -ne $env:WINDOWS_EXPECTED_SIGNER_SUBJECT) {
+              throw "Unexpected Authenticode signer for $signedFile."
+            }
+            if ($null -eq $signature.TimeStamperCertificate) {
+              throw "Authenticode timestamp is missing for $signedFile."
+            }
           }
+      - name: Verify unsigned artifacts
+        if: env.HAS_WINDOWS_SIGNING_CERTIFICATE != 'true'
+        shell: pwsh
+        run: |
+          $unsignedFiles = @(
+            "artifacts/host/VitaMoonlight.Host.exe",
+            "artifacts/installer/Vita-Moonlight-Host-Setup-win-x64.exe"
+          )
+          foreach ($unsignedFile in $unsignedFiles) {
+            $signature = Get-AuthenticodeSignature -LiteralPath $unsignedFile
+            if ($signature.Status.ToString() -ne 'NotSigned') {
+              throw "Expected $unsignedFile to be unsigned, but its Authenticode status is $($signature.Status)."
+            }
+          }
+          Write-Host 'Verified that the project-owned Windows artifacts are unsigned.'
+      - name: Record Windows signing status
+        shell: pwsh
+        run: |
+          $isSigned = $env:HAS_WINDOWS_SIGNING_CERTIFICATE -eq 'true'
+          $artifactPaths = @(
+            "artifacts/host/VitaMoonlight.Host.exe",
+            "artifacts/installer/Vita-Moonlight-Host-Setup-win-x64.exe"
+          )
+          $files = foreach ($artifactPath in $artifactPaths) {
+            $signature = Get-AuthenticodeSignature -LiteralPath $artifactPath
+            [ordered]@{
+              name = [IO.Path]::GetFileName($artifactPath)
+              sha256 = (Get-FileHash -LiteralPath $artifactPath -Algorithm SHA256).Hash.ToLowerInvariant()
+              authenticode_status = $signature.Status.ToString()
+              signer_subject = if ($null -ne $signature.SignerCertificate) {
+                $signature.SignerCertificate.Subject
+              } else {
+                $null
+              }
+              signer_thumbprint = if ($null -ne $signature.SignerCertificate) {
+                $signature.SignerCertificate.Thumbprint
+              } else {
+                $null
+              }
+              timestamp_subject = if ($null -ne $signature.TimeStamperCertificate) {
+                $signature.TimeStamperCertificate.Subject
+              } else {
+                $null
+              }
+            }
+          }
+          $manifest = [ordered]@{
+            schema = 'vita-moonlight/windows-signing-status/v1'
+            repository = $env:GITHUB_REPOSITORY
+            source_commit = $env:GITHUB_SHA
+            source_ref = $env:GITHUB_REF
+            release_tag = if ($env:IS_TAGGED_RELEASE -eq 'true') {
+              $env:GITHUB_REF_NAME
+            } else {
+              $null
+            }
+            mode = if ($isSigned) {
+              'signed-release'
+            } elseif ($env:IS_UNSIGNED_BOOTSTRAP -eq 'true') {
+              'unsigned-bootstrap'
+            } else {
+              'development-build'
+            }
+            files = @($files)
+            generated_uninstaller = [ordered]@{
+              signed = $isSigned
+            }
+          }
+          $manifestJson = $manifest | ConvertTo-Json -Depth 5
+          [IO.File]::WriteAllText(
+            (Join-Path $PWD 'artifacts/installer/windows-signing-status.json'),
+            $manifestJson + [Environment]::NewLine,
+            [Text.UTF8Encoding]::new($false))
+          Get-Content -LiteralPath artifacts/installer/windows-signing-status.json
       - name: Build portable archive
         shell: pwsh
         run: |
@@ -320,6 +444,7 @@ jobs:
           New-Item -ItemType Directory -Path artifacts/portable/tools/SupportLog -Force | Out-Null
           Copy-Item tools/summarize-vita-log.py artifacts/portable/tools/SupportLog -Force
           Copy-Item README.md,PRIVACY.md,LICENSE artifacts/portable -Force
+          Copy-Item artifacts/installer/windows-signing-status.json artifacts/portable -Force
           Copy-Item host/README.md,host/BETA_SMOKE_TEST.md,host/END_TO_END_TEST.md,host/FINAL_RELEASE_CHECKLIST.md,host/COMPATIBILITY.md,host/THIRD_PARTY_NOTICES.md artifacts/portable/host -Force
           Copy-Item docs/BUILDING.md,docs/COMMUNITY_TESTING.md,docs/LOGGING_AND_SUPPORT.md,docs/RELEASING.md,docs/CODE_SIGNING_POLICY.md,docs/VITA_SETTINGS_GUIDE.md artifacts/portable/docs -Force
           Compress-Archive -Path artifacts/portable/* -DestinationPath artifacts/installer/Vita-Moonlight-Host-Portable-win-x64.zip -CompressionLevel Optimal

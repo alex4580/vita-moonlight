@@ -13,6 +13,12 @@ signature whose signer is **SignPath Foundation**. It does not claim that an
 unsigned build, a developer build, or a release made before SignPath
 Foundation enrollment is covered by that program.
 
+The `v0.14.6-beta.1` release is a deliberately unsigned, one-time bootstrap
+and is not covered by SignPath Foundation. Its release page, checksum
+manifest, GitHub provenance attestations, and
+`windows-signing-status.json` identify that status. Every later public tag is
+signing-required by the repository workflow.
+
 ## Covered artifacts
 
 The SignPath-backed release policy is limited to project-owned Windows
