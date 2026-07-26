@@ -51,6 +51,10 @@ internal static class HostStatePaths
 
 internal sealed class DisplayTopologyService
 {
+    private sealed record VirtualDisplaySelection(
+        DisplayConfiguration Configuration,
+        DisplayDescriptor Display);
+
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         WriteIndented = true,
@@ -252,21 +256,26 @@ internal sealed class DisplayTopologyService
         int fps,
         bool forceSdr = true,
         bool persistMode = true,
-        int modeAttempts = 40)
+        int modeAttempts = 40,
+        int enumerationAttempts = 60)
     {
         if (modeAttempts < 1)
         {
             throw new ArgumentOutOfRangeException(nameof(modeAttempts));
         }
-
-        var availableConfiguration = WindowsDisplayNative.Query(WindowsDisplayNative.QueryAllPaths);
-        var selected = SelectVirtualDisplayForActivation(Describe(availableConfiguration), nameMatch);
-        if (selected is null)
+        if (enumerationAttempts < 1)
         {
-            throw new InvalidOperationException(
-                "No virtual display was found. Run `display list` and configure its name with `configure --display-match <text>`."
-            );
+            throw new ArgumentOutOfRangeException(nameof(enumerationAttempts));
         }
+
+        // Updating an already-installed IDD restarts its device stack. Windows
+        // can report a successful PnP restart several seconds before the
+        // display target returns to QueryDisplayConfig. Do not mistake that
+        // transient gap for a bad installation, and do not alter the active
+        // topology while waiting for the target to finish enumerating.
+        var availableSelection = WaitForVirtualDisplay(nameMatch, enumerationAttempts);
+        var availableConfiguration = availableSelection.Configuration;
+        var selected = availableSelection.Display;
 
         var activeConfiguration = WindowsDisplayNative.Query(WindowsDisplayNative.QueryOnlyActivePaths);
         var physicalDisplays = SelectActivePhysicalDisplaysForVerification(Describe(activeConfiguration));
@@ -326,6 +335,58 @@ internal sealed class DisplayTopologyService
             $"Last Windows response: {lastError?.Message ?? "no mode response was returned"}.",
             lastError);
     }
+
+    private static VirtualDisplaySelection WaitForVirtualDisplay(
+        string? nameMatch,
+        int attempts)
+    {
+        Exception? lastError = null;
+        IReadOnlyList<DisplayDescriptor> lastDisplays = Array.Empty<DisplayDescriptor>();
+        for (var attempt = 0; attempt < attempts; attempt++)
+        {
+            try
+            {
+                var configuration = WindowsDisplayNative.Query(WindowsDisplayNative.QueryAllPaths);
+                lastDisplays = Describe(configuration);
+                var selected = SelectVirtualDisplayForActivation(lastDisplays, nameMatch);
+                if (selected is not null)
+                {
+                    return new VirtualDisplaySelection(configuration, selected);
+                }
+            }
+            catch (Exception error) when (error is InvalidOperationException or Win32Exception)
+            {
+                lastError = error;
+            }
+
+            if (attempt < attempts - 1)
+            {
+                Thread.Sleep(500);
+            }
+        }
+
+        var availableVirtualDisplays = lastDisplays
+            .Where(display => display.IsAvailable && IsLikelyVirtualDisplay(display))
+            .Select(DisplayIdentity)
+            .ToArray();
+        var detail = availableVirtualDisplays.Length == 0
+            ? "Windows did not enumerate an available virtual display target."
+            : string.IsNullOrWhiteSpace(nameMatch)
+                ? $"Windows enumerated: {string.Join(", ", availableVirtualDisplays)}."
+                : $"Windows enumerated {string.Join(", ", availableVirtualDisplays)}, but none matched '{nameMatch}'.";
+        var response = lastError is null
+            ? string.Empty
+            : $" Last Windows response: {lastError.Message}.";
+        throw new InvalidOperationException(
+            $"The virtual display did not become available within {attempts * 0.5:0.#} seconds after its driver restart. " +
+            $"{detail}{response} Keep the physical display enabled, wait a few seconds, then click " +
+            "Install/update display driver again. If the target is listed under Displays, select it there.");
+    }
+
+    private static string DisplayIdentity(DisplayDescriptor display) =>
+        string.IsNullOrWhiteSpace(display.FriendlyName)
+            ? display.DevicePath
+            : display.FriendlyName;
 
     private static DisplayPathInfo? FindPathByDevicePath(
         DisplayConfiguration configuration,

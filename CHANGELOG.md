@@ -1,3 +1,13 @@
+## 0.14.4
+
+* Fixed repair installs racing Windows display-target re-enumeration after the
+  existing VDD device stack restarts. Native verification now waits up to 30
+  seconds for the already-installed target to return before changing any
+  display topology.
+* Kept every physical display active during the new wait and added a specific
+  timeout that distinguishes a delayed/absent target from a real display-name
+  mismatch.
+
 ## 0.14.3
 
 * Fixed **Apply recommended setup** on an existing VDD installation. Repair

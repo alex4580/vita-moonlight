@@ -57,6 +57,10 @@ configuration so a driver upgrade cannot replace them with its stock XML.
 Existing resolutions and driver options are preserved. Duplicate effective
 refresh modes are removed when the same rate is both local and global because
 the upstream driver already replicates global rates onto every resolution.
+After an in-place device restart, Windows may temporarily omit VDD from its
+display inventory even though the repair succeeded. Setup waits up to 30
+seconds for that existing target to re-enumerate before it changes any display
+topology; physical monitors remain active during the wait.
 The temporary verification mode is not written to the Windows display
 profile; Sunshine applies the live mode when a stream starts.
 
@@ -204,7 +208,9 @@ If setup instead reports that safe native-mode verification failed, the
 physical layout has already been restored. Do not repeat a restart loop: keep
 the complete error shown by the control panel and report its final Windows
 response, current mode, and advertised modes together with **Displays > List
-displays**.
+displays**. A target that appears in **List displays** immediately after an
+older installer reported “No virtual display was found” indicates the
+re-enumeration race fixed in 0.14.4; upgrade the host package in place.
 
 ## Controller, gyro, touch, and keyboard
 

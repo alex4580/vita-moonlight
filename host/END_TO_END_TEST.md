@@ -40,6 +40,9 @@ commit.
    only one 960x544/60 entry even when 60 Hz is global. Verification must use a
    non-persistent live mode change; it must not require
    `CDS_UPDATEREGISTRY` for the temporary extended topology.
+   The existing target may disappear briefly while its device stack restarts;
+   setup must wait up to 30 seconds for it to re-enumerate, without changing
+   the active physical topology, then continue automatically.
 7. Click **Run health check**. Sunshine, its supported version, ViGEmBus,
    Sunshine gamepad, Microsoft Visual C++ runtime, driver bundle, virtual
    display, recovery task, and
