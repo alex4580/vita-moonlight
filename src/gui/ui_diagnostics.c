@@ -5,7 +5,6 @@
 #include "../connection.h"
 #include "../debug.h"
 #include "../input/motion.h"
-#include "../input/vita.h"
 #include "../video/vita.h"
 
 #include <stdio.h>
@@ -588,11 +587,6 @@ void ui_diagnostics_get_snapshot(UiDiagnosticsSnapshot *snapshot) {
   snapshot->gyro_events_sent = motion.gyro_events_sent;
   snapshot->motion_sensor_error = motion.last_sensor_error;
 
-  VitaInputDiagnostics input;
-  vitainput_get_diagnostics(&input);
-  snapshot->circle_presses = input.circle_presses;
-  snapshot->circle_releases = input.circle_releases;
-  snapshot->circle_held = input.circle_held;
 }
 
 static void draw_overlay_text(int x, int y, const char *text) {
@@ -848,15 +842,9 @@ void ui_diagnostics_screen_draw(void) {
                        ? RGBA8(255, 154, 132, 255)
                        : RGBA8(235, 240, 250, 255));
 
-  snprintf(value, sizeof(value), "%u down / %u up%s",
-           snapshot.circle_presses, snapshot.circle_releases,
-           snapshot.circle_held ? " (held)" : "");
-  draw_screen_row(358, "Circle input", value,
-                   RGBA8(235, 240, 250, 255));
-
   snprintf(value, sizeof(value), "%s",
            snapshot.file_logging_enabled ? "Enabled" : "Disabled");
-  draw_screen_row(381, "Diagnostic log", value,
+  draw_screen_row(358, "Diagnostic log", value,
                    snapshot.file_logging_enabled
                        ? RGBA8(116, 230, 160, 255)
                        : RGBA8(235, 240, 250, 255));
@@ -864,12 +852,12 @@ void ui_diagnostics_screen_draw(void) {
   snprintf(value, sizeof(value), "%s",
            ui_diagnostics_overlay_mode_name(
                ui_diagnostics_get_overlay_mode()));
-  draw_screen_row(404, "Performance overlay", value,
+  draw_screen_row(381, "Performance overlay", value,
                    RGBA8(235, 240, 250, 255));
 
   char log_path[96] = "Unavailable";
   vita_debug_get_log_path(log_path, sizeof(log_path));
-  draw_screen_row(428, "Log file", log_path,
+  draw_screen_row(404, "Log file", log_path,
                   RGBA8(235, 240, 250, 255));
 
   vita2d_font_draw_text(

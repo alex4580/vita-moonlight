@@ -142,7 +142,6 @@ in-stream menu and select the dedicated **Real-time diagnostics** item to see:
 - average/maximum decode time and dropped frames;
 - virtual-controller type;
 - gyro enabled/requested state, report rate, event count, and sensor errors;
-- Circle down/up/held state;
 - performance-overlay and file-logging state;
 - the actual diagnostic-log path.
 

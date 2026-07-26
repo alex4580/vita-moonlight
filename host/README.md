@@ -156,8 +156,8 @@ forced LiveArea escape. **Safe PC Guide**, **Immediate PC Guide**, and direct
 The main overlay also selects a separate top-right performance display:
 **Off**, **Frame rate**, **Frame rate + network**, or **Advanced**. It uses a
 50%-alpha background. **Real-time diagnostics** is a dedicated full screen for
-live stream, decoder, network, controller, gyro, and Circle state; those
-details are not placed in the normal menu.
+live stream, decoder, network, controller, and gyro state; those details are
+not placed in the normal menu.
 
 Optional Vita file logging is off by default. Enable it from the Vita Settings
 screen, or press **Triangle** on Real-time diagnostics only while reproducing

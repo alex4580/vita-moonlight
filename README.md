@@ -100,8 +100,7 @@ session:
 - **Performance overlay** cycles through Off, Frame rate, Frame rate + network,
   and Advanced.
 - **Real-time diagnostics** shows live stream, decoder, network, controller,
-  gyro, and Circle-button state without adding those details to the normal
-  stream interface.
+  and gyro state without adding those details to the normal stream interface.
 
 The pre-stream Settings screen and in-stream pages edit the same saved
 configuration. Less frequently changed options such as local audio, power
@@ -186,9 +185,9 @@ For a fuller live view, open the stream menu and choose **Real-time
 diagnostics**. This dedicated screen shows connection state, measured and
 active video rates, round-trip-time estimate, the active stream and packet
 size, any settings selected for the next reconnect, decode timing, drops,
-controller type, gyro request/event status, Circle down/up state,
-performance-overlay mode, file-logging state, and the actual log path. It does
-not write a log unless logging is separately enabled.
+controller type, gyro request/event status, performance-overlay mode,
+file-logging state, and the actual log path. It does not write a log unless
+logging is separately enabled.
 
 ### Capture an optional diagnostic log
 

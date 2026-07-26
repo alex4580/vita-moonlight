@@ -120,9 +120,6 @@ typedef struct UiDiagnosticsSnapshot {
   uint16_t gyro_report_rate;
   uint32_t gyro_events_sent;
   int motion_sensor_error;
-  uint32_t circle_presses;
-  uint32_t circle_releases;
-  bool circle_held;
 } UiDiagnosticsSnapshot;
 
 void ui_diagnostics_init(void);

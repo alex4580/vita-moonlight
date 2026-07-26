@@ -101,8 +101,8 @@ release notes.
       all pass. Enabled modes stay top-right with a 50%-alpha background and
       display the documented metrics; Off leaves no overlay.
 - [ ] Real-time diagnostics is a dedicated screen with live stream, network,
-      decoder, controller, gyro, and Circle state. No inline input-diagnostic
-      line remains in the normal session menu.
+      decoder, controller, and gyro state. No inline input-diagnostic line
+      remains in the normal session menu.
 - [ ] Diagnostic file logging is Off on first run and does not append during a
       normal Off-mode stream. Triangle and the Settings toggle both enable and
       disable it; the in-stream menu shows and changes the same state; a
@@ -180,7 +180,7 @@ release notes.
 - [ ] Vita and Windows workflows pass on the frozen commit.
 - [ ] PR is merged into the `vita` release branch with the tested commit
       ancestry intact.
-- [ ] Create and push `v0.14.5` only after the hardware and safety gates pass.
+- [ ] Create and push `v0.14.6` only after the hardware and safety gates pass.
       The release workflow builds both platforms and publishes their artifacts.
 - [ ] Download the published release, verify hashes/signatures again, and run a
       short install/pair/stream/disconnect smoke test from those public assets.

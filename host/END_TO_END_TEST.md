@@ -115,8 +115,8 @@ recovery safeguard.
    packet data.
 4. Open **Real-time diagnostics**. It must replace the session menu with a
    dedicated live view of session, FPS, network, video rate, stream/packet,
-   decode, drops, controller, gyro, Circle, overlay, logging, and log-path
-   state. No inline gyro/Circle diagnostic line may remain in the normal menu.
+   decode, drops, controller, gyro, overlay, logging, and log-path state. No
+   inline input-diagnostic line may remain in the normal menu.
    **O** and **START** must return to the menu.
 5. Disconnect, open pre-stream Settings, use **Reset all to recommended**, and
    reconnect. Verify diagnostic file logging is Off. With performance overlay

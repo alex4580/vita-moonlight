@@ -17,7 +17,7 @@
 [Setup]
 AppId={{D88FE6B4-D767-4A27-B192-E1DB4F6E835C}
 AppName=Vita Moonlight Host
-AppVersion=0.14.5
+AppVersion=0.14.6
 AppPublisher=Vita Moonlight contributors
 AppPublisherURL=https://github.com/alex4580/vita-moonlight
 DefaultDirName={autopf}\Vita Moonlight Host

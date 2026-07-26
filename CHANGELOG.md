@@ -1,3 +1,8 @@
+## 0.14.6
+
+* Removed obsolete Circle/O transition counters from real-time diagnostics.
+  Normal Circle input and disconnect release safety are unchanged.
+
 ## 0.14.5
 
 * Added explicit **Diagnostic file logging** and **Open on-screen keyboard**

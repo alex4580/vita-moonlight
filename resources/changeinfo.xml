@@ -1,6 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <changeinfo>
 <changes app_ver="00.14"><![CDATA[
+## 0.14.6<br>
+* Remove obsolete Circle/O transition counters from real-time diagnostics without changing normal Circle input or release safety.<br>
+<br>
 ## 0.14.5<br>
 * Add visible in-stream menu controls for optional diagnostic file logging and the on-screen keyboard.<br>
 * Keep file logging off by default and retain the Triangle and START + Left shortcuts.<br>
