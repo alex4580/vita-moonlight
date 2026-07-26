@@ -105,6 +105,7 @@ static void connection_connection_terminated(int error_code) {
   }
   LiStopConnection();
   vita_debug_log("connection terminated\n");
+  vita_debug_flush();
   connection_status = LI_DISCONNECTED;
   stream_overlay_reset();
   ui_diagnostics_reset_session();

@@ -755,6 +755,7 @@ void process_buttons() {
   curr.button |= is_pressed(map.btn_dpad_right) ? RIGHT_FLAG  : 0;
   curr.button |= is_pressed(map.btn_start)      ? PLAY_FLAG   : 0;
   curr.button |= is_pressed(map.btn_select)     ? BACK_FLAG   : 0;
+  curr.button |= is_pressed(map.btn_mode)       ? SPECIAL_FLAG : 0;
   curr.button |= is_pressed(map.btn_north)      ? Y_FLAG      : 0;
   curr.button |= is_pressed(map.btn_east)       ? B_FLAG      : 0;
   curr.button |= is_pressed(map.btn_south)      ? A_FLAG      : 0;
@@ -769,51 +770,36 @@ void process_buttons() {
 }
 
 void process_triggers() {
+  short left_trigger = read_analog(map.btn_tl);
+  short right_trigger = read_analog(map.btn_tr);
+
   // Swap L1<=>L2 y R1<=>R2 correctamente
   if (swap_shoulder_buttons) {
     // Físicos: L1 manda L2 (analógico), rear touch L2 manda L1 (digital)
-    if (is_pressed(map.btn_thumbl)) {
-      curr.lt = 0xff; // L1 físico activa L2 analógico
-    }
-    if (is_pressed(map.btn_tl)) {
+    curr.lt = is_pressed(map.btn_thumbl) ? 0xff : 0;
+    if (left_trigger != 0) {
       curr.button |= LB_FLAG; // rear touch L2 activa L1 digital
-    }
-    if (!is_pressed(map.btn_tl)) {
+    } else {
       curr.button &= ~LB_FLAG;
     }
-    if (!is_pressed(map.btn_thumbl)) {
-      curr.lt = 0;
-    }
     // Físicos: R1 manda R2 (analógico), rear touch R2 manda R1 (digital)
-    if (is_pressed(map.btn_thumbr)) {
-      curr.rt = 0xff; // R1 físico activa R2 analógico
-    }
-    if (is_pressed(map.btn_tr)) {
+    curr.rt = is_pressed(map.btn_thumbr) ? 0xff : 0;
+    if (right_trigger != 0) {
       curr.button |= RB_FLAG; // rear touch R2 activa R1 digital
-    }
-    if (!is_pressed(map.btn_tr)) {
+    } else {
       curr.button &= ~RB_FLAG;
-    }
-    if (!is_pressed(map.btn_thumbr)) {
-      curr.rt = 0;
     }
   } else {
     // Físicos: L1 manda L1 (digital), L2 manda L2 (analógico)
     if (is_pressed(map.btn_thumbl)) {
       curr.button |= LB_FLAG;
     }
-    if (is_pressed(map.btn_tl)) {
-      curr.lt = 0xff;
-      // No modificar curr.button aquí
-    }
+    curr.lt = (char)left_trigger;
     // Físicos: R1 manda R1 (digital), R2 manda R2 (analógico)
     if (is_pressed(map.btn_thumbr)) {
       curr.button |= RB_FLAG;
     }
-    if (is_pressed(map.btn_tr)) {
-      curr.rt = 0xff;
-      // No modificar curr.button aquí
-    }
+    curr.rt = (char)right_trigger;
   }
 }
 
@@ -957,11 +943,6 @@ inline void vitainput_process(void) {
     memset(&old, 0, sizeof(input_data));
     return;
   }
-  // analogs: solo asignar si no están activos por rear touch
-  if (!swap_shoulder_buttons && !is_pressed(map.btn_tl2))
-    curr.lt = read_analog(map.btn_tl); // l2
-  if (!swap_shoulder_buttons && !is_pressed(map.btn_tr2))
-    curr.rt = read_analog(map.btn_tr); // r2
   if (config.enable_front_touchzones) {
     process_touchzones();
   }
@@ -1035,6 +1016,134 @@ inline void vitainput_process(void) {
 
 static uint8_t active_input_thread = 0;
 static pthread_mutex_t input_process_mutex;
+static bool input_mutex_initialized = false;
+
+static void update_front_sections(const CONFIGURATION *input_config) {
+  FRONT_SECTIONS[0].left.x = input_config->special_keys.offset;
+  FRONT_SECTIONS[0].left.y = input_config->special_keys.offset;
+  FRONT_SECTIONS[0].right.x =
+      input_config->special_keys.offset + input_config->special_keys.size;
+  FRONT_SECTIONS[0].right.y =
+      input_config->special_keys.offset + input_config->special_keys.size;
+
+  FRONT_SECTIONS[1].left.x =
+      WIDTH - input_config->special_keys.offset -
+      input_config->special_keys.size;
+  FRONT_SECTIONS[1].left.y = input_config->special_keys.offset;
+  FRONT_SECTIONS[1].right.x =
+      WIDTH - input_config->special_keys.offset;
+  FRONT_SECTIONS[1].right.y =
+      input_config->special_keys.offset + input_config->special_keys.size;
+
+  FRONT_SECTIONS[2].left.x = input_config->special_keys.offset;
+  FRONT_SECTIONS[2].left.y =
+      HEIGHT - input_config->special_keys.offset -
+      input_config->special_keys.size;
+  FRONT_SECTIONS[2].right.x =
+      input_config->special_keys.offset + input_config->special_keys.size;
+  FRONT_SECTIONS[2].right.y =
+      HEIGHT - input_config->special_keys.offset;
+
+  FRONT_SECTIONS[3].left.x =
+      WIDTH - input_config->special_keys.offset -
+      input_config->special_keys.size;
+  FRONT_SECTIONS[3].left.y =
+      HEIGHT - input_config->special_keys.offset -
+      input_config->special_keys.size;
+  FRONT_SECTIONS[3].right.x =
+      WIDTH - input_config->special_keys.offset;
+  FRONT_SECTIONS[3].right.y =
+      HEIGHT - input_config->special_keys.offset;
+}
+
+void vitainput_default_mapping(struct mapping *target, uint32_t model) {
+  if (!target) {
+    return;
+  }
+
+  memset(target, 0, sizeof(*target));
+  target->abs_x = LEFTX | INPUT_TYPE_ANALOG;
+  target->abs_y = LEFTY | INPUT_TYPE_ANALOG;
+  target->abs_rx = RIGHTX | INPUT_TYPE_ANALOG;
+  target->abs_ry = RIGHTY | INPUT_TYPE_ANALOG;
+  target->abs_z = UINT32_MAX;
+  target->abs_rz = UINT32_MAX;
+  target->abs_dpad_x = -1;
+  target->abs_dpad_y = -1;
+
+  target->btn_dpad_up = SCE_CTRL_UP | INPUT_TYPE_GAMEPAD;
+  target->btn_dpad_down = SCE_CTRL_DOWN | INPUT_TYPE_GAMEPAD;
+  target->btn_dpad_left = SCE_CTRL_LEFT | INPUT_TYPE_GAMEPAD;
+  target->btn_dpad_right = SCE_CTRL_RIGHT | INPUT_TYPE_GAMEPAD;
+  target->btn_south = SCE_CTRL_CROSS | INPUT_TYPE_GAMEPAD;
+  target->btn_east = SCE_CTRL_CIRCLE | INPUT_TYPE_GAMEPAD;
+  target->btn_north = SCE_CTRL_TRIANGLE | INPUT_TYPE_GAMEPAD;
+  target->btn_west = SCE_CTRL_SQUARE | INPUT_TYPE_GAMEPAD;
+
+  target->btn_select = SCE_CTRL_SELECT | INPUT_TYPE_GAMEPAD;
+  target->btn_start = SCE_CTRL_START | INPUT_TYPE_GAMEPAD;
+  target->btn_mode = 0;
+
+  target->btn_thumbl = SCE_CTRL_L1 | INPUT_TYPE_GAMEPAD;
+  target->btn_thumbr = SCE_CTRL_R1 | INPUT_TYPE_GAMEPAD;
+
+  if (model == SCE_KERNEL_MODEL_VITATV) {
+    target->btn_tl = LEFT_TRIGGER | INPUT_TYPE_ANALOG;
+    target->btn_tr = RIGHT_TRIGGER | INPUT_TYPE_ANALOG;
+    target->btn_tl2 = SCE_CTRL_L3 | INPUT_TYPE_GAMEPAD;
+    target->btn_tr2 = SCE_CTRL_R3 | INPUT_TYPE_GAMEPAD;
+  } else {
+    target->btn_tl =
+        TOUCHSEC_NORTHWEST | INPUT_TYPE_TOUCHSCREEN;
+    target->btn_tr =
+        TOUCHSEC_NORTHEAST | INPUT_TYPE_TOUCHSCREEN;
+    target->btn_tl2 =
+        TOUCHSEC_SOUTHWEST | INPUT_TYPE_TOUCHSCREEN;
+    target->btn_tr2 =
+        TOUCHSEC_SOUTHEAST | INPUT_TYPE_TOUCHSCREEN;
+  }
+}
+
+void vitainput_get_mapping(struct mapping *target) {
+  if (!target) {
+    return;
+  }
+
+  if (input_mutex_initialized) {
+    pthread_mutex_lock(&input_process_mutex);
+  }
+  *target = map;
+  if (input_mutex_initialized) {
+    pthread_mutex_unlock(&input_process_mutex);
+  }
+}
+
+void vitainput_apply_mapping(const struct mapping *source) {
+  if (!source) {
+    return;
+  }
+
+  if (input_mutex_initialized) {
+    pthread_mutex_lock(&input_process_mutex);
+  }
+  map = *source;
+  if (input_mutex_initialized) {
+    pthread_mutex_unlock(&input_process_mutex);
+  }
+}
+
+void vitainput_refresh_touchzones(void) {
+  CONFIGURATION sanitized = config;
+  config_sanitize(&sanitized);
+
+  if (input_mutex_initialized) {
+    pthread_mutex_lock(&input_process_mutex);
+  }
+  update_front_sections(&sanitized);
+  if (input_mutex_initialized) {
+    pthread_mutex_unlock(&input_process_mutex);
+  }
+}
 
 int vitainput_thread(SceSize args, void *argp) {
   while (1) {
@@ -1058,6 +1167,7 @@ bool vitainput_init() {
   if (pthread_mutex_init(&input_process_mutex, NULL) != 0) {
     return false;
   }
+  input_mutex_initialized = true;
 
   SceUID thid = sceKernelCreateThread("vitainput_thread", vitainput_thread, 0, 0x40000, 0, 0, NULL);
   if (thid >= 0) {
@@ -1068,6 +1178,7 @@ bool vitainput_init() {
   }
 
   pthread_mutex_destroy(&input_process_mutex);
+  input_mutex_initialized = false;
   return false;
 }
 
@@ -1081,44 +1192,23 @@ void vitainput_config(CONFIGURATION config) {
 
   // Sincroniza el modo swap global con la configuración cargada
   swap_shoulder_buttons = config.swap_shoulder_buttons;
-  map.abs_x           = LEFTX               | INPUT_TYPE_ANALOG;
-  map.abs_y           = LEFTY               | INPUT_TYPE_ANALOG;
-  map.abs_rx          = RIGHTX              | INPUT_TYPE_ANALOG;
-  map.abs_ry          = RIGHTY              | INPUT_TYPE_ANALOG;
+  struct mapping configured_mapping;
+  vitainput_default_mapping(&configured_mapping, config.model);
 
-  map.btn_dpad_up     = SCE_CTRL_UP         | INPUT_TYPE_GAMEPAD;
-  map.btn_dpad_down   = SCE_CTRL_DOWN       | INPUT_TYPE_GAMEPAD;
-  map.btn_dpad_left   = SCE_CTRL_LEFT       | INPUT_TYPE_GAMEPAD;
-  map.btn_dpad_right  = SCE_CTRL_RIGHT      | INPUT_TYPE_GAMEPAD;
-  map.btn_south       = SCE_CTRL_CROSS      | INPUT_TYPE_GAMEPAD;
-  map.btn_east        = SCE_CTRL_CIRCLE     | INPUT_TYPE_GAMEPAD;
-  map.btn_north       = SCE_CTRL_TRIANGLE   | INPUT_TYPE_GAMEPAD;
-  map.btn_west        = SCE_CTRL_SQUARE     | INPUT_TYPE_GAMEPAD;
-
-  map.btn_select      = SCE_CTRL_SELECT     | INPUT_TYPE_GAMEPAD;
-  map.btn_start       = SCE_CTRL_START      | INPUT_TYPE_GAMEPAD;
-
-  map.btn_thumbl      = SCE_CTRL_L1         | INPUT_TYPE_GAMEPAD;
-  map.btn_thumbr      = SCE_CTRL_R1         | INPUT_TYPE_GAMEPAD;
-
-  if (config.model == SCE_KERNEL_MODEL_VITATV) {
-    map.btn_tl        = LEFT_TRIGGER        | INPUT_TYPE_ANALOG;
-    map.btn_tr        = RIGHT_TRIGGER       | INPUT_TYPE_ANALOG;
-    map.btn_tl2       = SCE_CTRL_L3         | INPUT_TYPE_GAMEPAD;
-    map.btn_tr2       = SCE_CTRL_R3         | INPUT_TYPE_GAMEPAD;
-  } else {
-    map.btn_tl        = TOUCHSEC_NORTHWEST  | INPUT_TYPE_TOUCHSCREEN;
-    map.btn_tr        = TOUCHSEC_NORTHEAST  | INPUT_TYPE_TOUCHSCREEN;
-    map.btn_tl2       = TOUCHSEC_SOUTHWEST  | INPUT_TYPE_TOUCHSCREEN;
-    map.btn_tr2       = TOUCHSEC_SOUTHEAST  | INPUT_TYPE_TOUCHSCREEN;
+  if (config.mapping) {
+    char mapping_file_path[4096];
+    size_t key_dir_length = strlen(config.key_dir);
+    snprintf(mapping_file_path, sizeof(mapping_file_path), "%s%s%s",
+             config.key_dir,
+             key_dir_length > 0 &&
+                     config.key_dir[key_dir_length - 1] != '/'
+                 ? "/"
+                 : "",
+             config.mapping);
+    printf("Loading mapping at %s\n", mapping_file_path);
+    mapping_load(mapping_file_path, &configured_mapping);
   }
-
-    if (config.mapping) {
-        char mapping_file_path[256];
-        snprintf(mapping_file_path, sizeof(mapping_file_path), "%s/%s", config.key_dir, config.mapping);
-        printf("Loading mapping at %s\n", mapping_file_path);
-        mapping_load(mapping_file_path, &map);
-    }
+  vitainput_apply_mapping(&configured_mapping);
 
   controller_port = config.model == SCE_KERNEL_MODEL_VITATV ? 1 : 0;
 
@@ -1147,25 +1237,13 @@ void vitainput_config(CONFIGURATION config) {
   BACK_SECTIONS[3].right.x = WIDTH - config.back_deadzone.right;
   BACK_SECTIONS[3].right.y = HEIGHT - config.back_deadzone.bottom;
 
-  FRONT_SECTIONS[0].left.x  = config.special_keys.offset;
-  FRONT_SECTIONS[0].left.y  = config.special_keys.offset;
-  FRONT_SECTIONS[0].right.x = config.special_keys.offset + config.special_keys.size;
-  FRONT_SECTIONS[0].right.y = config.special_keys.offset + config.special_keys.size;
-
-  FRONT_SECTIONS[1].left.x  = WIDTH - config.special_keys.offset - config.special_keys.size;
-  FRONT_SECTIONS[1].left.y  = config.special_keys.offset;
-  FRONT_SECTIONS[1].right.x = WIDTH - config.special_keys.offset;
-  FRONT_SECTIONS[1].right.y = config.special_keys.offset + config.special_keys.size;
-
-  FRONT_SECTIONS[2].left.x  = config.special_keys.offset;
-  FRONT_SECTIONS[2].left.y  = HEIGHT - config.special_keys.offset - config.special_keys.size;
-  FRONT_SECTIONS[2].right.x = config.special_keys.offset + config.special_keys.size;
-  FRONT_SECTIONS[2].right.y = HEIGHT - config.special_keys.offset;
-
-  FRONT_SECTIONS[3].left.x  = WIDTH - config.special_keys.offset - config.special_keys.size;
-  FRONT_SECTIONS[3].left.y  = HEIGHT - config.special_keys.offset - config.special_keys.size;
-  FRONT_SECTIONS[3].right.x = WIDTH - config.special_keys.offset;
-  FRONT_SECTIONS[3].right.y = HEIGHT - config.special_keys.offset;
+  if (input_mutex_initialized) {
+    pthread_mutex_lock(&input_process_mutex);
+  }
+  update_front_sections(&config);
+  if (input_mutex_initialized) {
+    pthread_mutex_unlock(&input_process_mutex);
+  }
 
   mouse_multiplier = 1 + (0.01 * config.mouse_acceleration);
 }

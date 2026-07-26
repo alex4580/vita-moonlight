@@ -72,6 +72,7 @@ add_executable(${PROJECT_NAME}.elf
 	src/gui/ime.c
 	src/gui/ui.c
 	src/gui/ui_settings.c
+	src/gui/ui_controller_mapper.c
 	src/gui/ui_connect.c
 	src/gui/ui_device.c
 	src/gui/ui_hotkey.c

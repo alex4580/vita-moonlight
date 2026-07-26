@@ -172,8 +172,20 @@ static void finish_sample(uint64_t now_us) {
   metrics.measured_video_kbps = elapsed_us == 0
       ? 0
       : (uint32_t)((metrics.window_video_bytes * 8000ULL) / elapsed_us);
-  metrics.sampled_frames = metrics.window_presented_frames;
-  metrics.sampled_dropped_frames = metrics.window_dropped_frames;
+  /*
+   * Normalize to elapsed time because a sampling window can be slightly
+   * longer than one second. A raw frame count can otherwise read 61+ FPS.
+   */
+  metrics.sampled_frames = elapsed_us == 0
+      ? 0
+      : (uint32_t)(
+          (metrics.window_presented_frames * 1000000ULL + elapsed_us / 2) /
+          elapsed_us);
+  metrics.sampled_dropped_frames = elapsed_us == 0
+      ? 0
+      : (uint32_t)(
+          (metrics.window_dropped_frames * 1000000ULL + elapsed_us / 2) /
+          elapsed_us);
   metrics.average_decode_us = metrics.window_frames == 0
       ? 0
       : (uint32_t)(metrics.window_decode_us / metrics.window_frames);

@@ -25,17 +25,15 @@ internal static class DriverNativeModeVerification
 
     internal static void Invalidate()
     {
-        if (File.Exists(VerificationFile))
-        {
-            File.Delete(VerificationFile);
-        }
+        TrustedFileSystem.DeleteFile(VerificationFile);
     }
 
     internal static void RecordCurrent()
     {
         var configurationSha256 = ReadCurrentConfigurationSha256();
         var record = CreateRecord(configurationSha256, DateTimeOffset.UtcNow);
-        DisplayTopologyService.AtomicWrite(
+        MachineStateSecurity.Secure();
+        TrustedFileSystem.WriteAllText(
             VerificationFile,
             JsonSerializer.Serialize(record, JsonOptions));
     }
@@ -51,7 +49,7 @@ internal static class DriverNativeModeVerification
         try
         {
             var record = JsonSerializer.Deserialize<DriverNativeModeVerificationRecord>(
-                File.ReadAllText(VerificationFile),
+                TrustedFileSystem.ReadAllText(VerificationFile),
                 JsonOptions);
             if (record is null)
             {
@@ -70,7 +68,12 @@ internal static class DriverNativeModeVerification
             return true;
         }
         catch (Exception error) when (
-            error is IOException or UnauthorizedAccessException or JsonException or InvalidDataException)
+            error is IOException or
+                UnauthorizedAccessException or
+                JsonException or
+                InvalidDataException or
+                InvalidOperationException or
+                System.ComponentModel.Win32Exception)
         {
             message = $"native-mode verification could not be read ({error.Message})";
             return false;
@@ -108,13 +111,17 @@ internal static class DriverNativeModeVerification
 
     private static string ReadCurrentConfigurationSha256()
     {
+        using var directoryLease =
+            DriverConfigurationDirectoryTrust.AcquireVerified(
+                DisplayWizardAdapter.DriverConfigurationDirectoryPath);
         var configurationPath = DisplayWizardAdapter.DriverConfigurationPath;
         if (!File.Exists(configurationPath))
         {
             throw new InvalidDataException(
                 $"The display-driver configuration is missing at {configurationPath}.");
         }
-        return ComputeConfigurationSha256(File.ReadAllBytes(configurationPath));
+        return ComputeConfigurationSha256(
+            TrustedFileSystem.ReadAllBytes(configurationPath));
     }
 
     private static bool FixedTimeHexEquals(string first, string second)

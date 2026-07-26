@@ -30,7 +30,9 @@ internal sealed record HostSettings(
         {
             return Default;
         }
-        var loaded = JsonSerializer.Deserialize<HostSettings>(File.ReadAllText(HostStatePaths.SettingsFile), JsonOptions)
+        var loaded = JsonSerializer.Deserialize<HostSettings>(
+            TrustedFileSystem.ReadAllText(HostStatePaths.SettingsFile),
+            JsonOptions)
             ?? Default;
         return loaded.FormatVersion < CurrentFormatVersion
             ? loaded with
@@ -45,7 +47,10 @@ internal sealed record HostSettings(
     internal void Save()
     {
         var current = this with { FormatVersion = CurrentFormatVersion };
-        DisplayTopologyService.AtomicWrite(HostStatePaths.SettingsFile, JsonSerializer.Serialize(current, JsonOptions));
+        MachineStateSecurity.Secure();
+        TrustedFileSystem.WriteAllText(
+            HostStatePaths.SettingsFile,
+            JsonSerializer.Serialize(current, JsonOptions));
     }
 
     private static readonly JsonSerializerOptions JsonOptions = new()

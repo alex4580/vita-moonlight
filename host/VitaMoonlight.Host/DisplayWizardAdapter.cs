@@ -30,12 +30,6 @@ internal sealed class DisplayWizardAdapter
             ["vdd_settings.xml"] = "EDB2501D6D5DA17F66D15D4B97A6F4A3F0D8963165AC4A6A6259D95118288020",
             ["nefconw.exe"] = "6B5EE1E9EBF78A921A3E5FB3AAFE137FB1AAAF24A03911A122DDDF88DE6FF932",
         };
-    private static readonly string[] BundleAnchorNames =
-    {
-        "nefconw.exe",
-        "PRPlanIT.com-VirtualDisplayDrv_Wiz.exe",
-        "VirtualDisplayDrv.exe",
-    };
     private readonly string executablePath;
 
     private DisplayWizardAdapter(string executablePath)
@@ -44,39 +38,46 @@ internal sealed class DisplayWizardAdapter
     }
 
     internal string ExecutablePath => executablePath;
+    internal static string DriverConfigurationDirectoryPath =>
+        DriverConfigurationDirectory;
     internal static string DriverConfigurationPath =>
         Path.Combine(DriverConfigurationDirectory, "vdd_settings.xml");
 
-    internal static DisplayWizardAdapter Locate(string? configuredPath)
+    internal static DisplayWizardAdapter LocateBundled()
     {
-        var candidates = new List<string?>
-        {
-            configuredPath,
-            Environment.GetEnvironmentVariable("DISPLAYWIZARD_PATH"),
-        };
-        foreach (var name in BundleAnchorNames)
-        {
-            candidates.Add(Path.Combine(AppContext.BaseDirectory, "tools", "DisplayWizard", name));
-            candidates.Add(Path.Combine(@"C:\IddSampleDriver", name));
-        }
-
-        var selected = candidates
-            .Where(candidate => !string.IsNullOrWhiteSpace(candidate))
-            .SelectMany(candidate => Directory.Exists(candidate)
-                ? BundleAnchorNames.Select(name => Path.Combine(candidate!, name))
-                : new[] { candidate! })
-            .FirstOrDefault(File.Exists);
-        if (selected is null)
+        var selected = Path.Combine(
+            AppContext.BaseDirectory,
+            "tools",
+            "DisplayWizard",
+            "nefconw.exe");
+        if (!File.Exists(selected))
         {
             throw new FileNotFoundException(
-                "The signed virtual display driver bundle was not found. Reinstall the host package or pass `--driver-bundle <path>`."
+                "The signed virtual display driver bundle was not found. " +
+                "Repair the installed host or re-extract the complete portable package."
             );
         }
         return new DisplayWizardAdapter(Path.GetFullPath(selected));
     }
 
+    internal static DisplayWizardAdapter LocateBundledForUninstall()
+    {
+        var directory = SunshineOwnershipJournal.ValidateConfigurationDirectory(
+            Path.Combine(AppContext.BaseDirectory, "tools", "DisplayWizard"));
+        var selected = Path.Combine(directory, "nefconw.exe");
+        if (!File.Exists(selected))
+        {
+            throw new FileNotFoundException(
+                "The installed virtual display driver bundle was not found. " +
+                "Repair Vita Moonlight Host before removing its VDD.");
+        }
+        SunshineOwnershipJournal.ValidateOwnedFile(selected);
+        return new DisplayWizardAdapter(Path.GetFullPath(selected));
+    }
+
     internal void PrepareMode(int width, int height, int fps)
     {
+        RequireProtectedBundle();
         ValidateDimension(width, nameof(width), 64, 7680);
         ValidateDimension(height, nameof(height), 64, 4320);
         ValidateDimension(fps, nameof(fps), 24, 240);
@@ -88,7 +89,10 @@ internal sealed class DisplayWizardAdapter
 
     internal void InstallDriver()
     {
+        RequireProtectedBundle();
         ValidateDriverBundle();
+        PrepareDriverConfigurationDirectoryForInstall();
+        EnsureDriverConfiguration();
         DriverNativeModeVerification.Invalidate();
         var workingDirectory = Path.GetDirectoryName(executablePath)!;
         var driverAlreadyInstalled = IsDriverInstalled();
@@ -113,6 +117,12 @@ internal sealed class DisplayWizardAdapter
             60000,
             "/add-driver", Path.Combine(workingDirectory, "MttVDD.inf"), "/install"));
 
+        // A third-party package action must not silently replace the fixed
+        // directory we pinned before invoking it. Explicit install/repair may
+        // safely detach such a replacement and create a fresh protected
+        // directory; normal reload and runtime operations only verify.
+        PrepareDriverConfigurationDirectoryForInstall();
+
         // Apply the managed modes after staging/installing the package. A real
         // upgrade can replace C:\VirtualDisplayDriver\vdd_settings.xml with
         // the driver's stock copy, while a repair of an equal/newer package
@@ -122,34 +132,255 @@ internal sealed class DisplayWizardAdapter
         ReloadDriver();
     }
 
+    internal bool UninstallDriver()
+    {
+        RequireProtectedBundle();
+        var topology = new DisplayTopologyService();
+        topology.RecoverPhysicalDisplays();
+        topology.DisableManagedVirtualDisplays();
+        UninstallManager.VerifyPhysicalOnlyTopology(topology);
+
+        if (!IsDriverInstalled() &&
+            FindDriverPackageNames().Count == 0)
+        {
+            // Nothing can consume the fixed path. Remove it only if it is the
+            // exact directory recorded by this installation; an unknown entry
+            // is unrelated data and is deliberately left alone.
+            if (DriverConfigurationDirectoryTrust.TryAcquireVerified(
+                    DriverConfigurationDirectory,
+                    out var trustedDirectory,
+                    out _))
+            {
+                using (trustedDirectory)
+                {
+                    TrustedFileSystem.DeleteFile(
+                        DriverConfigurationPath);
+                }
+                DriverConfigurationDirectoryTrust
+                    .DeleteTrustedDirectoryIfEmpty(
+                        DriverConfigurationDirectory);
+            }
+            DriverNativeModeVerification.Invalidate();
+            return false;
+        }
+
+        using (AcquireDriverConfigurationDirectory())
+        {
+            // Refuse to remove a driver whose fixed configuration path is no
+            // longer the protected directory recorded by this installation.
+        }
+
+        var serviceName = StreamingHostLocator.FindSunshineServiceName();
+        var restartSunshine =
+            WindowsServiceManager.GetState(serviceName) == WindowsServiceState.Running;
+        Exception? operationError = null;
+        if (restartSunshine)
+        {
+            WindowsServiceManager.Stop(serviceName, "Sunshine");
+        }
+
+        try
+        {
+            var installations = FindDriverInstallations();
+            if (installations.Any(installation =>
+                    string.IsNullOrWhiteSpace(installation.InfPath)))
+            {
+                throw new InvalidOperationException(
+                    "Windows found the MTT virtual display device but did not expose its driver-store package. " +
+                    "The driver was left installed; remove it from Device Manager instead.");
+            }
+            var driverPackages = FindDriverPackageNames()
+                .Concat(installations
+                    .Select(installation => installation.InfPath)
+                    .Where(infPath => !string.IsNullOrWhiteSpace(infPath))
+                    .Select(infPath => infPath!))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            var restartRequired = false;
+            var pendingDeviceRemovals = new HashSet<string>(
+                StringComparer.OrdinalIgnoreCase);
+            var pendingPackageRemovals = new HashSet<string>(
+                StringComparer.OrdinalIgnoreCase);
+            foreach (var installation in installations)
+            {
+                var pendingRestart =
+                    EnsurePnPUtilRemovalAccepted(RunProcess(
+                    "pnputil.exe",
+                    Path.GetDirectoryName(executablePath)!,
+                    60000,
+                    "/remove-device", installation.InstanceId));
+                restartRequired |= pendingRestart;
+                if (pendingRestart)
+                {
+                    pendingDeviceRemovals.Add(
+                        installation.InstanceId);
+                }
+            }
+
+            foreach (var infPath in driverPackages)
+            {
+                var pendingRestart =
+                    EnsurePnPUtilRemovalAccepted(RunProcess(
+                    "pnputil.exe",
+                    Path.GetDirectoryName(executablePath)!,
+                    60000,
+                    "/delete-driver", infPath,
+                    "/uninstall",
+                    "/force"));
+                restartRequired |= pendingRestart;
+                if (pendingRestart)
+                {
+                    pendingPackageRemovals.Add(infPath);
+                }
+            }
+
+            IReadOnlyList<DriverInstallation> remainingInstallations = [];
+            IReadOnlyList<string> remainingPackages = [];
+            for (var attempt = 0; attempt < 20; attempt++)
+            {
+                remainingInstallations = FindDriverInstallations();
+                remainingPackages = FindDriverPackageNames();
+                var unexpectedDevice =
+                    remainingInstallations.Any(installation =>
+                        !pendingDeviceRemovals.Contains(
+                            installation.InstanceId));
+                var unexpectedPackage =
+                    remainingPackages.Any(package =>
+                        !pendingPackageRemovals.Contains(package));
+                if (!unexpectedDevice &&
+                    !unexpectedPackage)
+                {
+                    break;
+                }
+                Thread.Sleep(250);
+            }
+            remainingInstallations = FindDriverInstallations();
+            remainingPackages = FindDriverPackageNames();
+            var unexpectedDevices = remainingInstallations
+                .Where(installation =>
+                    !pendingDeviceRemovals.Contains(
+                        installation.InstanceId))
+                .Select(installation => installation.InstanceId)
+                .ToArray();
+            var unexpectedPackages = remainingPackages
+                .Where(package =>
+                    !pendingPackageRemovals.Contains(package))
+                .ToArray();
+            if (unexpectedDevices.Length > 0 ||
+                (IsDriverInstalled() &&
+                 remainingInstallations.Count == 0))
+            {
+                throw new InvalidOperationException(
+                    "Windows retained an MTT virtual display device that was " +
+                    "not reported as pending restart.");
+            }
+            if (unexpectedPackages.Length > 0)
+            {
+                throw new InvalidOperationException(
+                    "Windows retained an MttVDD driver-store package that was " +
+                    "not reported as pending restart.");
+            }
+
+            DriverNativeModeVerification.Invalidate();
+            if (restartRequired)
+            {
+                topology.RecoverPhysicalDisplays();
+                UninstallManager.VerifyPhysicalOnlyTopology(topology);
+                return true;
+            }
+            using (AcquireDriverConfigurationDirectory())
+            {
+                TrustedFileSystem.DeleteFile(DriverConfigurationPath);
+            }
+            DriverConfigurationDirectoryTrust.DeleteTrustedDirectoryIfEmpty(
+                DriverConfigurationDirectory);
+
+            topology.RecoverPhysicalDisplays();
+            UninstallManager.VerifyPhysicalOnlyTopology(topology);
+            return restartRequired;
+        }
+        catch (Exception error)
+        {
+            operationError = error;
+            throw;
+        }
+        finally
+        {
+            if (restartSunshine)
+            {
+                try
+                {
+                    WindowsServiceManager.Start(serviceName, "Sunshine");
+                }
+                catch (Exception restartError)
+                {
+                    if (operationError is null)
+                    {
+                        throw new InvalidOperationException(
+                            "The virtual display was removed, but Sunshine could not be restarted. " +
+                            restartError.Message,
+                            restartError);
+                    }
+                    throw new AggregateException(
+                        "Virtual-display removal failed and Sunshine could not be restarted.",
+                        operationError,
+                        restartError);
+                }
+            }
+        }
+    }
+
     internal bool EnsureVitaCompatibilityModes()
     {
+        RequireProtectedBundle();
         ValidateDriverBundle();
-        var configurationPath = EnsureDriverConfiguration();
-        var original = File.ReadAllText(configurationPath);
+        using var directoryLease = AcquireDriverConfigurationDirectory();
+        var configurationPath = EnsureDriverConfigurationUnderLease();
+        var original = TrustedFileSystem.ReadAllText(configurationPath);
         var updated = AddVitaCompatibilityModesToConfiguration(original);
         if (string.Equals(original, updated, StringComparison.Ordinal)) return false;
         DriverNativeModeVerification.Invalidate();
-        DisplayTopologyService.AtomicWrite(configurationPath, updated);
+        TrustedFileSystem.WriteAllText(configurationPath, updated);
         return true;
     }
 
     internal static bool HasVitaCompatibilityModes()
     {
         var path = DriverConfigurationPath;
-        if (!File.Exists(path)) return false;
-        try
-        {
-            return HasVitaCompatibilityModesInConfiguration(File.ReadAllText(path));
-        }
-        catch (Exception error) when (error is IOException or UnauthorizedAccessException or System.Xml.XmlException)
+        if (!DriverConfigurationDirectoryTrust.TryAcquireVerified(
+                DriverConfigurationDirectory,
+                out var directoryLease,
+                out _))
         {
             return false;
         }
+        using (directoryLease)
+            try
+            {
+                if (!File.Exists(path)) return false;
+                return HasVitaCompatibilityModesInConfiguration(
+                    TrustedFileSystem.ReadAllText(path));
+            }
+            catch (Exception error) when (
+                error is IOException or
+                    UnauthorizedAccessException or
+                    InvalidDataException or
+                    System.ComponentModel.Win32Exception or
+                    System.Xml.XmlException)
+            {
+                return false;
+            }
     }
 
     internal void ReloadDriver()
     {
+        RequireProtectedBundle();
+        EnsureVitaCompatibilityModes();
+        // Hold a read-only directory lease that denies write/delete sharing
+        // for the entire device restart. The fixed name must still map to the
+        // file identity born with our protected DACL before SYSTEM consumes
+        // its configuration.
+        using var directoryLease = AcquireDriverConfigurationDirectory();
         if (!IsDriverInstalled())
         {
             throw new InvalidOperationException("The signed virtual display driver is not installed.");
@@ -185,6 +416,10 @@ internal sealed class DisplayWizardAdapter
 
     internal void ValidateDriverBundle()
     {
+        InstallationTrust.RequireBundledReadOnlyFile(
+            executablePath,
+            Path.Combine("tools", "DisplayWizard", "nefconw.exe"),
+            "Virtual display driver validation");
         var workingDirectory = Path.GetDirectoryName(executablePath)!;
         foreach (var expected in DriverFileHashes)
         {
@@ -195,7 +430,8 @@ internal sealed class DisplayWizardAdapter
                     $"The signed virtual display driver bundle is missing {expected.Key}. Reinstall the host package.",
                     path);
             }
-            var actualHash = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path)));
+            var actualHash = Convert.ToHexString(
+                SHA256.HashData(TrustedFileSystem.ReadAllBytes(path)));
             if (!actualHash.Equals(expected.Value, StringComparison.OrdinalIgnoreCase))
             {
                 throw new InvalidDataException($"{expected.Key} failed its integrity check.");
@@ -220,42 +456,154 @@ internal sealed class DisplayWizardAdapter
         return false;
     }
 
-    private static IReadOnlyList<string> FindDriverInstanceIds()
+    private static IReadOnlyList<string> FindDriverInstanceIds() =>
+        FindDriverInstallations()
+            .Select(installation => installation.InstanceId)
+            .ToArray();
+
+    private static IReadOnlyList<DriverInstallation> FindDriverInstallations()
     {
-        var instanceIds = new List<string>();
-        if (!OperatingSystem.IsWindows()) return instanceIds;
+        var installations = new List<DriverInstallation>();
+        if (!OperatingSystem.IsWindows()) return installations;
         using var displayDevices = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Enum\ROOT\DISPLAY");
-        if (displayDevices is null) return instanceIds;
+        if (displayDevices is null) return installations;
         foreach (var instanceName in displayDevices.GetSubKeyNames())
         {
             using var instance = displayDevices.OpenSubKey(instanceName);
             var hardwareIds = instance?.GetValue("HardwareID") as string[];
             if (hardwareIds?.Any(value => value.Equals(DriverHardwareId, StringComparison.OrdinalIgnoreCase)) == true)
             {
-                instanceIds.Add($@"ROOT\DISPLAY\{instanceName}");
+                var driverKeyName = instance?.GetValue("Driver") as string;
+                string? infPath = null;
+                if (!string.IsNullOrWhiteSpace(driverKeyName))
+                {
+                    using var driverKey = Registry.LocalMachine.OpenSubKey(
+                        $@"SYSTEM\CurrentControlSet\Control\Class\{driverKeyName}");
+                    infPath = driverKey?.GetValue("InfPath") as string;
+                }
+                installations.Add(new DriverInstallation(
+                    $@"ROOT\DISPLAY\{instanceName}",
+                    infPath));
             }
         }
-        return instanceIds;
+        return installations;
+    }
+
+    private static IReadOnlyList<string> FindDriverPackageNames()
+    {
+        var packages = new List<string>();
+        if (!OperatingSystem.IsWindows()) return packages;
+        using var driverPackages = Registry.LocalMachine.OpenSubKey(
+            @"DRIVERS\DriverDatabase\DriverPackages");
+        if (driverPackages is null) return packages;
+        foreach (var keyName in driverPackages.GetSubKeyNames())
+        {
+            using var package = driverPackages.OpenSubKey(keyName);
+            if (package is null ||
+                !string.Equals(
+                    package.GetValue("InfName") as string,
+                    "MttVDD.inf",
+                    StringComparison.OrdinalIgnoreCase) ||
+                !string.Equals(
+                    package.GetValue("Provider") as string,
+                    "MikeTheTech",
+                    StringComparison.OrdinalIgnoreCase) ||
+                !string.Equals(
+                    package.GetValue("Catalog") as string,
+                    "MttVDD.cat",
+                    StringComparison.OrdinalIgnoreCase) ||
+                package.OpenSubKey(@"Descriptors\Root\MttVDD") is not { } descriptor)
+            {
+                continue;
+            }
+            descriptor.Dispose();
+            var publishedName = package.GetValue(null) as string;
+            if (publishedName is not null &&
+                System.Text.RegularExpressions.Regex.IsMatch(
+                    publishedName,
+                    @"\Aoem[0-9]+\.inf\z",
+                    System.Text.RegularExpressions.RegexOptions.IgnoreCase |
+                    System.Text.RegularExpressions.RegexOptions.CultureInvariant))
+            {
+                packages.Add(publishedName);
+            }
+        }
+        return packages;
     }
 
     private string EnsureDriverConfiguration()
     {
-        var targetPath = DriverConfigurationPath;
-        if (File.Exists(targetPath)) return targetPath;
+        using var directoryLease = AcquireDriverConfigurationDirectory();
+        return EnsureDriverConfigurationUnderLease();
+    }
 
-        Directory.CreateDirectory(DriverConfigurationDirectory);
+    private string EnsureDriverConfigurationUnderLease()
+    {
+        var targetPath = DriverConfigurationPath;
+        if (File.Exists(targetPath))
+        {
+            TrustedFileSystem.SecureExistingFile(targetPath);
+            return targetPath;
+        }
+
         var templatePath = Path.Combine(Path.GetDirectoryName(executablePath)!, "vdd_settings.xml");
-        DisplayTopologyService.AtomicWrite(targetPath, File.ReadAllText(templatePath));
+        TrustedFileSystem.WriteAllText(
+            targetPath,
+            TrustedFileSystem.ReadAllText(templatePath));
         return targetPath;
     }
 
     private static void AddMode(string configurationPath, int width, int height, int fps)
     {
-        var original = File.ReadAllText(configurationPath);
+        using var directoryLease = AcquireDriverConfigurationDirectory();
+        var original = TrustedFileSystem.ReadAllText(configurationPath);
         var updated = AddModeToConfiguration(original, width, height, fps);
         if (string.Equals(original, updated, StringComparison.Ordinal)) return;
         DriverNativeModeVerification.Invalidate();
-        DisplayTopologyService.AtomicWrite(configurationPath, updated);
+        TrustedFileSystem.WriteAllText(configurationPath, updated);
+    }
+
+    private void RequireProtectedBundle()
+    {
+        InstallationTrust.RequireBundledFile(
+            executablePath,
+            Path.Combine("tools", "DisplayWizard", "nefconw.exe"),
+            "Virtual display driver operation");
+    }
+
+    private static void PrepareDriverConfigurationDirectoryForInstall()
+    {
+        InstallationTrust.RequireInstalledPayload(
+            "Virtual display driver configuration");
+        var preparation =
+            DriverConfigurationDirectoryTrust.PrepareForInstallOrRepair(
+                DriverConfigurationDirectory);
+        using (preparation.Lease)
+        {
+            if (!preparation.Recreated) return;
+
+            DriverNativeModeVerification.Invalidate();
+            Console.WriteLine(
+                "Created a new protected virtual-display configuration " +
+                "directory and pinned its Windows file identity.");
+            if (preparation.RetainedQuarantinePath is not null)
+            {
+                Console.WriteLine(
+                    "The previous fixed-path entry was detached without " +
+                    "reading its contents and retained at " +
+                    $"{preparation.RetainedQuarantinePath}. Windows could " +
+                    "not remove it because it was not empty.");
+            }
+        }
+    }
+
+    private static TrustedDirectoryLease
+        AcquireDriverConfigurationDirectory()
+    {
+        InstallationTrust.RequireInstalledPayload(
+            "Virtual display driver configuration");
+        return DriverConfigurationDirectoryTrust.AcquireVerified(
+            DriverConfigurationDirectory);
     }
 
     internal static string AddModeToConfiguration(string configuration, int width, int height, int fps)
@@ -509,11 +857,31 @@ internal sealed class DisplayWizardAdapter
         }
     }
 
+    private static bool EnsurePnPUtilRemovalAccepted(ProcessExecutionResult result)
+    {
+        switch (ClassifyPnPUtilExitCode(result.ExitCode))
+        {
+            case PnPUtilExitDisposition.Success:
+            case PnPUtilExitDisposition.ContinueToVerification:
+                return false;
+            case PnPUtilExitDisposition.RestartRequired:
+                return true;
+            default:
+                throw new InvalidOperationException(
+                    $"{result.FileName} exited with code {result.ExitCode}. " +
+                    $"{result.Error} {result.Output}".Trim());
+        }
+    }
+
     private sealed record ProcessExecutionResult(
         string FileName,
         int ExitCode,
         string Output,
         string Error);
+
+    private sealed record DriverInstallation(
+        string InstanceId,
+        string? InfPath);
 
     private static void ValidateDimension(int value, string name, int minimum, int maximum)
     {

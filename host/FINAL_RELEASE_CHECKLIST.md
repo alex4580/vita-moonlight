@@ -74,7 +74,8 @@ release notes.
       seconds LG/another physical monitor must be active, VDD inactive,
       Sunshine running, and the rescue status successful.
 - [ ] Attach `%ProgramFiles%\Sunshine\config\sunshine.log`,
-      `%ProgramData%\VitaMoonlight\stream-rescue.log`, the optional Vita
+      `%ProgramFiles%\Vita Moonlight Host\state\Diagnostics\stream-rescue.log`,
+      the optional Vita
       diagnostic log, and exact timestamps to any remaining black-frame issue.
 
 ## Input and usability gates
@@ -135,10 +136,20 @@ release notes.
       any genuine failure is shown with the host error rather than only an exit
       code.
 - [ ] Upgrade over 0.14.2 or 0.14.3 with the existing `ROOT\MttVDD` device and
-      modified `C:\VirtualDisplayDriver\vdd_settings.xml`. Package staging
-      happens before managed-mode normalization; unrelated resolutions/options
-      remain, local/global duplicate effective modes are removed, and
-      960x544/60 is verified using a non-persistent live mode change.
+      an unpinned `C:\VirtualDisplayDriver` containing a marker. Setup renames
+      that entry by no-follow handle, never imports its contents, creates a
+      protected replacement atomically, persists its Windows file identity,
+      and prints the retained quarantine path. On the next repair, modifications
+      to the now-pinned configuration are preserved, local/global duplicate
+      effective modes are removed, and 960x544/60 is verified using a
+      non-persistent live mode change.
+- [ ] In a disposable VM, separately precreate the fixed path as a directory,
+      file, and directory reparse point. Hold a WRITE_DAC-only handle during
+      repair. Each old entry is detached rather than secured in place and no
+      reparse target is read. Hold a non-delete-sharing data handle and race a
+      replacement into the fixed name; setup must fail closed with restart and
+      repair guidance. Driver reload must refuse a directory whose persisted
+      volume/file identity no longer matches.
 - [ ] During an in-place VDD repair, delay display-target re-enumeration.
       Verification must wait up to 30 seconds for the existing target before
       changing topology, keep every physical display active while waiting, and
@@ -149,8 +160,9 @@ release notes.
       restore the exact original topology once; a rejected native mode reports
       its final Windows error and does not enter a restart loop.
 - [ ] The installer and portable companion reject Windows Server, ARM64, x86,
-      and Windows builds older than 19041 before setup actions. `doctor` must
-      report the unsupported platform and remain non-mutating.
+      and Windows builds older than 19041. Portable mode is diagnostics-only;
+      all elevation, setup, display mutation, and task-install controls remain
+      unavailable. `doctor` remains non-mutating.
 - [ ] Upgrade install preserves Sunshine credentials and unrelated app
       commands, upgrades an older Sunshine build without installing a
       duplicate, and removes obsolete Vita prep hooks.
@@ -160,10 +172,33 @@ release notes.
       and critical Windows processes; a disposable uncooperative app is
       force-terminated successfully.
 - [ ] Uninstall removes both scheduled tasks and the background agent and does
-      not leave the physical display disabled.
-- [ ] A forced nonzero `session recover` result aborts uninstall before the
-      companion, rescue agent, or recovery task is removed; uninstall succeeds
-      after recovery is restored.
+      not leave the physical display disabled. Default and silent uninstall
+      keep shared Sunshine, ViGEmBus, and VDD installations.
+- [ ] Uninstall removes Vita-managed Sunshine integration and all host state.
+      Its optional diagnostic choice preserves only the stream-rescue log.
+- [ ] Exercise the protected Sunshine ownership journal on an in-place upgrade:
+      unchanged managed values return to their recorded originals, newly added
+      values are removed, a value edited after setup is preserved, exact
+      Vita-owned hooks are removed without touching unrelated hooks, and the
+      journal is deleted only after every integration-cleanup location
+      succeeds. Record the pre-journal-upgrade baseline limitation.
+- [ ] With a disposable standard account, attempt to redirect machine state or
+      a recorded Sunshine path through an environment override, junction, or
+      other reparse point. Elevated uninstall must ignore the override, refuse
+      the reparse path, and retain the host and safeguards without deleting an
+      attacker-selected target.
+- [ ] A forced nonzero `uninstall prepare` result aborts uninstall before the
+      companion, rescue agent, recovery task, or shared dependency is removed;
+      uninstall succeeds after recovery is restored.
+- [ ] In a disposable VM, explicitly selected Sunshine, ViGEmBus, and VDD
+      removals succeed or accurately request a reboot. A pending reboot keeps
+      the host and safeguards until uninstall is rerun and verifies cleanup.
+      Default `/VERYSILENT` uninstall does not remove dependencies; the
+      explicit dependency switches do.
+- [ ] Remove the MTT display device instance while leaving its verified driver
+      package staged, then run explicit VDD removal. The orphaned MttVDD package
+      must be removed without matching or deleting any unrelated display
+      driver package.
 - [ ] Installer and portable ZIP contain the same companion build, current
       guides (including compatibility and Vita tuning), licenses, and
       `THIRD_PARTY_NOTICES.md`.
@@ -174,6 +209,10 @@ release notes.
       closed without them. Verify Authenticode on the companion, installer, and
       generated uninstaller; the VDD's publisher signature does not cover this
       project's executables.
+- [ ] Configure and verify the publisher's Git/SSH signing identity, create a
+      signed annotated release tag, and verify the published VPK, installer,
+      portable ZIP, and checksum-manifest provenance with
+      `gh attestation verify`.
 
 ## GitHub and release gate
 

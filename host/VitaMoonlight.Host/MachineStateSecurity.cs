@@ -1,0 +1,117 @@
+using Microsoft.Win32;
+
+namespace VitaMoonlight.Host;
+
+internal static class MachineStateSecurity
+{
+    private const string RegistryPath =
+        @"SOFTWARE\VitaMoonlight\Host";
+    private const string ProtectionValue =
+        "MachineStateProtectionVersion";
+    // Version 2 moves trusted state out of replaceable ProgramData children
+    // and beneath the protected Program Files installation.
+    private const int CurrentProtectionVersion = 2;
+
+    internal static void Secure()
+    {
+        // The operational entry point removes test-only path overrides before
+        // this method runs. Keep the state root fixed even when Secure is
+        // invoked directly by an installer or future integration.
+        Environment.SetEnvironmentVariable(
+            "VITA_MOONLIGHT_STATE_DIR",
+            null);
+        if (!IsProtectionInitialized())
+        {
+            throw new InvalidOperationException(
+                "Legacy machine state has not been migrated. Run " +
+                "`session recover-upgrade` from the installed Administrator " +
+                "companion before using protected state.");
+        }
+        SecureCore();
+    }
+
+    internal static void SecureAfterLegacyMigration()
+    {
+        SecureCore();
+        MarkProtectionInitialized();
+    }
+
+    private static void SecureCore()
+    {
+        // Secure the root itself first. No recursive pathname traversal is
+        // used: every object is opened with OPEN_REPARSE_POINT, checked by
+        // handle, assigned an exact protected DACL, and (for files) rejected
+        // when it has another hard-link name.
+        SecureContainer();
+
+        foreach (var path in ProtectedMachineFiles())
+        {
+            TrustedFileSystem.SecureExistingFile(path);
+        }
+        foreach (var path in WritableDiagnosticFiles())
+        {
+            TrustedFileSystem.SecureExistingFile(path);
+        }
+    }
+
+    internal static bool IsProtectionInitialized()
+    {
+        if (!OperatingSystem.IsWindows()) return true;
+        using var localMachine = RegistryKey.OpenBaseKey(
+            RegistryHive.LocalMachine,
+            RegistryView.Registry64);
+        using var key = localMachine.OpenSubKey(RegistryPath);
+        return key?.GetValue(ProtectionValue) is int version &&
+               version >= CurrentProtectionVersion;
+    }
+
+    private static void MarkProtectionInitialized()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        using var localMachine = RegistryKey.OpenBaseKey(
+            RegistryHive.LocalMachine,
+            RegistryView.Registry64);
+        using var key = localMachine.CreateSubKey(
+            RegistryPath,
+            writable: true)
+            ?? throw new UnauthorizedAccessException(
+                "Windows could not record protected machine-state migration.");
+        key.SetValue(
+            ProtectionValue,
+            CurrentProtectionVersion,
+            RegistryValueKind.DWord);
+    }
+
+    internal static void SecureContainer()
+    {
+        TrustedFileSystem.SecureDirectory(
+            HostStatePaths.Root);
+        TrustedFileSystem.SecureDirectory(
+            HostStatePaths.DiagnosticsDirectory);
+    }
+
+    internal static void SecureDiagnostics()
+    {
+        SecureContainer();
+        foreach (var path in WritableDiagnosticFiles())
+        {
+            TrustedFileSystem.SecureExistingFile(path);
+        }
+    }
+
+    private static IEnumerable<string> ProtectedMachineFiles()
+    {
+        yield return HostStatePaths.RecoveryFile;
+        yield return HostStatePaths.SettingsFile;
+        yield return HostStatePaths.LockFile;
+        yield return HostStatePaths.LastErrorFile;
+        yield return DriverNativeModeVerification.VerificationFile;
+        yield return DriverConfigurationDirectoryTrust.IdentityFile;
+    }
+
+    private static IEnumerable<string> WritableDiagnosticFiles()
+    {
+        yield return HostStatePaths.RescueStatusFile;
+        yield return HostStatePaths.RescueLogFile;
+    }
+}

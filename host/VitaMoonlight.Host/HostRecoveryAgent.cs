@@ -155,10 +155,17 @@ internal static class HostRecoveryAgentManager
         try
         {
             return File.Exists(HostStatePaths.RescueStatusFile)
-                ? JsonSerializer.Deserialize<HostRescueStatus>(File.ReadAllText(HostStatePaths.RescueStatusFile))
+                ? JsonSerializer.Deserialize<HostRescueStatus>(
+                    TrustedFileSystem.ReadAllText(
+                        HostStatePaths.RescueStatusFile))
                 : null;
         }
-        catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException)
+        catch (Exception error) when (
+            error is IOException or
+                UnauthorizedAccessException or
+                InvalidDataException or
+                System.ComponentModel.Win32Exception or
+                JsonException)
         {
             return null;
         }
@@ -387,6 +394,12 @@ internal sealed class HostRecoveryHotkeyWindow : NativeWindow, IDisposable
                         HostRecoveryActions.ChangeVirtualDisplayMode(mode);
                     }
                 }
+                catch (Exception error)
+                {
+                    HostRecoveryActions.RecordUnhandledFailure(
+                        "hotkey-action",
+                        error);
+                }
                 finally
                 {
                     Interlocked.Exchange(ref actionRunning, 0);
@@ -553,11 +566,21 @@ internal static class HostRecoveryActions
     {
         var failures = new List<string>();
         var completed = new List<string>();
-        var settings = HostSettings.Load();
-        var sunshine = settings.HostMode.Equals("sunshine", StringComparison.OrdinalIgnoreCase);
         var sunshineServiceName = StreamingHostLocator.FindSunshineServiceName();
+        var sunshineState = WindowsServiceState.NotInstalled;
+        try
+        {
+            sunshineState =
+                WindowsServiceManager.GetState(sunshineServiceName);
+        }
+        catch (Exception error)
+        {
+            failures.Add($"inspect Sunshine service: {error.Message}");
+        }
+        var restartSunshine =
+            sunshineState == WindowsServiceState.Running;
 
-        if (sunshine)
+        if (restartSunshine)
         {
             try
             {
@@ -572,28 +595,48 @@ internal static class HostRecoveryActions
 
         try
         {
-            if (new SessionManager().RestoreIfPending()) completed.Add("restored the saved display transaction");
-        }
-        catch (Exception error)
-        {
-            failures.Add($"saved display recovery: {error.Message}");
-        }
-
-        try
-        {
-            var physical = new DisplayTopologyService().RecoverPhysicalDisplays();
-            completed.Add($"activated physical display {string.Join(", ", physical)}");
+            var recovery =
+                UninstallManager
+                    .RecoverPhysicalAndDiscardPendingTransactionCore();
+            completed.Add(
+                $"activated physical display " +
+                $"{string.Join(", ", recovery.PhysicalDisplays)}");
+            if (recovery.ClearedSavedTransaction)
+            {
+                completed.Add(
+                    "discarded the pending display transaction");
+            }
         }
         catch (Exception error)
         {
             failures.Add($"physical display recovery: {error.Message}");
         }
 
+        HostSettings settings;
+        try
+        {
+            settings = HostSettings.Load();
+        }
+        catch (Exception error)
+        {
+            settings = HostSettings.Default;
+            failures.Add(
+                $"host settings were unreadable; used safe defaults: " +
+                $"{error.Message}");
+        }
+
+        var sunshine =
+            sunshineState != WindowsServiceState.NotInstalled ||
+            settings.HostMode.Equals(
+                "sunshine",
+                StringComparison.OrdinalIgnoreCase);
         if (sunshine && DisplayWizardAdapter.IsDriverInstalled())
         {
             try
             {
-                DisplayWizardAdapter.Locate(settings.DisplayWizardPath).ReloadDriver();
+                DisplayWizardAdapter
+                    .LocateBundledForUninstall()
+                    .ReloadDriver();
                 completed.Add("reloaded the virtual display driver");
                 IReadOnlyList<string>? physical = null;
                 for (var attempt = 0; attempt < 10 && physical is null; attempt++)
@@ -615,7 +658,7 @@ internal static class HostRecoveryActions
             }
         }
 
-        if (sunshine)
+        if (restartSunshine)
         {
             try
             {
@@ -632,16 +675,23 @@ internal static class HostRecoveryActions
         return Record("recover-display-host", failures.Count == 0, message);
     }
 
+    internal static HostRescueStatus RecordUnhandledFailure(
+        string action,
+        Exception error) =>
+        Record(action, false, error.Message);
+
     private static HostRescueStatus Record(string action, bool success, string message)
     {
         var status = new HostRescueStatus(DateTimeOffset.UtcNow, action, success, message);
         try
         {
-            Directory.CreateDirectory(HostStatePaths.Root);
-            DisplayTopologyService.AtomicWrite(
+            MachineStateSecurity.SecureDiagnostics();
+            TrustedFileSystem.WriteAllText(
                 HostStatePaths.RescueStatusFile,
-                JsonSerializer.Serialize(status, new JsonSerializerOptions { WriteIndented = true }));
-            File.AppendAllText(
+                JsonSerializer.Serialize(
+                    status,
+                    new JsonSerializerOptions { WriteIndented = true }));
+            TrustedFileSystem.AppendAllText(
                 HostStatePaths.RescueLogFile,
                 $"{status.Timestamp:O}\t{status.Action}\t{status.Success}\t{status.Message}{Environment.NewLine}");
         }

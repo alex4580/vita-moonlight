@@ -7,8 +7,9 @@ newer, and Windows 11, on x64 Intel or AMD CPUs**. It uses the official AMD64
 Sunshine installer and the pinned x64 signed Virtual Display Driver. Build
 19041 is the minimum because the safe driver reload uses PnPUtil device
 enable/restart commands introduced in that Windows release. The installer and
-portable companion refuse older, non-x64, or non-client Windows before running
-setup actions. Diagnostics remain available through `doctor`.
+portable companion refuse older, non-x64, or non-client Windows. The portable
+companion is diagnostics-only on supported systems; setup and recovery-task
+installation require the protected Program Files installation.
 
 Sunshine supports hardware encoding on AMD, Intel, and NVIDIA GPUs. Actual
 codec/encoder availability still depends on the installed GPU and vendor
@@ -34,9 +35,10 @@ Not currently packaged:
 - Laptop internal panels and external/docked monitors.
 - Systems that are on battery when recovery is needed; both scheduled tasks
   are configured to run on battery and after a missed trigger.
-- Existing Sunshine installations in Program Files, Program Files (x86), a
-  per-user Programs folder, or the directory registered by Sunshine's Windows
-  service. `SUNSHINE_PATH` and `SUNSHINE_CONFIG_DIR` remain explicit overrides.
+- Existing system-wide Sunshine installations in Program Files or Program
+  Files (x86).
+  Per-user and environment-redirected configuration paths are deliberately not
+  consumed by elevated setup.
 - Sunshine logs that emit display JSON properties in different orders.
 - A disabled physical topology: emergency recovery enables every available
   physical display rather than assuming one particular monitor name.
@@ -45,7 +47,8 @@ The rescue hotkey and sign-in recovery triggers belong to the Windows account
 used for streaming. This release supports one configured interactive streaming
 account per PC; applying setup from another account reassigns the tasks to that
 account. Simultaneous fast-user-switching sessions are not a release target.
-Recovery state itself is machine-wide under `%ProgramData%\VitaMoonlight`.
+Recovery state itself is machine-wide beneath the protected
+`%ProgramFiles%\Vita Moonlight Host\state` directory.
 Use the same Windows account for setup and streaming. Supplying credentials for
 a different Administrator account from a standard-user session is a required
 release test and must not be advertised as supported until both scheduled

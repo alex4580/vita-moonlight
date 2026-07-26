@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Runtime.InteropServices;
 using System.Security.Principal;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 
 namespace VitaMoonlight.Host;
 
@@ -16,11 +17,15 @@ internal static class Program
     [STAThread]
     public static int Main(string[] args)
     {
+        var command = args.FirstOrDefault()?.ToLowerInvariant() ?? "gui";
+        var remaining = args.Skip(1).ToArray();
+        if (command != "self-test")
+        {
+            ClearOperationalPathOverrides();
+        }
         TryClearLastCommandError();
         try
         {
-            var command = args.FirstOrDefault()?.ToLowerInvariant() ?? "gui";
-            var remaining = args.Skip(1).ToArray();
             return command switch
             {
                 "gui" => RunControlPanel(),
@@ -30,12 +35,15 @@ internal static class Program
                 "host" => HostCommand(remaining),
                 "gamepad" => GamepadCommand(remaining),
                 "runtime" => RuntimeCommand(remaining),
+                "dependency" => DependencyCommand(remaining),
+                "state" => StateCommand(remaining),
                 "driver" => DriverCommand(remaining),
                 "display" => DisplayCommand(remaining),
                 "session" => SessionCommand(remaining),
                 "recovery" => RecoveryCommand(remaining),
                 "agent" => AgentCommand(remaining),
                 "emergency" => EmergencyCommand(remaining),
+                "uninstall" => UninstallCommand(remaining),
                 "self-test" => RunSelfTest(),
                 "help" or "--help" or "-h" => PrintHelp(),
                 _ => InvalidCommand(command),
@@ -59,6 +67,27 @@ internal static class Program
         }
     }
 
+    private static void ClearOperationalPathOverrides()
+    {
+        // Environment overrides exist solely to support isolated self-tests.
+        // Scheduled tasks and elevated setup/uninstall commands can inherit a
+        // standard user's environment, so operational commands must discover
+        // installed components from trusted service/Program Files locations
+        // or consume an explicit CLI option.
+        foreach (var variable in new[]
+                 {
+                     "VITA_MOONLIGHT_STATE_DIR",
+                     "SUNSHINE_PATH",
+                     "SUNSHINE_CONFIG_DIR",
+                     "APOLLO_PATH",
+                     "APOLLO_CONFIG_DIR",
+                     "DISPLAYWIZARD_PATH",
+                 })
+        {
+            Environment.SetEnvironmentVariable(variable, null);
+        }
+    }
+
     private static int RunControlPanel()
     {
         var platform = WindowsPlatformCompatibility.Inspect();
@@ -79,6 +108,7 @@ internal static class Program
     private static int Configure(string[] args)
     {
         EnsureWindows();
+        EnsureAdministrator("Configuring the streaming host");
         var previous = HostSettings.Load();
         var hostMode = GetOption(args, "--host") ?? previous.HostMode;
         if (!hostMode.Equals("sunshine", StringComparison.OrdinalIgnoreCase) &&
@@ -92,7 +122,7 @@ internal static class Program
             HostMode = hostMode.ToLowerInvariant(),
             SunshineConfigDirectory = GetOption(args, "--config-dir") ?? previous.SunshineConfigDirectory,
             SunshineApplicationName = GetOption(args, "--app") ?? previous.SunshineApplicationName,
-            DisplayWizardPath = GetOption(args, "--driver-bundle") ?? GetOption(args, "--displaywizard") ?? previous.DisplayWizardPath,
+            DisplayWizardPath = previous.DisplayWizardPath,
             DisplayMatch = GetOption(args, "--display-match") ?? previous.DisplayMatch,
             IntegrateAllSunshineApps = GetOptionalBool(args, "--all-apps") ?? previous.IntegrateAllSunshineApps,
             ForceSdr = GetOptionalBool(args, "--force-sdr") ?? previous.ForceSdr,
@@ -114,7 +144,7 @@ internal static class Program
                     $"Detected: {sunshine.DetectedVersion ?? "unknown"}. Run the host installer again to update Sunshine.");
             }
 
-            var wizard = DisplayWizardAdapter.Locate(settings.DisplayWizardPath);
+            var wizard = DisplayWizardAdapter.LocateBundled();
             wizard.ValidateDriverBundle();
             if (!DisplayWizardAdapter.IsDriverInstalled())
             {
@@ -283,8 +313,9 @@ internal static class Program
         }
 
         EnsureAdministrator("Virtual display driver setup");
-        var configuredPath = GetOption(args, "--driver-bundle") ?? GetOption(args, "--displaywizard") ?? HostSettings.Load().DisplayWizardPath;
-        var wizard = DisplayWizardAdapter.Locate(configuredPath);
+        var wizard = action == "uninstall"
+            ? DisplayWizardAdapter.LocateBundledForUninstall()
+            : DisplayWizardAdapter.LocateBundled();
 
         switch (action)
         {
@@ -308,9 +339,51 @@ internal static class Program
                 wizard.EnsureVitaCompatibilityModes();
                 wizard.ReloadDriver();
                 return PrimeDriverOrReport("reloaded");
+            case "uninstall":
+                var restartRequired = wizard.UninstallDriver();
+                Console.WriteLine(restartRequired
+                    ? "The Vita virtual display driver was removed. Windows requires a restart to finish cleanup."
+                    : "The Vita virtual display driver and its managed configuration were removed.");
+                return restartRequired ? ExitRestartRequired : ExitSuccess;
             default:
                 return InvalidCommand($"driver {action}");
         }
+    }
+
+    private static int DependencyCommand(string[] args)
+    {
+        EnsureWindows();
+        EnsureAdministrator("Removing a shared Windows dependency");
+        var action = args.FirstOrDefault()?.ToLowerInvariant();
+        var product = args.Skip(1).FirstOrDefault()?.ToLowerInvariant();
+        if (action != "uninstall" || product is null)
+        {
+            return InvalidCommand($"dependency {string.Join(' ', args)}");
+        }
+
+        var result = WindowsDependencyUninstaller.Uninstall(product);
+        Console.WriteLine(!result.WasInstalled
+            ? $"{result.DisplayName} was not installed."
+            : result.RestartRequired
+                ? $"{result.DisplayName} was removed. Windows requires a restart to finish cleanup."
+                : $"{result.DisplayName} was removed.");
+        return result.RestartRequired ? ExitRestartRequired : ExitSuccess;
+    }
+
+    private static int StateCommand(string[] args)
+    {
+        EnsureWindows();
+        EnsureAdministrator("Securing Vita Moonlight machine state");
+        var action = args.FirstOrDefault()?.ToLowerInvariant() ?? "secure";
+        if (action != "secure")
+        {
+            return InvalidCommand($"state {action}");
+        }
+        MachineStateSecurity.Secure();
+        Console.WriteLine(
+            "Machine settings, recovery records, and host diagnostics are " +
+            "protected beneath the Program Files installation.");
+        return ExitSuccess;
     }
 
     private static int PrimeDriverOrReport(string action)
@@ -377,6 +450,11 @@ internal static class Program
     {
         EnsureWindows();
         var action = args.FirstOrDefault()?.ToLowerInvariant() ?? "status";
+        if (action != "status")
+        {
+            EnsureAdministrator(
+                "Managing the Vita streaming display session");
+        }
         var manager = new SessionManager();
         switch (action)
         {
@@ -418,6 +496,16 @@ internal static class Program
                 Console.WriteLine(manager.RestoreIfPending()
                     ? "Original display topology restored."
                     : "No pending display recovery was found.");
+                return ExitSuccess;
+            case "recover-upgrade":
+                var safeRecovery =
+                    UninstallManager.RecoverPhysicalAndDiscardPendingTransaction();
+                Console.WriteLine(
+                    $"Confirmed physical-only display topology: " +
+                    $"{string.Join(", ", safeRecovery.PhysicalDisplays)}.");
+                Console.WriteLine(safeRecovery.ClearedSavedTransaction
+                    ? "A legacy display transaction was discarded without applying it."
+                    : "No legacy display transaction needed cleanup.");
                 return ExitSuccess;
             case "status":
                 Console.WriteLine(manager.HasPendingRecovery
@@ -463,6 +551,8 @@ internal static class Program
         switch (action)
         {
             case "run":
+                InstallationTrust.RequireInstalledPayload(
+                    "Running the stream rescue agent");
                 return HostRecoveryAgentManager.Run(HasFlag(args, "--background"));
             case "install":
                 EnsureAdministrator("Installing the stream rescue agent");
@@ -511,6 +601,7 @@ internal static class Program
                 result = HostRecoveryActions.CloseForegroundApplication();
                 break;
             case "recover-display":
+            case "reset-display-driver":
                 result = HostRecoveryActions.RecoverDisplayAndStreamingHost();
                 break;
             default:
@@ -518,6 +609,37 @@ internal static class Program
         }
         Console.WriteLine(result.Message);
         return result.Success ? ExitSuccess : ExitFailure;
+    }
+
+    private static int UninstallCommand(string[] args)
+    {
+        EnsureWindows();
+        EnsureAdministrator("Preparing Vita Moonlight Host for uninstall");
+        var action = args.FirstOrDefault()?.ToLowerInvariant() ?? "prepare";
+        if (action == "cleanup-integration")
+        {
+            var cleanup = UninstallManager.CleanupIntegration();
+            Console.WriteLine(
+                $"Restored Vita-owned Sunshine settings in: {cleanup.ConfigurationDirectory}.");
+            Console.WriteLine(
+                $"Removed {cleanup.RemovedHooks} exact Vita-owned Sunshine preparation hook(s).");
+            return ExitSuccess;
+        }
+        if (action != "prepare")
+        {
+            return InvalidCommand($"uninstall {action}");
+        }
+
+        var result = UninstallManager.Prepare();
+        Console.WriteLine(
+            $"Confirmed physical-only display topology: {string.Join(", ", result.PhysicalDisplays)}.");
+        Console.WriteLine(result.ClearedSavedTransaction
+            ? "A stale display transaction was cleared after physical recovery."
+            : "No saved display transaction needed cleanup.");
+        Console.WriteLine(
+            "The shared MTT virtual display driver was kept. " +
+            "Removing it requires an explicit uninstall selection or `driver uninstall`.");
+        return ExitSuccess;
     }
 
     private static int RunDoctor(bool json)
@@ -607,6 +729,8 @@ internal static class Program
 
     private static int RunSelfTest()
     {
+        using var installationTrustTest =
+            InstallationTrust.AllowSelfTestPaths();
         var profile = VitaHostProfile.Recommended;
         Require(profile.Width == 960 && profile.Height == 544 && profile.BitrateKbps == 8000, "Recommended profile invariant failed.");
         Require(SunshineCompatibility.IsVersionSupported("2026.516.143833"),
@@ -652,6 +776,18 @@ internal static class Program
             DisplayWizardAdapter.ClassifyPnPUtilExitCode(1641) == PnPUtilExitDisposition.RestartRequired &&
             DisplayWizardAdapter.ClassifyPnPUtilExitCode(5) == PnPUtilExitDisposition.Failure,
             "PnPUtil exit-code classification failed.");
+        Require(
+            WindowsDependencyUninstaller.ClassifyExitCode(0) ==
+                DependencyUninstallDisposition.Success &&
+            WindowsDependencyUninstaller.ClassifyExitCode(1605) ==
+                DependencyUninstallDisposition.Success &&
+            WindowsDependencyUninstaller.ClassifyExitCode(1614) ==
+                DependencyUninstallDisposition.Success &&
+            WindowsDependencyUninstaller.ClassifyExitCode(3010) ==
+                DependencyUninstallDisposition.RestartRequired &&
+            WindowsDependencyUninstaller.ClassifyExitCode(1618) ==
+                DependencyUninstallDisposition.Failure,
+            "Windows dependency uninstall exit-code classification failed.");
         var formattedError = FormatErrorDetails(
             new InvalidOperationException(
                 "outer setup failure",
@@ -681,6 +817,8 @@ internal static class Program
         try
         {
             Directory.CreateDirectory(sunshineTestDirectory);
+            using var ownershipJournalTest = SunshineOwnershipJournal.UseTestFile(
+                Path.Combine(sunshineTestDirectory, "ownership-test.json"));
             File.WriteAllText(Path.Combine(sunshineTestDirectory, "apps.json"), """
                 {
                   "apps": [
@@ -705,7 +843,7 @@ internal static class Program
                 """);
             var integrationSettings = HostSettings.Default with { SunshineConfigDirectory = sunshineTestDirectory };
             var integrationResult = SunshineConfigurator.Configure(integrationSettings, @"C:\Program Files\Vita Moonlight Host\VitaMoonlight.Host.exe");
-            Require(integrationResult.CoveredApplicationCount == 3, "Every-app Sunshine integration count failed.");
+            Require(integrationResult.CoveredApplicationCount == 2, "Every-app Sunshine integration count failed.");
             Require(integrationResult.UsesNativeDisplayManagement, "Sunshine native display management was not selected.");
             using var integratedApps = JsonDocument.Parse(File.ReadAllText(Path.Combine(sunshineTestDirectory, "apps.json")));
             foreach (var app in integratedApps.RootElement.GetProperty("apps").EnumerateArray())
@@ -829,6 +967,119 @@ internal static class Program
                     Path.Combine(sunshineTestDirectory, "sunshine-dual-vdd.log"), "Apollo") ==
                     "{66666666-6666-6666-6666-666666666666}",
                 "An explicit Sunshine display match could not select an alternate virtual display.");
+
+            var cleanupResult = SunshineConfigurator.RemoveManagedIntegration();
+            Require(!cleanupResult.RemovedGeneratedApplication,
+                "Native all-app configuration unexpectedly created a disposable Sunshine application.");
+            Require(cleanupResult.RemovedNativeDisplaySettings,
+                "Uninstall cleanup retained the managed Sunshine display block.");
+            Require(!File.Exists(Path.Combine(
+                    sunshineTestDirectory,
+                    "apps.json.vita-moonlight.backup")),
+                "Uninstall cleanup retained the Vita Sunshine backup.");
+            using var cleanedApps = JsonDocument.Parse(
+                File.ReadAllText(Path.Combine(sunshineTestDirectory, "apps.json")));
+            Require(!cleanedApps.RootElement.GetProperty("apps").EnumerateArray().Any(app =>
+                    app.GetProperty("name").GetString() == "Vita Moonlight"),
+                "Native all-app configuration created a redundant Vita application.");
+            var cleanedSteam = cleanedApps.RootElement.GetProperty("apps").EnumerateArray().First(app =>
+                app.GetProperty("name").GetString() == "Steam Big Picture");
+            Require(cleanedSteam.GetProperty("prep-cmd").EnumerateArray().Any(prep =>
+                    prep.GetProperty("do").GetString() == "steam://open/bigpicture"),
+                "Uninstall cleanup removed a user-owned Sunshine preparation command.");
+            var cleanedConfiguration = File.ReadAllLines(
+                Path.Combine(sunshineTestDirectory, "sunshine.conf"));
+            Require(!cleanedConfiguration.Any(line =>
+                    line.StartsWith("dd_configuration_option =", StringComparison.OrdinalIgnoreCase)),
+                "Uninstall cleanup retained a newly added Sunshine display setting.");
+            Require(!cleanedConfiguration.Any(line =>
+                    line.StartsWith("controller =", StringComparison.OrdinalIgnoreCase)),
+                "Uninstall cleanup retained a newly added Sunshine controller setting.");
+            var secondCleanup = SunshineConfigurator.RemoveManagedIntegration();
+            Require(
+                secondCleanup.RemovedHooks == 0 &&
+                !secondCleanup.RemovedGeneratedApplication &&
+                !secondCleanup.RemovedNativeDisplaySettings,
+                "Sunshine uninstall cleanup was not idempotent.");
+
+            var legacySettings = integrationSettings with
+            {
+                IntegrateAllSunshineApps = false,
+            };
+            var preJournalRoot = JsonNode.Parse(
+                File.ReadAllText(
+                    Path.Combine(
+                        sunshineTestDirectory,
+                        "apps.json")))!.AsObject();
+            preJournalRoot["apps"]!.AsArray().Add(
+                new JsonObject
+                {
+                    ["name"] = "Vita Moonlight",
+                    ["cmd"] = string.Empty,
+                    ["output"] = string.Empty,
+                    ["exclude-global-prep-cmd"] = false,
+                    ["prep-cmd"] = new JsonArray
+                    {
+                        new JsonObject
+                        {
+                            ["do"] =
+                                SunshineConfigurator.BuildStartCommand(
+                                    @"C:\Program Files\Vita Moonlight Host\VitaMoonlight.Host.exe"),
+                            ["undo"] =
+                                SunshineConfigurator.BuildStopCommand(
+                                    @"C:\Program Files\Vita Moonlight Host\VitaMoonlight.Host.exe"),
+                            ["elevated"] = true,
+                        },
+                    },
+                });
+            File.WriteAllText(
+                Path.Combine(sunshineTestDirectory, "apps.json"),
+                preJournalRoot.ToJsonString(
+                    new JsonSerializerOptions { WriteIndented = true }));
+            SunshineConfigurator.Configure(
+                legacySettings,
+                @"C:\Program Files\Vita Moonlight Host\VitaMoonlight.Host.exe");
+            var legacyCleanup = SunshineConfigurator.RemoveManagedIntegration();
+            Require(
+                legacyCleanup.RemovedHooks == 1 &&
+                legacyCleanup.RemovedGeneratedApplication,
+                "Exact owned hook/application cleanup failed.");
+
+            SunshineConfigurator.Configure(
+                legacySettings,
+                @"C:\Program Files\Vita Moonlight Host\VitaMoonlight.Host.exe");
+            var userEditedRoot = JsonNode.Parse(
+                File.ReadAllText(Path.Combine(sunshineTestDirectory, "apps.json")))!.AsObject();
+            var userEditedApp = userEditedRoot["apps"]!.AsArray()
+                .OfType<JsonObject>()
+                .First(app => app["name"]?.GetValue<string>() == "Vita Moonlight");
+            userEditedApp["cmd"] = "user-owned-command";
+            File.WriteAllText(
+                Path.Combine(sunshineTestDirectory, "apps.json"),
+                userEditedRoot.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+            var editedBackupPath = Path.Combine(
+                sunshineTestDirectory,
+                "apps.json.vita-moonlight.backup");
+            File.AppendAllText(
+                editedBackupPath,
+                $"{Environment.NewLine}user-preserved-backup-edit");
+            var editedCleanup = SunshineConfigurator.RemoveManagedIntegration();
+            Require(
+                editedCleanup.RemovedHooks == 1 &&
+                !editedCleanup.RemovedGeneratedApplication,
+                "Cleanup did not preserve a user-modified generated application.");
+            using var editedApps = JsonDocument.Parse(
+                File.ReadAllText(Path.Combine(sunshineTestDirectory, "apps.json")));
+            var preservedEditedApp = editedApps.RootElement.GetProperty("apps")
+                .EnumerateArray()
+                .First(app => app.GetProperty("name").GetString() == "Vita Moonlight");
+            Require(
+                preservedEditedApp.GetProperty("cmd").GetString() == "user-owned-command" &&
+                !preservedEditedApp.TryGetProperty("prep-cmd", out _),
+                "Cleanup did not remove only the exact owned hook from a user-modified app.");
+            Require(
+                File.Exists(editedBackupPath),
+                "Cleanup deleted a backup whose owned fingerprint changed.");
         }
         finally
         {
@@ -841,6 +1092,34 @@ internal static class Program
         Require(testConfiguration.Contains("motion_as_ds4 = enabled"), "Sunshine motion configuration failed.");
         Require(testConfiguration.Contains("native_pen_touch = enabled"), "Sunshine touch configuration failed.");
         Require(testConfiguration.Contains("unrelated = preserved"), "Sunshine configuration preservation failed.");
+        var tamperedConfiguration = new List<string>
+        {
+            "output_name = user-changed-display",
+            "controller = enabled",
+            "new-setting = managed",
+            "unrelated = preserved",
+        };
+        var ownership = new SunshineOwnedLocation
+        {
+            ConfigurationDirectory = sunshineTestDirectory,
+            Values = new Dictionary<string, SunshineOwnedValue>(
+                StringComparer.OrdinalIgnoreCase)
+            {
+                ["output_name"] = new(true, "original-display", "managed-display"),
+                ["controller"] = new(true, "disabled", "enabled"),
+                ["new-setting"] = new(false, null, "managed"),
+            },
+        };
+        Require(
+            SunshineConfigurator.RestoreOwnedConfiguration(
+                tamperedConfiguration,
+                ownership) &&
+            tamperedConfiguration.Contains("output_name = user-changed-display") &&
+            tamperedConfiguration.Contains("controller = disabled") &&
+            !tamperedConfiguration.Any(line =>
+                line.StartsWith("new-setting =", StringComparison.OrdinalIgnoreCase)) &&
+            tamperedConfiguration.Contains("unrelated = preserved"),
+            "Ownership cleanup did not preserve tampered values and exactly restore current managed values.");
 
         const string driverConfiguration = "<vdd_settings><resolutions/><options><HardwareCursor>true</HardwareCursor></options></vdd_settings>";
         var updatedDriverConfiguration = DisplayWizardAdapter.AddModeToConfiguration(driverConfiguration, 960, 544, 60);
@@ -915,6 +1194,31 @@ internal static class Program
                 nativeModeVerification with { ConfigurationSha256 = "invalid" },
                 driverConfigurationSha256),
             "A malformed native-mode verification fingerprint was accepted.");
+        var protectedDriverDirectoryIdentity =
+            new TrustedFileIdentity(
+                VolumeSerialNumber: 0x12345678,
+                FileIndexHigh: 0x90ABCDEF,
+                FileIndexLow: 0x10203040);
+        var protectedDriverDirectoryRecord =
+            DriverConfigurationDirectoryTrust.CreateRecord(
+                protectedDriverDirectoryIdentity);
+        Require(
+            DriverConfigurationDirectoryTrust.Matches(
+                protectedDriverDirectoryRecord,
+                protectedDriverDirectoryIdentity),
+            "An exact protected display-driver directory identity was rejected.");
+        Require(
+            !DriverConfigurationDirectoryTrust.Matches(
+                protectedDriverDirectoryRecord,
+                protectedDriverDirectoryIdentity with
+                {
+                    FileIndexLow =
+                        protectedDriverDirectoryIdentity.FileIndexLow + 1,
+                }) &&
+            !DriverConfigurationDirectoryTrust.Matches(
+                protectedDriverDirectoryRecord with { FormatVersion = 0 },
+                protectedDriverDirectoryIdentity),
+            "A replaced display-driver directory or stale identity record was accepted.");
         Require(VitaDisplayModes.RequireSupported(960, 544, 60) == VitaDisplayModes.Native,
             "Vita native runtime mode validation failed.");
         try
@@ -1023,21 +1327,24 @@ internal static class Program
         Console.WriteLine("VitaMoonlight.Host gui");
         Console.WriteLine("VitaMoonlight.Host doctor [--json]");
         Console.WriteLine("VitaMoonlight.Host profile [--json]");
-        Console.WriteLine("VitaMoonlight.Host configure [--host sunshine|apollo] [--config-dir PATH] [--driver-bundle PATH] [--display-match TEXT] [--all-apps true|false] [--force-sdr true|false]");
+        Console.WriteLine("VitaMoonlight.Host configure [--host sunshine|apollo] [--config-dir PATH] [--display-match TEXT] [--all-apps true|false] [--force-sdr true|false]");
         Console.WriteLine("VitaMoonlight.Host host status|restart [--host sunshine]");
         Console.WriteLine("VitaMoonlight.Host host ensure-compatible --installer PATH");
         Console.WriteLine("VitaMoonlight.Host gamepad status|ensure-compatible [--installer PATH]");
         Console.WriteLine("VitaMoonlight.Host runtime status|ensure-compatible [--installer PATH]");
-        Console.WriteLine("VitaMoonlight.Host driver install|reload|status [--driver-bundle PATH]");
+        Console.WriteLine("VitaMoonlight.Host dependency uninstall sunshine|vigembus");
+        Console.WriteLine("VitaMoonlight.Host state secure");
+        Console.WriteLine("VitaMoonlight.Host driver install|reload|uninstall|status");
         Console.WriteLine("VitaMoonlight.Host display list");
         Console.WriteLine("VitaMoonlight.Host display disable-virtual");
         Console.WriteLine("VitaMoonlight.Host session test --width N --height N --fps N [--seconds 5..120]");
         Console.WriteLine("VitaMoonlight.Host session start --width N --height N --fps N");
         Console.WriteLine("VitaMoonlight.Host session mode --width 960|1280 --height 540|544|720 [--fps 60]");
-        Console.WriteLine("VitaMoonlight.Host session stop|recover|status");
+        Console.WriteLine("VitaMoonlight.Host session stop|recover|recover-upgrade|status");
         Console.WriteLine("VitaMoonlight.Host recovery install|uninstall|status");
         Console.WriteLine("VitaMoonlight.Host agent run [--background]|install|uninstall|status");
-        Console.WriteLine("VitaMoonlight.Host emergency close-foreground|recover-display");
+        Console.WriteLine("VitaMoonlight.Host emergency close-foreground|recover-display|reset-display-driver");
+        Console.WriteLine("VitaMoonlight.Host uninstall prepare|cleanup-integration");
         Console.WriteLine("VitaMoonlight.Host self-test");
         return ExitSuccess;
     }
@@ -1131,13 +1438,13 @@ internal static class Program
     {
         try
         {
-            if (File.Exists(HostStatePaths.LastErrorFile))
-            {
-                File.Delete(HostStatePaths.LastErrorFile);
-            }
+            if (!InstallationTrust.IsInstalledPayload(out _)) return;
+            if (!IsCurrentProcessAdministrator()) return;
+            if (!MachineStateSecurity.IsProtectionInitialized()) return;
+            MachineStateSecurity.Secure();
+            TrustedFileSystem.DeleteFile(HostStatePaths.LastErrorFile);
         }
-        catch (Exception error) when (
-            error is IOException or UnauthorizedAccessException)
+        catch
         {
             // A stale diagnostic breadcrumb must never block the requested command.
         }
@@ -1147,15 +1454,32 @@ internal static class Program
     {
         try
         {
-            Directory.CreateDirectory(HostStatePaths.Root);
-            File.WriteAllText(
+            if (!InstallationTrust.IsInstalledPayload(out _)) return;
+            if (!IsCurrentProcessAdministrator()) return;
+            if (!MachineStateSecurity.IsProtectionInitialized()) return;
+            MachineStateSecurity.Secure();
+            TrustedFileSystem.WriteAllText(
                 HostStatePaths.LastErrorFile,
                 $"Vita Moonlight Host command failed at {DateTimeOffset.Now:O}{Environment.NewLine}{details}{Environment.NewLine}");
         }
-        catch (Exception error) when (
-            error is IOException or UnauthorizedAccessException)
+        catch
         {
             // The original command failure remains authoritative.
+        }
+    }
+
+    private static bool IsCurrentProcessAdministrator()
+    {
+        if (!OperatingSystem.IsWindows()) return false;
+        try
+        {
+            using var identity = WindowsIdentity.GetCurrent();
+            return new WindowsPrincipal(identity).IsInRole(
+                WindowsBuiltInRole.Administrator);
+        }
+        catch
+        {
+            return false;
         }
     }
 
@@ -1179,6 +1503,7 @@ internal static class Program
         {
             throw new UnauthorizedAccessException($"{operation} requires an Administrator terminal.");
         }
+        InstallationTrust.RequireInstalledPayload(operation);
     }
 
     private static int InvalidCommand(string command)
@@ -1256,7 +1581,7 @@ internal static class HostDiagnostics
         string? displayWizard = null;
         try
         {
-            var wizard = DisplayWizardAdapter.Locate(settings.DisplayWizardPath);
+            var wizard = DisplayWizardAdapter.LocateBundled();
             wizard.ValidateDriverBundle();
             displayWizard = wizard.ExecutablePath;
         }

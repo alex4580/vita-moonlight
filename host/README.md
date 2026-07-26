@@ -28,10 +28,16 @@ the restart; afterward, open the control panel as Administrator and click
 
 The x64 installer supports client Windows 10 version 2004 (build 19041) or
 newer and Windows 11 on Intel/AMD CPUs. The installer and portable control panel
-refuse Windows Server, ARM64, x86, and older Windows before setup actions. See
-[COMPATIBILITY.md](COMPATIBILITY.md). The installer and control panel are safe to rerun after an update. A portable
-ZIP is also available: extract the whole folder and double-click
-`VitaMoonlight.Host.exe`.
+refuse Windows Server, ARM64, x86, and older Windows. See
+[COMPATIBILITY.md](COMPATIBILITY.md). The installed control panel is safe to
+rerun after an update.
+
+The portable ZIP is deliberately **diagnostics-only**. Extract the whole folder
+and double-click `VitaMoonlight.Host.exe` to run the health check or use
+`self-test`; administrator setup and display/session mutation controls remain
+disabled. This prevents a user-writable extracted executable from ever being
+registered as a highest-privilege recovery task. Use the signed installer for
+setup, repair, driver changes, and recovery safeguards.
 
 ## Control panel
 
@@ -51,10 +57,24 @@ only visible screen. The default Vita client profile is **Recommended**:
 installed host, ViGEmBus state, virtual display, app coverage, SDR policy,
 recovery state, and stream rescue agent.
 
-An existing VDD is repaired in place; setup does not assume a clean machine.
-It stages the pinned package first, then reapplies the Vita modes to the live
-configuration so a driver upgrade cannot replace them with its stock XML.
-Existing resolutions and driver options are preserved. Duplicate effective
+Setup does not assume a clean machine, but it never trusts or repairs an
+unidentified `C:\VirtualDisplayDriver` directory in place. On the first upgrade
+to this security model, the existing fixed-path entry is renamed without
+following it or reading its contents. Setup then atomically installs a new
+directory born with an Administrator/SYSTEM-only write policy and records its
+Windows volume/file identity in protected machine state. An empty detached
+entry is removed through the handle already held for it; a non-empty entry is
+left at the randomized quarantine path printed by setup for manual review.
+Later driver configuration and reload actions refuse to run if the fixed path
+no longer has the recorded identity. Run **Install/update display driver** as
+Administrator to recreate it; if Windows reports a sharing violation, restart
+Windows and repeat the repair.
+
+After that one-time identity migration, an existing trusted VDD is repaired
+without discarding its configuration. Setup stages the pinned package first,
+then reapplies the Vita modes to the live configuration so a driver upgrade
+cannot replace them with its stock XML. Existing resolutions and driver
+options in the trusted configuration are preserved. Duplicate effective
 refresh modes are removed when the same rate is both local and global because
 the upstream driver already replicates global rates onto every resolution.
 After an in-place device restart, Windows may temporarily omit VDD from its
@@ -118,9 +138,16 @@ choose **Displays > Emergency display reset**. Sign out and back in only when
 the agent cannot run; the highest-privilege logon task restores saved manual
 transactions.
 
-The recovery file is stored under `%ProgramData%\VitaMoonlight` before any
-display mutation. Do not deliberately terminate the host during a display test
-unless the PC has an independent remote-control path.
+The UI-independent recovery shortcut is **Ctrl + Alt + Shift + F11**. The
+background rescue agent stops Sunshine, restores and verifies a physical-only
+topology, reloads the MTT virtual display driver, reapplies the physical-only
+idle topology, and restarts Sunshine. The equivalent elevated terminal command
+is `VitaMoonlight.Host.exe emergency reset-display-driver`.
+
+The recovery file is stored beneath
+`%ProgramFiles%\Vita Moonlight Host\state` before any display mutation. Do not
+deliberately terminate the host during a display test unless the PC has an
+independent remote-control path.
 
 ## Streaming from the Vita
 
@@ -261,22 +288,88 @@ Other supported commands include:
 .\VitaMoonlight.Host.exe agent install
 .\VitaMoonlight.Host.exe agent status
 .\VitaMoonlight.Host.exe emergency recover-display
+.\VitaMoonlight.Host.exe emergency reset-display-driver
 ```
 
-Useful overrides are `--config-dir PATH`, `--driver-bundle PATH`, and
-`--display-match TEXT`. Environment overrides include `SUNSHINE_PATH`,
-`SUNSHINE_CONFIG_DIR`, `APOLLO_PATH`, `APOLLO_CONFIG_DIR`,
-`DISPLAYWIZARD_PATH`, and `VITA_MOONLIGHT_STATE_DIR`.
+Advanced installed setups may use `--config-dir PATH` (only a system-wide
+Program Files directory) and `--display-match TEXT`. Driver and
+prerequisite operations always use the protected, pinned copies installed
+under `tools`. Path environment variables are test-only and are cleared for
+every operational command.
 
-Configuration creates `apps.json.vita-moonlight.backup` once, removes obsolete
-prep commands marked `VitaMoonlight.Host`, and preserves unrelated applications
-and commands. The global Sunshine display settings are health-checked by the
-control panel. Runtime mode control accepts only 960x540, 960x544, and
+Configuration creates `apps.json.vita-moonlight.backup` once, removes only
+exact legacy hooks generated by this companion, and preserves unrelated
+applications and commands. Before changing Sunshine, it records every original
+and applied value plus exact hook/application fingerprints in the
+administrator-only `HKLM\SOFTWARE\VitaMoonlight\Host` ownership journal. The
+global Sunshine display settings are health-checked by the control panel.
+Runtime mode control accepts only 960x540, 960x544, and
 1280x720 at 60 Hz. The installed stream agent exposes those modes to the Vita's
 existing `Ctrl+Alt+Shift` control channel as F8, F9, and F10 respectively.
 F11 display recovery and F12 close-game remain available even if another
 program owns one optional mode chord; the health check reports incomplete mode
 hotkey readiness.
+
+## Uninstall and upgrades
+
+Install a newer package over the existing version; the fixed application ID
+performs an in-place upgrade. Setup first restores a physical-only layout and
+discards any legacy recovery blob without applying it, repairs the selected
+components, preserves Sunshine credentials and unrelated application commands,
+and reinstalls both recovery tasks against the new companion path.
+
+The uninstaller is deliberately conservative:
+
+1. it stops Sunshine only when necessary, activates a physical-only topology,
+   verifies that a physical display is active and VDD is inactive, and only
+   then clears any untrusted stale recovery record without applying it;
+2. from the protected ownership journal, it removes exact Vita-owned hooks and
+   restores each original Sunshine value only when the current value still
+   equals the value Vita Moonlight applied; later user edits are preserved;
+3. it optionally removes shared dependencies only when you explicitly select
+   **MTT virtual display driver**, **Sunshine**, or **ViGEmBus**;
+4. it removes the stream-rescue agent and logon-recovery task only after all
+   requested dependency operations succeed; and
+5. after successful removal, it deletes host settings, recovery records, and
+   transient diagnostics from the protected installed `state` directory.
+
+Sunshine, ViGEmBus, and VDD are kept by default because other software may use
+them. If VDD is selected, its device, driver-store package, native-mode
+verification record, and managed `C:\VirtualDisplayDriver\vdd_settings.xml`
+are removed. The fixed directory itself is deleted only when its recorded
+Windows file identity still matches and it is empty; an unknown replacement is
+never traversed or deleted. Windows may request a restart. If physical-display
+verification or a requested dependency removal fails, uninstall stops while
+the companion and both recovery safeguards are still available. If several
+explicitly selected shared dependencies are requested, an earlier one may
+already have been removed before a later one reports an error. A
+restart-required removal also stops uninstall: restart Windows and run
+uninstall again so the pending device/product removal can be verified before
+the safeguards disappear.
+
+The optional **Keep the stream-rescue log** checkbox preserves only a
+timestamped `%ProgramData%\VitaMoonlight-stream-rescue-*.log`; it does not
+retain settings. Silent automation is noninteractive and keeps every shared
+dependency unless its explicit switch is supplied:
+
+```powershell
+& "$env:ProgramFiles\Vita Moonlight Host\unins000.exe" /VERYSILENT /NORESTART
+
+# Destructive dependency removal must be requested component by component:
+& "$env:ProgramFiles\Vita Moonlight Host\unins000.exe" /VERYSILENT `
+  /REMOVEVDD /REMOVESUNSHINE /REMOVEVIGEMBUS /KEEPDIAGNOSTICS
+```
+
+Setup upgrades the old broadly writable state directory to an
+administrator-owned machine-state and diagnostics tree that standard users can
+read but not replace. Installed operational commands ignore test-only path environment
+overrides (`VITA_MOONLIGHT_STATE_DIR`, Sunshine/Apollo paths and config
+directories, and `DISPLAYWIZARD_PATH`) and refuse redirected machine-state,
+driver, or host-config paths.
+On the first upgrade from a release that predates the ownership journal, the
+then-current Sunshine values become the safe baseline. The uninstaller cannot
+reconstruct values overwritten by an older release, so it preserves that
+baseline rather than guessing and deleting potentially user-owned settings.
 
 ## Developer build
 
@@ -290,4 +383,7 @@ dotnet run --project host\VitaMoonlight.Host\VitaMoonlight.Host.csproj -c Releas
 Use [END_TO_END_TEST.md](END_TO_END_TEST.md) for the functional acceptance pass
 and [FINAL_RELEASE_CHECKLIST.md](FINAL_RELEASE_CHECKLIST.md) for final sign-off.
 Host/platform coverage is in [COMPATIBILITY.md](COMPATIBILITY.md), and Vita-side
-tuning is in `VITA_SETTINGS_GUIDE.md` in the installed package.
+tuning is in `VITA_SETTINGS_GUIDE.md` in the installed package. The smallest
+public-beta hardware gate is [BETA_SMOKE_TEST.md](BETA_SMOKE_TEST.md).
+`BUILDING.md` explains how to build and fork both products, and `RELEASING.md`
+documents the signing and publication pipeline in the installed package.

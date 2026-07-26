@@ -108,8 +108,14 @@ typedef struct TouchData {
   Point points[4];
 } TouchData;
 
+struct mapping;
+
 bool vitainput_init();
 void vitainput_config(CONFIGURATION config);
+void vitainput_default_mapping(struct mapping *target, uint32_t model);
+void vitainput_get_mapping(struct mapping *target);
+void vitainput_apply_mapping(const struct mapping *source);
+void vitainput_refresh_touchzones(void);
 
 void vitainput_start(void);
 void vitainput_stop(void);

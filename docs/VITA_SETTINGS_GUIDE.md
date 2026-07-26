@@ -102,7 +102,7 @@ Windows game.
 | **Frame rate** | 60 FPS produces smoother movement and shorter input-to-visible-frame intervals. | 30 FPS is easier for Wi-Fi and decoder load, but less fluid. Intermediate 24/40/50 values are available for special cases and make the preset Custom. |
 | **Video bitrate** | More bits reduce blocks, smearing, and lost detail during motion. | A rate above the sustainable link capacity causes queues, loss, freezes, and added input latency. The accepted range is 1-30 Mbps. |
 | **Network mode** | Auto detect chooses local/remote handling; Local only and Remote / VPN override it. | Forcing the wrong path can reduce responsiveness or reliability. Leave Auto detect selected unless the host path is known. |
-| **Packet-loss recovery** | Requests a clean H.264 reference frame when damage is detected. | Small protocol/encoder overhead; leave it on for Wi-Fi. |
+| **Packet-loss recovery** | Requests reference-frame invalidation when the host supports it; otherwise Moonlight falls back to requesting a clean IDR frame. | Small protocol/encoder overhead; leave it on for Wi-Fi, but the host ultimately decides which recovery mechanism is negotiated. |
 | **Frame pacing** | Drops late or excess frames instead of displaying an uneven queue. | Usually smoother. Turning it off can feel slightly more immediate in a special case but can introduce judder. |
 | **Wait for Vita vblank** | Synchronizes drawing to the Vita display. | May reduce tearing, but can add synchronization latency; presets leave it off. |
 | **Aspect scaling** | Fit shows the complete encoded frame; Crop / fill removes borders by trimming edges. | Crop can hide desktop UI and game HUD elements. Fit is the safe default. |
@@ -112,6 +112,15 @@ Windows game.
 The client requests H.264 only because the Vita has a hardware H.264 decoder.
 The host virtual display is SDR; HEVC, AV1, 10-bit video, and HDR are not
 compatibility targets for this device.
+
+Packet loss can occur even when the measured video rate is far below the
+configured bitrate, so lowering image quality is not always the right first
+step. For quality-neutral improvement, connect the host PC to the router by
+Ethernet, keep the Vita near the access point, use a clear fixed
+non-overlapping 2.4 GHz channel (20 MHz width when the area is congested), keep
+WMM enabled, and reduce competing 2.4 GHz traffic. Raise bitrate only after
+motion is stable; do not lower resolution merely because a static desktop
+reports fewer than 60 newly rendered frames.
 
 ## Performance overlay
 
@@ -153,6 +162,13 @@ File logging is off by default. In the disabled state, log calls return after a
 single check and the file remains closed. When enabled, logs append to:
 
 `ux0:data/moonlight/moonlight.log`
+
+Enabled logging buffers writes and flushes about once per second and when the
+stream disconnects, logging is disabled, or Moonlight exits. Normal
+diagnostics omit touch MOVE samples, precise touch coordinates, and typed
+characters. This substantially reduces logging overhead and prevents the IME
+from copying text entry into the diagnostic file. Network and host identifiers
+can still appear; inspect and redact the file before sharing it.
 
 If that directory is unavailable, Moonlight may select
 `ux0:moonlight/moonlight.log` or
@@ -226,6 +242,12 @@ Steam should then see a DS4-class controller and can map its gyro through Steam
 Input. Moonlight sends raw motion; configure camera/action behavior and
 sensitivity in the game's Steam Input layout.
 
+Motion samples are produced only while the gyro-capable profile is active and
+the host has requested them. The normal 100 Hz report path does not write one
+log entry per sample, even when diagnostic file logging is enabled. Its runtime
+cost is small, but Maximum compatibility disables gyro entirely when motion
+input is not needed.
+
 If Steam does not expose gyro, inspect **Real-time diagnostics**:
 
 - **Awaiting host request** means the DS4 motion path is enabled locally but
@@ -250,6 +272,54 @@ The mapping-file, shoulder-swap, sprint-helper, touch-zone, and mouse
 acceleration controls are advanced customizations. Change them only for a
 specific game's need; they do not improve video performance.
 
+#### Graphical button mapper
+
+Open **Settings > Input > Graphical button mapper** to map Vita inputs to every
+logical remote button: A/B/X/Y, all four D-pad directions, View, Menu, Guide,
+LB/RB, LT/RT, and both stick clicks. Select a target in the list, then choose a
+face button, D-pad direction, control/shoulder button, or back-touch quadrant.
+LT and RT can also use an analog trigger on Vita TV. **Reset to hardware
+defaults** restores the normal Vita or Vita TV layout.
+
+The editor creates and maintains a writable
+`mappings/vita.conf` under the active Moonlight data directory. The usual path
+is `ux0:data/moonlight/mappings/vita.conf`; the Settings row shows the actual
+path when Moonlight has fallen back to another data directory. The generated
+file uses the existing mapping-file keys, so an older `vita.conf` remains
+compatible. Values the editor does not recognize are displayed as hexadecimal
+and remain untouched until that target is changed.
+
+**Custom mapping** controls whether the file is active:
+
+- Turning it on creates the directory/file if necessary, loads it, disables the
+  simple shoulder swap, and applies the map immediately.
+- While it is on, each graphical edit is saved and applied immediately.
+- While it is off, graphical edits are saved to `vita.conf` for later but do
+  not replace the running hardware-default map.
+- Turning it off restores the model-specific hardware defaults immediately.
+
+Button-map edits do not require a reconnect because they do not change the
+virtual controller type. Reconnect only after changing the advertised
+Xbox/DS4 controller profile. The simple **Swap L1/R1 with L2/R2** option and
+Custom mapping are mutually exclusive.
+
+#### Front-touch zone mapper
+
+Open **Settings > Input > Front-touch zone mapper** for a scaled Vita-screen
+preview. White dots show current front touches. The four corner zones share an
+**Edge inset** and square **Zone size**, while each corner has its own action.
+Available actions include the local stream menu and keyboard, PC Guide and
+gamepad buttons, mouse buttons, Esc/Tab/I/M, F1-F12, or a manual keyboard code.
+Set a corner to **None** when touches there should continue to the selected
+normal touch mode.
+
+The **Enabled** row in the graphical editor and the **Front-touch zones** row
+in the main Input menu control the same setting. Geometry, enabled state, and
+assignments take effect immediately; leaving Settings writes them to the main
+Moonlight configuration. No reconnect is required. Reset restores a 150-pixel
+corner size with top-left opening the stream menu, bottom-left sending PC
+Guide, and the other corners unassigned.
+
 ### PS button behavior
 
 | Mode | Behavior | Tradeoff |
@@ -273,3 +343,12 @@ specific game's need; they do not improve video performance.
    those capabilities, then reconnect.
 7. Enable file logging only for a reproducible problem, copy the log, and turn
    it off again.
+
+## Vita system Wi-Fi toggle
+
+Long-pressing PS can open Vita system controls that disable Wi-Fi while a
+stream is active. The Windows rescue path should still restore the physical
+display, but some firmware/plugin combinations do not return the radio to the
+running Moonlight process afterward. Close Moonlight or restart the Vita if
+the system Wi-Fi control remains stuck. Moonlight deliberately does not turn
+Wi-Fi back on behind the user's system-level choice.

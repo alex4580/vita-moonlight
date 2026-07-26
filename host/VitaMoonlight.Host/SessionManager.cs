@@ -127,7 +127,7 @@ internal sealed class SessionManager
         {
             if (prepareDriverMode && !settings.HostMode.Equals("apollo", StringComparison.OrdinalIgnoreCase))
             {
-                DisplayWizardAdapter.Locate(settings.DisplayWizardPath).PrepareMode(width, height, fps);
+                DisplayWizardAdapter.LocateBundled().PrepareMode(width, height, fps);
             }
 
             var selected = ActivateWithRetry(
@@ -236,10 +236,11 @@ internal sealed class SessionManager
 
     private static FileStream AcquireLock()
     {
-        Directory.CreateDirectory(HostStatePaths.Root);
+        MachineStateSecurity.Secure();
         try
         {
-            return new FileStream(HostStatePaths.LockFile, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+            return TrustedFileSystem.OpenExclusiveFile(
+                HostStatePaths.LockFile);
         }
         catch (IOException error)
         {

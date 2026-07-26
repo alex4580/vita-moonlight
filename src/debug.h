@@ -25,5 +25,6 @@ void vita_debug_log(const char *s, ...);
 bool vita_debug_init();
 bool vita_debug_is_logging_enabled(void);
 void vita_debug_set_logging_enabled(bool enabled);
+void vita_debug_flush(void);
 void vita_debug_shutdown(void);
 bool vita_debug_get_log_path(char *path, size_t path_size);

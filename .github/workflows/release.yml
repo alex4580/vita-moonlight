@@ -26,6 +26,27 @@ jobs:
             exit 1
           fi
 
+          tag_ref="$(
+            gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$GITHUB_REF_NAME"
+          )"
+          tag_type="$(jq --raw-output '.object.type' <<<"$tag_ref")"
+          tag_sha="$(jq --raw-output '.object.sha' <<<"$tag_ref")"
+          if [[ "$tag_type" != "tag" || -z "$tag_sha" || "$tag_sha" == "null" ]]; then
+            echo "Release tag $GITHUB_REF_NAME must be an annotated, cryptographically signed tag." >&2
+            exit 1
+          fi
+
+          tag_verification="$(
+            gh api "repos/$GITHUB_REPOSITORY/git/tags/$tag_sha"
+          )"
+          tag_verified="$(jq --raw-output '.verification.verified' <<<"$tag_verification")"
+          tag_reason="$(jq --raw-output '.verification.reason // "unknown"' <<<"$tag_verification")"
+          if [[ "$tag_verified" != "true" ]]; then
+            echo "GitHub did not verify the signature on $GITHUB_REF_NAME (reason: $tag_reason)." >&2
+            exit 1
+          fi
+          echo "GitHub verified the signed annotated tag $GITHUB_REF_NAME."
+
           matching_releases="$(
             gh api \
               --paginate \
@@ -67,6 +88,8 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     steps:
       - name: Checkout release metadata
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -118,6 +141,11 @@ jobs:
             echo "CHANGELOG.md has no release notes for $release_version." >&2
             exit 1
           fi
+
+      - name: Attest release assets
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-path: release-dist/*
 
       - name: Create draft GitHub release
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2

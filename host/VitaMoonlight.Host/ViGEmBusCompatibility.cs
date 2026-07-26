@@ -18,7 +18,13 @@ internal static class ViGEmBusCompatibility
             return new ViGEmBusInstallResult(false, false, before);
         }
 
-        var fullInstallerPath = Path.GetFullPath(installerPath);
+        var fullInstallerPath = InstallationTrust.RequireBundledFile(
+            installerPath,
+            Path.Combine(
+                "tools",
+                "ViGEmBus",
+                "ViGEmBus_1.22.0_x64_x86_arm64.exe"),
+            "ViGEmBus installation");
         if (!File.Exists(fullInstallerPath))
         {
             throw new FileNotFoundException(

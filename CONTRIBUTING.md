@@ -7,9 +7,9 @@ connect/stream/disconnect/recovery lifecycle.
 ## Before filing an issue
 
 Read `README.md`, `docs/VITA_SETTINGS_GUIDE.md`, and
-`host/END_TO_END_TEST.md`. Search open and closed issues, then use
-`ISSUE_TEMPLATE.md` so reports include the Vita, Windows, host, GPU, network,
-and diagnostic context needed to reproduce the problem.
+`host/BETA_SMOKE_TEST.md`. Search open and closed issues, then use the GitHub
+bug-report form so reports include the Vita, Windows, host, GPU, network, and
+diagnostic context needed to reproduce the problem.
 
 Optional Vita file logging is off by default. Enable it only for the
 reproduction, disable it afterward, and redact private host or network values
@@ -38,3 +38,7 @@ Vita changes require VitaSDK and the dependencies listed in
 clean build, but it does not replace testing on a physical Vita. Complete the
 relevant sections of `host/END_TO_END_TEST.md`; release candidates must also
 pass `host/FINAL_RELEASE_CHECKLIST.md`.
+
+Full local toolchain and fork instructions are in `docs/BUILDING.md`. Release
+versioning, code signing, checksums, and provenance are documented in
+`docs/RELEASING.md`.

@@ -66,7 +66,13 @@ internal static class SunshineCompatibility
             return new SunshineInstallResult(false, false, before.DetectedVersion);
         }
 
-        var fullInstallerPath = Path.GetFullPath(installerPath);
+        var fullInstallerPath = InstallationTrust.RequireBundledFile(
+            installerPath,
+            Path.Combine(
+                "tools",
+                "Sunshine",
+                "Sunshine-Windows-AMD64-installer.msi"),
+            "Sunshine installation");
         if (!File.Exists(fullInstallerPath))
         {
             throw new FileNotFoundException(

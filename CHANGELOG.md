@@ -10,6 +10,27 @@
 * Corrected the VPK build identity to 0.14.6 and added tag/version validation,
   signed-release enforcement, exact release-asset checks, and SHA-256
   manifests to the publishing workflow.
+* Rebuilt Windows uninstall around verified physical-display recovery. Shared
+  Sunshine, ViGEmBus, and VDD installations are retained by default, optional
+  removal is explicit, Vita-managed host state is cleaned, and silent
+  automation remains noninteractive.
+* Added an on-device graphical controller mapper for every remote gamepad
+  button and a live front-touch-zone editor with gamepad, mouse, keyboard, and
+  local actions. Mapping changes apply immediately and use Vita-safe
+  journaled saves with interrupted-write recovery.
+* Hardened the virtual-display driver's fixed configuration path. Install or
+  repair now replaces legacy entries without following them, creates the
+  protected directory atomically, pins its Windows file identity, and rejects
+  substitutions during reload, verification, or uninstall.
+* Added the `emergency reset-display-driver` recovery alias and packaged the
+  beta smoke-test, build/fork, and signed-release guides with both Windows
+  distributions.
+* Reduced optional Vita logging overhead without lowering stream quality:
+  touch MOVE and per-keystroke payload records are omitted, writes flush in
+  batches and at disconnect, and displayed FPS is normalized to elapsed time.
+* Added structured public issue and pull-request templates plus signed GitHub
+  provenance attestations for the VPK, Windows packages, and checksum
+  manifest.
 
 ## 0.14.5
 

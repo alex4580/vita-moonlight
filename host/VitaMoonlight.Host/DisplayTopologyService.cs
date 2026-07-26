@@ -37,15 +37,22 @@ internal static class HostStatePaths
             {
                 return Path.GetFullPath(configured);
             }
-            return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "VitaMoonlight");
+            return Path.Combine(
+                InstallationTrust.ExpectedInstallationDirectory,
+                "state");
         }
     }
 
     internal static string RecoveryFile => Path.Combine(Root, "display-recovery.json");
     internal static string SettingsFile => Path.Combine(Root, "host-settings.json");
     internal static string LockFile => Path.Combine(Root, "session.lock");
-    internal static string RescueStatusFile => Path.Combine(Root, "stream-rescue-status.json");
-    internal static string RescueLogFile => Path.Combine(Root, "stream-rescue.log");
+    internal static string DiagnosticsDirectory => Path.Combine(Root, "Diagnostics");
+    internal static string RescueStatusFile => Path.Combine(
+        DiagnosticsDirectory,
+        "stream-rescue-status.json");
+    internal static string RescueLogFile => Path.Combine(
+        DiagnosticsDirectory,
+        "stream-rescue.log");
     internal static string LastErrorFile => Path.Combine(Root, "last-command-error.txt");
 }
 
@@ -179,13 +186,17 @@ internal sealed class DisplayTopologyService
 
     internal void SaveRecovery(DisplayRecoveryRecord recovery)
     {
-        Directory.CreateDirectory(HostStatePaths.Root);
-        AtomicWrite(HostStatePaths.RecoveryFile, JsonSerializer.Serialize(recovery, JsonOptions));
+        MachineStateSecurity.Secure();
+        TrustedFileSystem.WriteAllText(
+            HostStatePaths.RecoveryFile,
+            JsonSerializer.Serialize(recovery, JsonOptions));
     }
 
     internal DisplayRecoveryRecord LoadRecovery()
     {
-        var recovery = JsonSerializer.Deserialize<DisplayRecoveryRecord>(File.ReadAllText(HostStatePaths.RecoveryFile), JsonOptions)
+        var recovery = JsonSerializer.Deserialize<DisplayRecoveryRecord>(
+            TrustedFileSystem.ReadAllText(HostStatePaths.RecoveryFile),
+            JsonOptions)
             ?? throw new InvalidDataException("The display recovery record is empty.");
         if (recovery.FormatVersion != 1 ||
             recovery.PathStructureSize != Marshal.SizeOf<DisplayPathInfo>() ||
@@ -480,10 +491,7 @@ internal sealed class DisplayTopologyService
 
     internal static void ClearRecovery()
     {
-        if (File.Exists(HostStatePaths.RecoveryFile))
-        {
-            File.Delete(HostStatePaths.RecoveryFile);
-        }
+        TrustedFileSystem.DeleteFile(HostStatePaths.RecoveryFile);
     }
 
     internal static void AtomicWrite(string path, string content)

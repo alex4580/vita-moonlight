@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
@@ -24,11 +25,26 @@ internal static class SunshineConfigurator
 
     internal static SunshineConfigurationResult Configure(HostSettings settings, string companionPath)
     {
-        var configDirectory = ResolveConfigurationDirectory(settings.SunshineConfigDirectory, settings.HostMode);
+        var configDirectory =
+            InstallationTrust.RequireTrustedConfigurationDirectory(
+                ResolveConfigurationDirectory(
+                    settings.SunshineConfigDirectory,
+                    settings.HostMode),
+                "Streaming-host setup");
         Directory.CreateDirectory(configDirectory);
         var appsPath = Path.Combine(configDirectory, "apps.json");
         var sunshineConfigPath = Path.Combine(configDirectory, "sunshine.conf");
-        var backupPath = BackupOnce(appsPath);
+        var ownershipState = SunshineOwnershipJournal.Load();
+        var ownership = SunshineOwnershipJournal.GetOrAddLocation(
+            ownershipState,
+            configDirectory);
+        var backup = BackupOnce(appsPath);
+        if (backup.Created)
+        {
+            ownership.BackupOwned = true;
+            ownership.BackupSha256 = backup.Sha256;
+        }
+        var backupPath = backup.Path;
 
         var root = File.Exists(appsPath)
             ? JsonNode.Parse(File.ReadAllText(appsPath))?.AsObject() ?? new JsonObject()
@@ -36,9 +52,35 @@ internal static class SunshineConfigurator
         var apps = root["apps"] as JsonArray ?? new JsonArray();
         root["apps"] = apps;
 
+        foreach (var app in apps.OfType<JsonObject>())
+        {
+            RemoveOwnedHooks(app, ownership.Hooks);
+            var applicationName =
+                app["name"]?.GetValue<string>() ?? string.Empty;
+            var legacyGenerated =
+                string.Equals(
+                    applicationName,
+                    settings.SunshineApplicationName,
+                    StringComparison.OrdinalIgnoreCase) &&
+                HasLegacyGeneratedHook(app);
+            var removedLegacyHooks =
+                RemoveLegacyGeneratedHooks(app);
+            if (legacyGenerated &&
+                removedLegacyHooks > 0 &&
+                IsUnchangedGeneratedManagedApplication(app) &&
+                !ownership.CreatedApplications.Contains(
+                    applicationName,
+                    StringComparer.OrdinalIgnoreCase))
+            {
+                ownership.CreatedApplications.Add(applicationName);
+            }
+        }
+        ownership.Hooks.Clear();
+
+        var useNativeDisplayManagement = settings.HostMode == "sunshine" && settings.IntegrateAllSunshineApps;
         var managedApp = apps.OfType<JsonObject>().FirstOrDefault(candidate =>
             string.Equals(candidate["name"]?.GetValue<string>(), settings.SunshineApplicationName, StringComparison.OrdinalIgnoreCase));
-        if (managedApp is null)
+        if (!useNativeDisplayManagement && managedApp is null)
         {
             managedApp = new JsonObject
             {
@@ -48,25 +90,26 @@ internal static class SunshineConfigurator
                 ["exclude-global-prep-cmd"] = false,
             };
             apps.Add(managedApp);
+            if (!ownership.CreatedApplications.Contains(
+                    settings.SunshineApplicationName,
+                    StringComparer.OrdinalIgnoreCase))
+            {
+                ownership.CreatedApplications.Add(settings.SunshineApplicationName);
+            }
         }
 
         var applicationObjects = apps.OfType<JsonObject>().ToArray();
-        foreach (var app in applicationObjects)
-        {
-            RemoveManagedHooks(app);
-        }
-
-        var useNativeDisplayManagement = settings.HostMode == "sunshine" && settings.IntegrateAllSunshineApps;
         var targets = useNativeDisplayManagement ? Array.Empty<JsonObject>() : new[] { managedApp };
         foreach (var app in targets)
         {
-            AddManagedHook(app, companionPath);
+            var hook = AddManagedHook(app!, companionPath);
+            ownership.Hooks.Add(hook);
         }
 
         var configurationLines = File.Exists(sunshineConfigPath)
             ? File.ReadAllLines(sunshineConfigPath).ToList()
             : new List<string>();
-        UpdateSunshineConfiguration(configurationLines);
+        UpdateSunshineConfiguration(configurationLines, ownership);
         if (useNativeDisplayManagement)
         {
             var displayDeviceId = WaitForManagedDisplayDeviceId(
@@ -80,13 +123,26 @@ internal static class SunshineConfigurator
                     "Sunshine did not enumerate the Vita virtual display within 30 seconds. " +
                     "Restart Windows if the display driver was just installed, then click Apply recommended setup.");
             }
-            ConfigureNativeDisplayManagement(configurationLines, displayDeviceId, settings.ForceSdr);
+            ConfigureNativeDisplayManagement(
+                configurationLines,
+                displayDeviceId,
+                settings.ForceSdr,
+                ownership);
         }
         else if (settings.HostMode == "sunshine")
         {
-            SetConfigurationValue(configurationLines, "dd_configuration_option", "disabled");
-            SetConfigurationValue(configurationLines, "dd_config_revert_on_disconnect", "disabled");
+            SetOwnedConfigurationValue(
+                configurationLines,
+                ownership,
+                "dd_configuration_option",
+                "disabled");
+            SetOwnedConfigurationValue(
+                configurationLines,
+                ownership,
+                "dd_config_revert_on_disconnect",
+                "disabled");
         }
+        SunshineOwnershipJournal.Save(ownershipState);
         DisplayTopologyService.AtomicWrite(appsPath, root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
         DisplayTopologyService.AtomicWrite(
             sunshineConfigPath,
@@ -99,30 +155,262 @@ internal static class SunshineConfigurator
             backupPath);
     }
 
-    private static void RemoveManagedHooks(JsonObject app)
+    internal static SunshineIntegrationCleanupResult RemoveManagedIntegration()
     {
-        if (app["prep-cmd"] is not JsonArray prepCommands) return;
-        for (var index = prepCommands.Count - 1; index >= 0; index--)
+        var ownershipState = SunshineOwnershipJournal.Load();
+        var removedHooks = 0;
+        var removedGeneratedApplication = false;
+        var removedNativeDisplaySettings = false;
+        var cleanedDirectories = new List<string>();
+        foreach (var ownership in ownershipState.Locations)
         {
-            if (prepCommands[index] is JsonObject existing &&
-                (existing["do"]?.ToString().Contains(HookMarker, StringComparison.OrdinalIgnoreCase) == true ||
-                 existing["undo"]?.ToString().Contains(HookMarker, StringComparison.OrdinalIgnoreCase) == true))
+            var locationRemovedHooks = 0;
+            var locationRemovedApplication = false;
+            var configDirectory =
+                SunshineOwnershipJournal.ValidateConfigurationDirectory(
+                    InstallationTrust
+                        .RequireTrustedConfigurationDirectory(
+                            ownership.ConfigurationDirectory,
+                            "Streaming-host integration cleanup"));
+            cleanedDirectories.Add(configDirectory);
+            var appsPath = Path.Combine(configDirectory, "apps.json");
+            var sunshineConfigPath = Path.Combine(configDirectory, "sunshine.conf");
+            var backupPath = appsPath + ".vita-moonlight.backup";
+
+            if (File.Exists(appsPath))
             {
-                prepCommands.RemoveAt(index);
+                SunshineOwnershipJournal.ValidateOwnedFile(appsPath);
+                var root = JsonNode.Parse(File.ReadAllText(appsPath))?.AsObject()
+                    ?? throw new InvalidDataException("Sunshine apps.json has no root object.");
+                if (root["apps"] is JsonArray apps)
+                {
+                    foreach (var app in apps.OfType<JsonObject>())
+                    {
+                        locationRemovedHooks += RemoveOwnedHooks(
+                            app,
+                            ownership.Hooks);
+                    }
+
+                    foreach (var applicationName in ownership.CreatedApplications)
+                    {
+                        var managedApp = apps.OfType<JsonObject>().FirstOrDefault(candidate =>
+                            string.Equals(
+                                candidate["name"]?.GetValue<string>(),
+                                applicationName,
+                                StringComparison.OrdinalIgnoreCase));
+                        if (managedApp is not null &&
+                            IsUnchangedGeneratedManagedApplication(managedApp))
+                        {
+                            apps.Remove(managedApp);
+                            locationRemovedApplication = true;
+                        }
+                    }
+                }
+
+                if (locationRemovedHooks > 0 || locationRemovedApplication)
+                {
+                    DisplayTopologyService.AtomicWrite(
+                        appsPath,
+                        root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+                }
+            }
+            removedHooks += locationRemovedHooks;
+            removedGeneratedApplication |= locationRemovedApplication;
+
+            if (File.Exists(sunshineConfigPath))
+            {
+                SunshineOwnershipJournal.ValidateOwnedFile(sunshineConfigPath);
+                var lines = File.ReadAllLines(sunshineConfigPath).ToList();
+                if (RestoreOwnedConfiguration(lines, ownership))
+                {
+                    removedNativeDisplaySettings = true;
+                    DisplayTopologyService.AtomicWrite(
+                        sunshineConfigPath,
+                        lines.Count == 0
+                            ? string.Empty
+                            : string.Join(Environment.NewLine, lines) + Environment.NewLine);
+                }
+            }
+
+            if (ownership.BackupOwned &&
+                !string.IsNullOrWhiteSpace(ownership.BackupSha256) &&
+                File.Exists(backupPath))
+            {
+                SunshineOwnershipJournal.ValidateOwnedFile(backupPath);
+                var currentHash = ComputeFileSha256(backupPath);
+                if (FixedTimeHexEquals(
+                        currentHash,
+                        ownership.BackupSha256))
+                {
+                    File.Delete(backupPath);
+                }
             }
         }
+        SunshineOwnershipJournal.Delete();
+
+        return new SunshineIntegrationCleanupResult(
+            string.Join("; ", cleanedDirectories),
+            removedHooks,
+            removedGeneratedApplication,
+            removedNativeDisplaySettings);
     }
 
-    private static void AddManagedHook(JsonObject app, string companionPath)
+    private static int RemoveOwnedHooks(
+        JsonObject app,
+        IReadOnlyCollection<SunshineOwnedHook> ownedHooks)
+    {
+        if (app["prep-cmd"] is not JsonArray prepCommands) return 0;
+        var applicationName = app["name"]?.GetValue<string>() ?? string.Empty;
+        var removed = 0;
+        for (var index = prepCommands.Count - 1; index >= 0; index--)
+        {
+            if (prepCommands[index] is not JsonObject existing) continue;
+            var doCommand = existing["do"]?.GetValue<string>() ?? string.Empty;
+            var undoCommand = existing["undo"]?.GetValue<string>() ?? string.Empty;
+            var elevated = existing["elevated"]?.GetValue<bool>() ?? false;
+            if (ownedHooks.Any(hook =>
+                    string.Equals(
+                        hook.ApplicationName,
+                        applicationName,
+                        StringComparison.OrdinalIgnoreCase) &&
+                    string.Equals(hook.Do, doCommand, StringComparison.Ordinal) &&
+                    string.Equals(hook.Undo, undoCommand, StringComparison.Ordinal) &&
+                    hook.Elevated == elevated))
+            {
+                prepCommands.RemoveAt(index);
+                removed++;
+            }
+        }
+        if (removed > 0 && prepCommands.Count == 0)
+        {
+            app.Remove("prep-cmd");
+        }
+        return removed;
+    }
+
+    private static int RemoveLegacyGeneratedHooks(JsonObject app)
+    {
+        if (app["prep-cmd"] is not JsonArray prepCommands) return 0;
+        var removed = 0;
+        for (var index = prepCommands.Count - 1; index >= 0; index--)
+        {
+            if (prepCommands[index] is not JsonObject existing) continue;
+            var doCommand = existing["do"]?.GetValue<string>() ?? string.Empty;
+            var undoCommand = existing["undo"]?.GetValue<string>() ?? string.Empty;
+            var elevated = existing["elevated"]?.GetValue<bool>() ?? false;
+            if (elevated &&
+                IsGeneratedStartCommand(doCommand) &&
+                IsGeneratedStopCommand(undoCommand))
+            {
+                prepCommands.RemoveAt(index);
+                removed++;
+            }
+        }
+        if (removed > 0 && prepCommands.Count == 0)
+        {
+            app.Remove("prep-cmd");
+        }
+        return removed;
+    }
+
+    private static bool HasLegacyGeneratedHook(JsonObject app)
+    {
+        if (app["prep-cmd"] is not JsonArray prepCommands)
+        {
+            return false;
+        }
+        return prepCommands.OfType<JsonObject>().Any(existing =>
+            (existing["elevated"]?.GetValue<bool>() ?? false) &&
+            IsGeneratedStartCommand(
+                existing["do"]?.GetValue<string>() ?? string.Empty) &&
+            IsGeneratedStopCommand(
+                existing["undo"]?.GetValue<string>() ?? string.Empty));
+    }
+
+    private static bool IsGeneratedStartCommand(string command) =>
+        command.StartsWith(
+            "cmd.exe /D /S /C \"\"",
+            StringComparison.OrdinalIgnoreCase) &&
+        command.Contains(
+            $"{HookMarker}.exe\" session start --width %SUNSHINE_CLIENT_WIDTH% " +
+            "--height %SUNSHINE_CLIENT_HEIGHT% --fps %SUNSHINE_CLIENT_FPS%",
+            StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsGeneratedStopCommand(string command) =>
+        command.StartsWith('"') &&
+        command.EndsWith(
+            $"{HookMarker}.exe\" session stop",
+            StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsUnchangedGeneratedManagedApplication(JsonObject app)
+    {
+        var knownKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "name",
+            "cmd",
+            "output",
+            "exclude-global-prep-cmd",
+            "prep-cmd",
+        };
+        return app.All(property => knownKeys.Contains(property.Key)) &&
+               string.IsNullOrEmpty(app["cmd"]?.GetValue<string>()) &&
+               string.IsNullOrEmpty(app["output"]?.GetValue<string>()) &&
+               app["exclude-global-prep-cmd"]?.GetValue<bool>() == false &&
+               (app["prep-cmd"] is null ||
+                app["prep-cmd"] is JsonArray { Count: 0 });
+    }
+
+    internal static bool RestoreOwnedConfiguration(
+        List<string> lines,
+        SunshineOwnedLocation ownership)
+    {
+        var changed = false;
+        foreach (var owned in ownership.Values)
+        {
+            if (!TryGetConfigurationValue(lines, owned.Key, out var currentValue) ||
+                !string.Equals(
+                    currentValue,
+                    owned.Value.AppliedValue,
+                    StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (owned.Value.OriginalPresent)
+            {
+                SetConfigurationValue(
+                    lines,
+                    owned.Key,
+                    owned.Value.OriginalValue ?? string.Empty);
+            }
+            else
+            {
+                RemoveConfigurationValue(lines, owned.Key);
+            }
+            changed = true;
+        }
+        return changed;
+    }
+
+    private static SunshineOwnedHook AddManagedHook(
+        JsonObject app,
+        string companionPath)
     {
         var prepCommands = app["prep-cmd"] as JsonArray ?? new JsonArray();
         app["prep-cmd"] = prepCommands;
+        var doCommand = BuildStartCommand(companionPath);
+        var undoCommand = BuildStopCommand(companionPath);
         prepCommands.Add(new JsonObject
         {
-            ["do"] = BuildStartCommand(companionPath),
-            ["undo"] = BuildStopCommand(companionPath),
+            ["do"] = doCommand,
+            ["undo"] = undoCommand,
             ["elevated"] = true,
         });
+        return new SunshineOwnedHook(
+            app["name"]?.GetValue<string>() ?? string.Empty,
+            doCommand,
+            undoCommand,
+            true);
     }
 
     internal static string BuildStartCommand(string companionPath)
@@ -142,30 +430,45 @@ internal static class SunshineConfigurator
         return StreamingHostLocator.ResolveConfigurationDirectory(configuredDirectory, hostMode);
     }
 
-    internal static void UpdateSunshineConfiguration(List<string> lines)
+    internal static void UpdateSunshineConfiguration(List<string> lines) =>
+        UpdateSunshineConfiguration(lines, null);
+
+    private static void UpdateSunshineConfiguration(
+        List<string> lines,
+        SunshineOwnedLocation? ownership)
     {
-        SetConfigurationValue(lines, "controller", "enabled");
-        SetConfigurationValue(lines, "gamepad", "auto");
-        SetConfigurationValue(lines, "motion_as_ds4", "enabled");
-        SetConfigurationValue(lines, "touchpad_as_ds4", "enabled");
-        SetConfigurationValue(lines, "keyboard", "enabled");
-        SetConfigurationValue(lines, "mouse", "enabled");
-        SetConfigurationValue(lines, "native_pen_touch", "enabled");
+        SetConfigurationValue(lines, ownership, "controller", "enabled");
+        SetConfigurationValue(lines, ownership, "gamepad", "auto");
+        SetConfigurationValue(lines, ownership, "motion_as_ds4", "enabled");
+        SetConfigurationValue(lines, ownership, "touchpad_as_ds4", "enabled");
+        SetConfigurationValue(lines, ownership, "keyboard", "enabled");
+        SetConfigurationValue(lines, ownership, "mouse", "enabled");
+        SetConfigurationValue(lines, ownership, "native_pen_touch", "enabled");
     }
 
-    internal static void ConfigureNativeDisplayManagement(List<string> lines, string displayDeviceId, bool forceSdr)
+    internal static void ConfigureNativeDisplayManagement(
+        List<string> lines,
+        string displayDeviceId,
+        bool forceSdr) =>
+        ConfigureNativeDisplayManagement(lines, displayDeviceId, forceSdr, null);
+
+    private static void ConfigureNativeDisplayManagement(
+        List<string> lines,
+        string displayDeviceId,
+        bool forceSdr,
+        SunshineOwnedLocation? ownership)
     {
-        SetConfigurationValue(lines, "output_name", displayDeviceId);
-        SetConfigurationValue(lines, "dd_configuration_option", "ensure_only_display");
-        SetConfigurationValue(lines, "dd_resolution_option", "auto");
+        SetConfigurationValue(lines, ownership, "output_name", displayDeviceId);
+        SetConfigurationValue(lines, ownership, "dd_configuration_option", "ensure_only_display");
+        SetConfigurationValue(lines, ownership, "dd_resolution_option", "auto");
         // Keep the Windows desktop at a driver-safe 60 Hz. The client encoder
         // can still stream at 24/30/40/50/60 FPS independently.
-        SetConfigurationValue(lines, "dd_refresh_rate_option", "manual");
-        SetConfigurationValue(lines, "dd_manual_refresh_rate", "60");
-        SetConfigurationValue(lines, "dd_mode_remapping", VitaDisplayModeRemapping);
-        SetConfigurationValue(lines, "dd_hdr_option", forceSdr ? "auto" : "disabled");
-        SetConfigurationValue(lines, "dd_config_revert_delay", "500");
-        SetConfigurationValue(lines, "dd_config_revert_on_disconnect", "enabled");
+        SetConfigurationValue(lines, ownership, "dd_refresh_rate_option", "manual");
+        SetConfigurationValue(lines, ownership, "dd_manual_refresh_rate", "60");
+        SetConfigurationValue(lines, ownership, "dd_mode_remapping", VitaDisplayModeRemapping);
+        SetConfigurationValue(lines, ownership, "dd_hdr_option", forceSdr ? "auto" : "disabled");
+        SetConfigurationValue(lines, ownership, "dd_config_revert_delay", "500");
+        SetConfigurationValue(lines, ownership, "dd_config_revert_on_disconnect", "enabled");
     }
 
     internal static string? FindManagedDisplayDeviceId(string logPath, string? displayMatch)
@@ -366,10 +669,43 @@ internal static class SunshineConfigurator
     private static bool HasConfigurationValue(IEnumerable<string> lines, string key, string value) =>
         lines.Any(line => string.Equals(line.Trim(), $"{key} = {value}", StringComparison.OrdinalIgnoreCase));
 
+    private static void SetConfigurationValue(
+        List<string> lines,
+        SunshineOwnedLocation? ownership,
+        string key,
+        string value)
+    {
+        if (ownership is not null)
+        {
+            if (ownership.Values.TryGetValue(key, out var existing))
+            {
+                ownership.Values[key] = existing with { AppliedValue = value };
+            }
+            else
+            {
+                var originalPresent = TryGetConfigurationValue(
+                    lines,
+                    key,
+                    out var originalValue);
+                ownership.Values[key] = new SunshineOwnedValue(
+                    originalPresent,
+                    originalPresent ? originalValue : null,
+                    value);
+            }
+        }
+        SetConfigurationValue(lines, key, value);
+    }
+
+    private static void SetOwnedConfigurationValue(
+        List<string> lines,
+        SunshineOwnedLocation ownership,
+        string key,
+        string value) =>
+        SetConfigurationValue(lines, ownership, key, value);
+
     private static void SetConfigurationValue(List<string> lines, string key, string value)
     {
-        var prefix = key + " =";
-        var index = lines.FindIndex(line => line.TrimStart().StartsWith(prefix, StringComparison.OrdinalIgnoreCase));
+        var index = FindConfigurationValueIndex(lines, key);
         var replacement = $"{key} = {value}";
         if (index >= 0)
         {
@@ -381,15 +717,92 @@ internal static class SunshineConfigurator
         }
     }
 
-    private static string BackupOnce(string path)
+    private static bool TryGetConfigurationValue(
+        IReadOnlyList<string> lines,
+        string key,
+        out string value)
+    {
+        var index = FindConfigurationValueIndex(lines, key);
+        if (index < 0)
+        {
+            value = string.Empty;
+            return false;
+        }
+        var equals = lines[index].IndexOf('=');
+        value = equals < 0 ? string.Empty : lines[index][(equals + 1)..].Trim();
+        return true;
+    }
+
+    private static int FindConfigurationValueIndex(
+        IReadOnlyList<string> lines,
+        string key)
+    {
+        for (var index = 0; index < lines.Count; index++)
+        {
+            var equals = lines[index].IndexOf('=');
+            if (equals < 0) continue;
+            if (string.Equals(
+                    lines[index][..equals].Trim(),
+                    key,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return index;
+            }
+        }
+        return -1;
+    }
+
+    private static void RemoveConfigurationValue(List<string> lines, string key)
+    {
+        var index = FindConfigurationValueIndex(lines, key);
+        if (index >= 0)
+        {
+            lines.RemoveAt(index);
+        }
+    }
+
+    private static BackupResult BackupOnce(string path)
     {
         var backupPath = path + ".vita-moonlight.backup";
+        var created = false;
         if (File.Exists(path) && !File.Exists(backupPath))
         {
             File.Copy(path, backupPath);
+            created = true;
         }
-        return backupPath;
+        return new BackupResult(
+            backupPath,
+            created,
+            created ? ComputeFileSha256(backupPath) : null);
     }
+
+    private static string ComputeFileSha256(string path) =>
+        Convert.ToHexString(
+            SHA256.HashData(File.ReadAllBytes(path)));
+
+    private static bool FixedTimeHexEquals(
+        string first,
+        string second)
+    {
+        try
+        {
+            var firstBytes = Convert.FromHexString(first);
+            var secondBytes = Convert.FromHexString(second);
+            return firstBytes.Length == secondBytes.Length &&
+                   CryptographicOperations.FixedTimeEquals(
+                       firstBytes,
+                       secondBytes);
+        }
+        catch (FormatException)
+        {
+            return false;
+        }
+    }
+
+    private sealed record BackupResult(
+        string Path,
+        bool Created,
+        string? Sha256);
 
     private static void ValidateExecutablePath(string companionPath)
     {

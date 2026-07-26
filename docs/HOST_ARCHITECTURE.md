@@ -50,7 +50,8 @@ legacy single-app mode, and the timed manual preview. It:
 
 1. acquires a single-instance session lock;
 2. captures the active Windows paths and modes;
-3. atomically writes a recovery record under `%ProgramData%\VitaMoonlight`;
+3. atomically writes a recovery record beneath the protected
+   `%ProgramFiles%\Vita Moonlight Host\state` directory;
 4. finds the configured or known managed virtual target;
 5. validates and applies a topology containing only that target;
 6. changes it to the Vita-requested resolution and refresh rate; and
@@ -85,8 +86,8 @@ normal window close, then terminates only that process tree if it remains alive
 after 1.5 seconds. The display-recovery action stops Sunshine, restores any
 saved manual transaction, enables every connected physical display when none
 is active, reloads the signed VDD, reapplies the physical-only topology after driver enumeration, and
-starts Sunshine. Results are written beneath `%ProgramData%\VitaMoonlight` for
-the control panel and diagnostics.
+starts Sunshine. Results are written beneath the protected installed `state`
+directory for the control panel and diagnostics.
 
 ## Vita client
 

@@ -36,10 +36,13 @@ internal sealed class HostControlPanel : Form
     };
     private readonly TextBox displayMatch = new() { Width = 320 };
     private readonly bool isAdministrator;
+    private readonly bool isInstalledPayload;
 
     private HostControlPanel()
     {
         isAdministrator = IsAdministrator();
+        isInstalledPayload =
+            InstallationTrust.IsInstalledPayload(out _);
         Text = "Vita Moonlight Host";
         MinimumSize = new Size(900, 700);
         Size = new Size(1060, 790);
@@ -109,24 +112,31 @@ internal sealed class HostControlPanel : Form
     private Control CreateAdministratorBanner()
     {
         var elevated = isAdministrator;
+        var setupAvailable = elevated && isInstalledPayload;
         var panel = new FlowLayoutPanel
         {
             AutoSize = true,
             Dock = DockStyle.Fill,
             FlowDirection = FlowDirection.LeftToRight,
             Padding = new Padding(20, 9, 20, 8),
-            BackColor = elevated ? Color.FromArgb(231, 248, 239) : Color.FromArgb(255, 246, 224),
+            BackColor = setupAvailable
+                ? Color.FromArgb(231, 248, 239)
+                : Color.FromArgb(255, 246, 224),
         };
         panel.Controls.Add(new Label
         {
             AutoSize = true,
             Padding = new Padding(0, 7, 10, 0),
-            ForeColor = elevated ? Color.FromArgb(22, 101, 52) : Color.FromArgb(145, 91, 0),
-            Text = elevated
+            ForeColor = setupAvailable
+                ? Color.FromArgb(22, 101, 52)
+                : Color.FromArgb(145, 91, 0),
+            Text = !isInstalledPayload
+                ? "Portable mode is diagnostics-only. Use the installer for setup and recovery safeguards."
+                : elevated
                 ? "Administrator mode is enabled. Setup and display actions are available."
                 : "Administrator mode is required for setup and display changes.",
         });
-        if (!elevated)
+        if (!elevated && isInstalledPayload)
         {
             var elevate = CreateButton("Restart as Administrator", ButtonKind.Primary, 190);
             elevate.Click += (_, _) => RelaunchElevated();
@@ -530,7 +540,9 @@ internal sealed class HostControlPanel : Form
         };
         actionControls.Add(button);
         if (requiresAdministrator) administratorControls.Add(button);
-        button.Enabled = !requiresAdministrator || isAdministrator;
+        button.Enabled =
+            !requiresAdministrator ||
+            (isAdministrator && isInstalledPayload);
         parent.Controls.Add(button);
     }
 
@@ -640,6 +652,11 @@ internal sealed class HostControlPanel : Form
         foreach (var control in actionControls)
         {
             control.Enabled = !busy && (isAdministrator || !administratorControls.Contains(control));
+            if (administratorControls.Contains(control) &&
+                !isInstalledPayload)
+            {
+                control.Enabled = false;
+            }
         }
         hostMode.Enabled = !busy;
         integrateAllApps.Enabled = !busy;
@@ -653,6 +670,8 @@ internal sealed class HostControlPanel : Form
     {
         try
         {
+            InstallationTrust.RequireInstalledPayload(
+                "Restarting the host as Administrator");
             var executable = Environment.ProcessPath
                 ?? throw new InvalidOperationException("The control panel executable path is unavailable.");
             var startInfo = new ProcessStartInfo(executable) { UseShellExecute = true, Verb = "runas" };

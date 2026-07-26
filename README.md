@@ -31,6 +31,8 @@ required for normal setup or troubleshooting.
   per-frame metric collection is skipped when no diagnostics feature needs it.
 - A highest-privilege stream rescue agent that can close a bad foreground
   game, end Sunshine's current app, or recover the display and Sunshine.
+- A UI-independent **Ctrl + Alt + Shift + F11** emergency shortcut that
+  restores physical displays, reloads the VDD, and restarts Sunshine.
 - A PS-button policy whose safe default keeps PS local while preserving
   double-PS as a forced LiveArea escape.
 
@@ -63,6 +65,7 @@ mode is the Vita panel's native **960x544 at 60 Hz**.
 
 See the [Windows host guide](host/README.md) for installation, configuration,
 recovery, and troubleshooting. Release testing is documented in the
+[minimum beta smoke test](host/BETA_SMOKE_TEST.md) and
 [GUI-first acceptance test](host/END_TO_END_TEST.md); use the
 [final-release checklist](host/FINAL_RELEASE_CHECKLIST.md) for sign-off. Read
 the [host compatibility guide](host/COMPATIBILITY.md) and
@@ -194,6 +197,11 @@ logging is separately enabled.
 Diagnostic file logging is **off by default**. When it is off, log calls return
 immediately and no log file is opened for normal activity.
 
+When enabled, writes are buffered and flushed about once per second and at
+disconnect, disable, and shutdown. Normal diagnostics do not record touch MOVE
+samples, precise touch coordinates, or typed characters. Host and network
+identifiers may still be present, so inspect a log before sharing it.
+
 1. Before connecting, open **Settings > System > Diagnostic file logging**.
    While streaming, toggle **Diagnostic file logging** directly on the
    in-stream menu, or open **Real-time diagnostics** and press **Triangle**.
@@ -230,6 +238,18 @@ reconnect does not send a display-mode command or reset the VDD. The Real-time
 diagnostics screen distinguishes the active controller from a pending choice
 and can confirm whether Sunshine requested gyro samples and the Vita sent them.
 
+For per-button changes, open **Settings > Input > Graphical button mapper**.
+It covers A/B/X/Y, D-pad, View, Menu, Guide, both shoulder/trigger pairs, and
+both stick clicks. Moonlight creates a writable
+`mappings/vita.conf` below the active data directory, so no example file needs
+to be copied from the repository. Turn on **Custom mapping** to use it.
+Edits made while Custom mapping is on are saved and applied immediately; edits
+made while it is off are saved for later. Disabling it immediately restores
+the Vita or Vita TV hardware defaults. Custom mapping and the simple
+L1/R1-to-L2/R2 swap are mutually exclusive. None of these button-map changes
+requires a reconnect; changing the advertised Xbox/DS4 controller profile
+still does.
+
 The four individual PS modes are:
 
 - **Local double-tap**: recommended default. Single PS stays local; double-PS
@@ -246,15 +266,26 @@ Touch choices are **Relative mouse**, **DS4 Touchpad**, **Mouse Absolute**, and
 quality or bitrate. See the [Vita settings guide](docs/VITA_SETTINGS_GUIDE.md)
 for complete tuning and controller details.
 
+The **Front-touch zone mapper** draws the four configurable corner zones at
+Vita-screen scale and shows live touch points. It provides one shared edge
+inset and zone size plus an action for each corner. Assigned zones can open the
+stream menu or keyboard, send gamepad/mouse buttons, or send a keyboard key.
+Zone changes apply immediately and are saved with the rest of Settings when
+you leave the screen; no stream reconnect is needed.
+
 ## If something goes wrong
 
 - **The Vita still shows the physical display or a 4:3 image:** open the host
   control panel, enable automatic Vita-display switching and Force SDR, then
   choose **Save and apply**. In-stream, select 960x544 and choose **Apply
   resolution + reconnect**.
-- **The physical monitor does not return:** sign out and back in so the
-  recovery task restores the saved layout. If the desktop is visible, use
-  **Displays > Emergency display reset** in the Administrator control panel.
+- **The physical monitor does not return:** from any keyboard in the streaming
+  Windows session, press **Ctrl + Alt + Shift + F11** to restore physical
+  displays, reload the VDD, and restart Sunshine without using the UI. If the
+  desktop is visible, the same action is available under **Displays >
+  Emergency display reset** in the Administrator control panel. Sign out and
+  back in only if the agent cannot run; the logon recovery task then restores
+  the saved layout.
 - **A game turns black while the Vita menu still draws:** try **Close Windows
   game**. If Steam does not return, use **End Sunshine app**. If the captured
   desktop remains black, use **Recover host display**, wait about ten seconds,
@@ -292,7 +323,9 @@ dotnet run --project host\VitaMoonlight.Host\VitaMoonlight.Host.csproj -c Releas
 ```
 
 The release workflows build the VPK, portable Windows package, and Windows
-installer. Pinned third-party components are described in
+installer. See [Building and forking](docs/BUILDING.md) for the reproducible
+toolchains and [Releasing a fork](docs/RELEASING.md) for versioning, signing,
+checksums, and provenance. Pinned third-party components are described in
 [host/THIRD_PARTY_NOTICES.md](host/THIRD_PARTY_NOTICES.md).
 
 ## Upstream and community

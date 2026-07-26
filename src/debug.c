@@ -22,15 +22,18 @@
 #include <stdio.h>
 #include <stdarg.h>
 #include <string.h>
+#include <psp2/kernel/threadmgr.h>
 #include <psp2/rtc.h>
-#include "../src/gui/mdns_log.h"
 #include "debug.h"
 #include "config.h"
 #include "gui/ui_diagnostics.h"
 
+#define LOG_FLUSH_INTERVAL_US 1000000ULL
+
 pthread_mutex_t print_mutex;
 static char log_buffer[8192];
 static uint32_t logging_enabled = 0;
+static uint64_t last_log_flush_us = 0;
 
 static bool logging_enabled_load(void) {
   return __atomic_load_n(&logging_enabled, __ATOMIC_ACQUIRE) != 0;
@@ -61,11 +64,15 @@ static bool open_log_locked(void) {
   if (!build_log_path(log_path, sizeof(log_path))) return false;
 
   config.log_file = fopen(log_path, "a");
+  if (config.log_file) {
+    last_log_flush_us = sceKernelGetSystemTimeWide();
+  }
   return config.log_file != NULL;
 }
 
 bool vita_debug_init() {
   config.log_file = NULL;
+  last_log_flush_us = 0;
   logging_enabled_store(false);
   if (pthread_mutex_init(&print_mutex, NULL) != 0) {
     return false;
@@ -113,16 +120,16 @@ void vita_debug_log(const char *s, ...) {
     if (length == 0 || log_buffer[length - 1] != '\n') {
       fputc('\n', config.log_file);
     }
-    fflush(config.log_file);
+    uint64_t now_us = sceKernelGetSystemTimeWide();
+    if (last_log_flush_us == 0 ||
+        now_us - last_log_flush_us >= LOG_FLUSH_INTERVAL_US) {
+      fflush(config.log_file);
+      last_log_flush_us = now_us;
+    }
   } else {
     printf("[Moonlight] Could not open the diagnostic log. Message: %s\n",
            log_buffer + prefix_len);
   }
-
-#ifdef __vita__
-  // También imprimir por mdns_log (sceClibPrintf)
-  mdns_log("%s", log_buffer + prefix_len);
-#endif
 
   pthread_mutex_unlock(&print_mutex);
 }
@@ -139,6 +146,7 @@ void vita_debug_set_logging_enabled(bool enabled) {
     fflush(config.log_file);
     fclose(config.log_file);
     config.log_file = NULL;
+    last_log_flush_us = 0;
   }
   pthread_mutex_unlock(&print_mutex);
 
@@ -149,6 +157,15 @@ void vita_debug_set_logging_enabled(bool enabled) {
   ui_diagnostics_set_logging_consumer(enabled);
 }
 
+void vita_debug_flush(void) {
+  pthread_mutex_lock(&print_mutex);
+  if (config.log_file) {
+    fflush(config.log_file);
+    last_log_flush_us = sceKernelGetSystemTimeWide();
+  }
+  pthread_mutex_unlock(&print_mutex);
+}
+
 void vita_debug_shutdown(void) {
   pthread_mutex_lock(&print_mutex);
   config.save_debug_log = false;
@@ -157,6 +174,7 @@ void vita_debug_shutdown(void) {
     fflush(config.log_file);
     fclose(config.log_file);
     config.log_file = NULL;
+    last_log_flush_us = 0;
   }
   pthread_mutex_unlock(&print_mutex);
   ui_diagnostics_set_logging_consumer(false);

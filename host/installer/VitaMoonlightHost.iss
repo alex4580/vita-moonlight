@@ -22,6 +22,8 @@ VersionInfoVersion=0.14.6.0
 AppPublisher=Vita Moonlight contributors
 AppPublisherURL=https://github.com/alex4580/vita-moonlight
 DefaultDirName={autopf}\Vita Moonlight Host
+DisableDirPage=yes
+UsePreviousAppDir=no
 DefaultGroupName=Vita Moonlight Host
 DisableProgramGroupPage=yes
 LicenseFile=..\..\LICENSE
@@ -29,6 +31,7 @@ ArchitecturesAllowed=x64os
 ArchitecturesInstallIn64BitMode=x64os
 MinVersion=10.0.19041
 PrivilegesRequired=admin
+RedirectionGuard=yes
 Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern
@@ -50,7 +53,11 @@ Name: "host\sunshine\virtualdriver"; Description: "Install or repair the pinned,
 Name: "host\apollo"; Description: "Apollo (built-in virtual display)"; Flags: exclusive unchecked
 
 [Dirs]
-Name: "{commonappdata}\VitaMoonlight"; Permissions: users-modify
+Name: "{app}\state"
+Name: "{app}\state\Diagnostics"
+
+[Registry]
+Root: HKLM64; Subkey: "SOFTWARE\VitaMoonlight\Host"; Flags: uninsdeletekey
 
 [Files]
 Source: "{#PublishDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -80,6 +87,12 @@ var
   DriverNeedsAttention: Boolean;
   RestartRequiredByPrerequisite: Boolean;
   ConfigurationDeferredForRestart: Boolean;
+  RemoveVirtualDisplayOnUninstall: Boolean;
+  RemoveSunshineOnUninstall: Boolean;
+  RemoveViGEmBusOnUninstall: Boolean;
+  PreserveDiagnosticsOnUninstall: Boolean;
+  RestartRequiredByUninstall: Boolean;
+  PreservedRescueLogPath: String;
 
 function InitializeSetup: Boolean;
 var
@@ -94,12 +107,13 @@ begin
     (CompareText(Trim(InstallationType), 'Client') = 0);
   if not Result then
   begin
-    MsgBox(
+    SuppressibleMsgBox(
       'Vita Moonlight Host requires client Windows 10 version 2004 or newer, ' +
       'or Windows 11, on an x64 Intel or AMD PC. Windows Server, ARM64, and x86 ' +
       'are not supported by this package.',
       mbError,
-      MB_OK);
+      MB_OK,
+      IDOK);
   end;
 end;
 
@@ -129,14 +143,15 @@ begin
   begin
     RestartRequiredByPrerequisite := True;
     ConfigurationDeferredForRestart := True;
-    MsgBox(
+    SuppressibleMsgBox(
       Description + ' requires a Windows restart.' + #13#10 + #13#10 +
       'Setup has stopped before applying Sunshine display configuration or ' +
       'changing the active display. ' +
       'Restart Windows, then open Vita Moonlight Host as Administrator and ' +
       'click "Apply recommended setup" to finish.',
       mbInformation,
-      MB_OK);
+      MB_OK,
+      IDOK);
     Result := False;
     exit;
   end;
@@ -144,7 +159,7 @@ begin
   if ResultCode <> 0 then
   begin
     ErrorPath := ExpandConstant(
-      '{commonappdata}\VitaMoonlight\last-command-error.txt');
+      '{app}\state\last-command-error.txt');
     ErrorText := '';
     if LoadStringFromFile(ErrorPath, ErrorDetails) then
       ErrorText := Trim(ErrorDetails);
@@ -211,8 +226,13 @@ begin
     exit;
 
   if not RunRequiredHostCommand(
-    'Checking for an interrupted display session',
-    'session recover') then
+    'Safely recovering legacy display state',
+    'session recover-upgrade') then
+    exit;
+
+  if not RunRequiredHostCommand(
+    'Securing machine recovery state',
+    'state secure') then
     exit;
 
   if WizardIsTaskSelected('gamepaddriver') then
@@ -296,20 +316,211 @@ procedure CurPageChanged(CurPageID: Integer);
 begin
   if (CurPageID = wpFinished) and DriverNeedsAttention then
   begin
-    MsgBox(
+    SuppressibleMsgBox(
       'Windows has not finished enumerating the Vita virtual display. ' +
       'Setup preserved your physical display and skipped Sunshine display configuration.' + #13#10 + #13#10 +
       'Restart Windows. Then open Vita Moonlight Host as Administrator, click ' +
       '"Install/update display driver", and click "Apply recommended setup".',
       mbInformation,
-    MB_OK);
+      MB_OK,
+      IDOK);
+  end;
+end;
+
+function HasUninstallSwitch(const Name: String): Boolean;
+var
+  I: Integer;
+  Value: String;
+begin
+  Result := False;
+  for I := 1 to ParamCount do
+  begin
+    Value := ParamStr(I);
+    if (CompareText(Value, '/' + Name) = 0) or
+       (CompareText(Value, '-' + Name) = 0) then
+    begin
+      Result := True;
+      exit;
+    end;
+  end;
+end;
+
+function IsSilentUninstall: Boolean;
+begin
+  Result :=
+    HasUninstallSwitch('SILENT') or
+    HasUninstallSwitch('VERYSILENT');
+end;
+
+procedure ReportUninstallError(const MessageText: String);
+begin
+  Log('ERROR: ' + MessageText);
+  if not IsSilentUninstall then
+  begin
+    SuppressibleMsgBox(
+      MessageText,
+      mbError,
+      MB_OK,
+      IDOK);
+  end;
+end;
+
+function InitializeUninstall: Boolean;
+var
+  OptionsForm: TSetupForm;
+  HeadingLabel: TNewStaticText;
+  ExplanationLabel: TNewStaticText;
+  SafetyLabel: TNewStaticText;
+  RemoveVirtualDisplayCheck: TNewCheckBox;
+  RemoveSunshineCheck: TNewCheckBox;
+  RemoveViGEmBusCheck: TNewCheckBox;
+  PreserveDiagnosticsCheck: TNewCheckBox;
+  ContinueButton: TNewButton;
+  CancelButton: TNewButton;
+begin
+  RemoveVirtualDisplayOnUninstall := HasUninstallSwitch('REMOVEVDD');
+  RemoveSunshineOnUninstall := HasUninstallSwitch('REMOVESUNSHINE');
+  RemoveViGEmBusOnUninstall := HasUninstallSwitch('REMOVEVIGEMBUS');
+  PreserveDiagnosticsOnUninstall := HasUninstallSwitch('KEEPDIAGNOSTICS');
+  Result := True;
+
+  { Silent automation removes only this product unless a dependency switch was
+    explicitly supplied. Shared software is never removed merely because the
+    uninstaller is noninteractive. }
+  if IsSilentUninstall then
+    exit;
+
+  OptionsForm := CreateCustomForm(ScaleX(590), ScaleY(390), False, True);
+  try
+    OptionsForm.Caption := 'Uninstall Vita Moonlight Host';
+
+    HeadingLabel := TNewStaticText.Create(OptionsForm);
+    HeadingLabel.Parent := OptionsForm;
+    HeadingLabel.Left := ScaleX(24);
+    HeadingLabel.Top := ScaleY(20);
+    HeadingLabel.Width := ScaleX(542);
+    HeadingLabel.Height := ScaleY(28);
+    HeadingLabel.AutoSize := False;
+    HeadingLabel.Font.Style := [fsBold];
+    HeadingLabel.Font.Size := 12;
+    HeadingLabel.Caption := 'Choose what Vita Moonlight Host should remove';
+
+    ExplanationLabel := TNewStaticText.Create(OptionsForm);
+    ExplanationLabel.Parent := OptionsForm;
+    ExplanationLabel.Left := ScaleX(24);
+    ExplanationLabel.Top := ScaleY(55);
+    ExplanationLabel.Width := ScaleX(542);
+    ExplanationLabel.Height := ScaleY(55);
+    ExplanationLabel.AutoSize := False;
+    ExplanationLabel.WordWrap := True;
+    ExplanationLabel.Caption :=
+      'Sunshine, ViGEmBus, and the virtual display driver can be shared with ' +
+      'other streaming or controller software. They are kept by default. ' +
+      'Select a dependency only when you want it removed from this PC.';
+
+    RemoveVirtualDisplayCheck := TNewCheckBox.Create(OptionsForm);
+    RemoveVirtualDisplayCheck.Parent := OptionsForm;
+    RemoveVirtualDisplayCheck.Left := ScaleX(36);
+    RemoveVirtualDisplayCheck.Top := ScaleY(123);
+    RemoveVirtualDisplayCheck.Width := ScaleX(520);
+    RemoveVirtualDisplayCheck.Height := ScaleY(28);
+    RemoveVirtualDisplayCheck.Caption :=
+      'Remove the MTT virtual display driver and its managed display configuration';
+    RemoveVirtualDisplayCheck.Checked := RemoveVirtualDisplayOnUninstall;
+
+    RemoveSunshineCheck := TNewCheckBox.Create(OptionsForm);
+    RemoveSunshineCheck.Parent := OptionsForm;
+    RemoveSunshineCheck.Left := ScaleX(36);
+    RemoveSunshineCheck.Top := ScaleY(166);
+    RemoveSunshineCheck.Width := ScaleX(520);
+    RemoveSunshineCheck.Height := ScaleY(28);
+    RemoveSunshineCheck.Caption := 'Remove Sunshine';
+    RemoveSunshineCheck.Checked := RemoveSunshineOnUninstall;
+
+    RemoveViGEmBusCheck := TNewCheckBox.Create(OptionsForm);
+    RemoveViGEmBusCheck.Parent := OptionsForm;
+    RemoveViGEmBusCheck.Left := ScaleX(36);
+    RemoveViGEmBusCheck.Top := ScaleY(201);
+    RemoveViGEmBusCheck.Width := ScaleX(520);
+    RemoveViGEmBusCheck.Height := ScaleY(28);
+    RemoveViGEmBusCheck.Caption := 'Remove ViGEmBus controller emulation';
+    RemoveViGEmBusCheck.Checked := RemoveViGEmBusOnUninstall;
+
+    PreserveDiagnosticsCheck := TNewCheckBox.Create(OptionsForm);
+    PreserveDiagnosticsCheck.Parent := OptionsForm;
+    PreserveDiagnosticsCheck.Left := ScaleX(36);
+    PreserveDiagnosticsCheck.Top := ScaleY(246);
+    PreserveDiagnosticsCheck.Width := ScaleX(520);
+    PreserveDiagnosticsCheck.Height := ScaleY(28);
+    PreserveDiagnosticsCheck.Caption :=
+      'Keep the stream-rescue log for troubleshooting (all settings are still removed)';
+    PreserveDiagnosticsCheck.Checked := PreserveDiagnosticsOnUninstall;
+
+    SafetyLabel := TNewStaticText.Create(OptionsForm);
+    SafetyLabel.Parent := OptionsForm;
+    SafetyLabel.Left := ScaleX(24);
+    SafetyLabel.Top := ScaleY(292);
+    SafetyLabel.Width := ScaleX(542);
+    SafetyLabel.Height := ScaleY(43);
+    SafetyLabel.AutoSize := False;
+    SafetyLabel.WordWrap := True;
+    SafetyLabel.Font.Color := clGray;
+    SafetyLabel.Caption :=
+      'Before anything is deleted, uninstall restores and verifies a physical-only ' +
+      'display layout. If that check fails, the host and both recovery safeguards remain installed.';
+
+    ContinueButton := TNewButton.Create(OptionsForm);
+    ContinueButton.Parent := OptionsForm;
+    ContinueButton.Left := ScaleX(370);
+    ContinueButton.Top := ScaleY(348);
+    ContinueButton.Width := ScaleX(95);
+    ContinueButton.Height := ScaleY(28);
+    ContinueButton.Caption := 'Uninstall';
+    ContinueButton.Default := True;
+    ContinueButton.ModalResult := mrOk;
+
+    CancelButton := TNewButton.Create(OptionsForm);
+    CancelButton.Parent := OptionsForm;
+    CancelButton.Left := ScaleX(471);
+    CancelButton.Top := ScaleY(348);
+    CancelButton.Width := ScaleX(95);
+    CancelButton.Height := ScaleY(28);
+    CancelButton.Caption := 'Cancel';
+    CancelButton.Cancel := True;
+    CancelButton.ModalResult := mrCancel;
+
+    Result := OptionsForm.ShowModal = mrOk;
+    if Result then
+    begin
+      RemoveVirtualDisplayOnUninstall := RemoveVirtualDisplayCheck.Checked;
+      RemoveSunshineOnUninstall := RemoveSunshineCheck.Checked;
+      RemoveViGEmBusOnUninstall := RemoveViGEmBusCheck.Checked;
+      PreserveDiagnosticsOnUninstall := PreserveDiagnosticsCheck.Checked;
+    end;
+  finally
+    OptionsForm.Free;
+  end;
+end;
+
+function ReadLastHostCommandError: String;
+var
+  ErrorDetails: AnsiString;
+begin
+  Result := '';
+  if LoadStringFromFile(
+    ExpandConstant('{app}\state\last-command-error.txt'),
+    ErrorDetails) then
+  begin
+    Result := Trim(ErrorDetails);
   end;
 end;
 
 function RunCheckedUninstallHostCommand(
   const Description: String;
-  const Parameters: String): Boolean;
+  const Parameters: String;
+  const AllowRestartRequired: Boolean): Boolean;
 var
+  ErrorText: String;
   ResultCode: Integer;
 begin
   UninstallProgressForm.StatusLabel.Caption := Description;
@@ -322,48 +533,138 @@ begin
     ewWaitUntilTerminated,
     ResultCode) then
   begin
-    SuppressibleMsgBox(
+    ReportUninstallError(
       Description + ' could not be started.' + #13#10 + #13#10 +
-      'Uninstall stopped before deleting the host or its recovery safeguards.',
-      mbError,
-      MB_OK,
-      IDOK);
+      'Uninstall stopped before deleting the host or its recovery safeguards.');
+    Result := False;
+    exit;
+  end;
+
+  if AllowRestartRequired and (ResultCode = 4) then
+  begin
+    RestartRequiredByUninstall := True;
+    ReportUninstallError(
+      Description + ' requires a Windows restart.' + #13#10 + #13#10 +
+      'Restart Windows, then run uninstall again. Vita Moonlight Host and its ' +
+      'recovery safeguards were kept so post-restart cleanup can be verified.');
     Result := False;
     exit;
   end;
 
   if ResultCode <> 0 then
   begin
-    SuppressibleMsgBox(
-      Description + ' failed with exit code ' + IntToStr(ResultCode) + '.' + #13#10 + #13#10 +
+    ErrorText := ReadLastHostCommandError;
+    if ErrorText <> '' then
+      ErrorText := #13#10 + #13#10 + ErrorText;
+    ReportUninstallError(
+      Description + ' failed with exit code ' + IntToStr(ResultCode) + '.' +
+      ErrorText + #13#10 + #13#10 +
       'Uninstall stopped before deleting the host or its remaining recovery safeguards. ' +
-      'Open Vita Moonlight Host as Administrator, recover the physical display, and try again.',
-      mbError,
-      MB_OK,
-      IDOK);
+      'Open Vita Moonlight Host as Administrator, recover the physical display, and try again.');
     Result := False;
     exit;
   end;
   Result := True;
 end;
 
+procedure PreserveRescueLog;
+var
+  SourcePath: String;
+begin
+  PreservedRescueLogPath := '';
+  if not PreserveDiagnosticsOnUninstall then
+    exit;
+  SourcePath := ExpandConstant(
+    '{app}\state\Diagnostics\stream-rescue.log');
+  if not FileExists(SourcePath) then
+    exit;
+  PreservedRescueLogPath := ExpandConstant(
+    '{commonappdata}\VitaMoonlight-stream-rescue-' +
+    GetDateTimeString('yyyymmdd-hhnnss', '-', ':') + '.log');
+  { The source tree is administrator-owned beneath Program Files. Rename the
+    entry directly to ProgramData without opening or copying its contents. }
+  if not RenameFile(SourcePath, PreservedRescueLogPath) then
+  begin
+    ReportUninstallError(
+      'Windows could not preserve the requested stream-rescue log at:' +
+      '' + #13#10 + PreservedRescueLogPath);
+    PreservedRescueLogPath := '';
+  end;
+end;
+
+procedure RemoveHostState;
+var
+  StateDirectory: String;
+begin
+  StateDirectory := ExpandConstant('{app}\state');
+  if not DelTree(StateDirectory, True, True, True) then
+  begin
+    ReportUninstallError(
+      'Vita Moonlight Host was removed, but Windows could not delete all files under:' + #13#10 +
+      StateDirectory + #13#10 + #13#10 +
+      'No recovery task or background agent remains. You may delete that folder after restarting Windows.');
+  end;
+end;
+
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
-  if CurUninstallStep <> usUninstall then
-    exit;
+  if CurUninstallStep = usUninstall then
+  begin
+    { No product or safeguard is removed until Windows confirms that at least
+      one physical monitor is active and the managed VDD is inactive. }
+    if not RunCheckedUninstallHostCommand(
+      'Restoring and verifying the physical display',
+      'uninstall prepare',
+      False) then
+      Abort;
 
-  { Recovery must succeed while both the host executable and rescue tasks are
-    still present. Never remove the last recovery path from a dark desktop. }
-  if not RunCheckedUninstallHostCommand(
-    'Recovering the physical display before uninstall',
-    'session recover') then
-    Abort;
-  if not RunCheckedUninstallHostCommand(
-    'Removing the in-stream rescue agent',
-    'agent uninstall') then
-    Abort;
-  if not RunCheckedUninstallHostCommand(
-    'Removing the automatic display-recovery safeguard',
-    'recovery uninstall') then
-    Abort;
+    if not RunCheckedUninstallHostCommand(
+      'Restoring Vita-owned Sunshine configuration',
+      'uninstall cleanup-integration',
+      False) then
+      Abort;
+
+    if RemoveVirtualDisplayOnUninstall and
+       not RunCheckedUninstallHostCommand(
+         'Removing the shared virtual display driver',
+         'driver uninstall',
+         True) then
+      Abort;
+
+    if RemoveSunshineOnUninstall and
+       not RunCheckedUninstallHostCommand(
+         'Removing shared Sunshine installation',
+         'dependency uninstall sunshine',
+         True) then
+      Abort;
+
+    if RemoveViGEmBusOnUninstall and
+       not RunCheckedUninstallHostCommand(
+         'Removing shared ViGEmBus installation',
+         'dependency uninstall vigembus',
+         True) then
+      Abort;
+
+    if not RunCheckedUninstallHostCommand(
+      'Removing the in-stream rescue agent',
+      'agent uninstall',
+      False) then
+      Abort;
+    if not RunCheckedUninstallHostCommand(
+      'Removing the automatic display-recovery safeguard',
+      'recovery uninstall',
+      False) then
+      Abort;
+
+    PreserveRescueLog;
+  end
+  else if CurUninstallStep = usPostUninstall then
+  begin
+    RemoveHostState;
+  end;
+end;
+
+function UninstallNeedRestart: Boolean;
+begin
+  Result := RestartRequiredByUninstall;
 end;

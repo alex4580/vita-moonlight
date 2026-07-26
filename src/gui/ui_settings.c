@@ -2,6 +2,7 @@
 
 #include "guilib.h"
 #include "ime.h"
+#include "ui_controller_mapper.h"
 #include "ui_diagnostics.h"
 #include "ui_keyboard.h"
 
@@ -26,59 +27,6 @@
 #include <vita2d.h>
 #include <Limelight.h>
 #include "debug.h"
-extern char* strdup(const char*);
-
-static unsigned int settings_special_codes[] = {0,
-  // special
-  INPUT_TYPE_DEF_NAME | INPUT_TYPE_SPECIAL,
-  INPUT_SPECIAL_KEY_PAUSE | INPUT_TYPE_SPECIAL,
-  INPUT_SPECIAL_KEY_KEYBOARD | INPUT_TYPE_SPECIAL,
-  // gamepad
-  INPUT_TYPE_DEF_NAME | INPUT_TYPE_GAMEPAD,
-  SPECIAL_FLAG | INPUT_TYPE_GAMEPAD,
-  LB_FLAG | INPUT_TYPE_GAMEPAD,
-  RB_FLAG | INPUT_TYPE_GAMEPAD,
-  LS_CLK_FLAG | INPUT_TYPE_GAMEPAD,
-  RS_CLK_FLAG | INPUT_TYPE_GAMEPAD,
-  LEFT_TRIGGER | INPUT_TYPE_ANALOG,
-  RIGHT_TRIGGER | INPUT_TYPE_ANALOG,
-  // mouse
-  INPUT_TYPE_DEF_NAME | INPUT_TYPE_MOUSE,
-  BUTTON_LEFT | INPUT_TYPE_MOUSE,
-  BUTTON_RIGHT | INPUT_TYPE_MOUSE,
-  BUTTON_MIDDLE | INPUT_TYPE_MOUSE,
-  BUTTON_X1 | INPUT_TYPE_MOUSE,
-  BUTTON_X2 | INPUT_TYPE_MOUSE,
-  // keyboard
-  INPUT_TYPE_DEF_NAME | INPUT_TYPE_KEYBOARD,
-  27,    73,  77,  9,
-  112,  113,  114,  115,  116,  117,  118,  119, 120,   121,   122,   123
-};
-
-// settings_special_names debe ser visible globalmente para sizeof
-char *settings_special_names[] = {
-  "None",
-  // special
-  "Special inputs",
-  "Pause stream",
-  "Open keyboard",
-  // gamepad
-  "Gamepad buttons",
-  "Special (XBox button)",
-  "LB", "RB", "LS", "RS", "LT", "RT",
-  // mouse
-  "Mouse buttons",
-  "Left",
-  "Right",
-  "Middle(wheel)",
-  "X1(4th)",
-  "X2(5th)",
-  // keyboard
-  "Keyboard input codes",
-  "Esc",
-  "I", "M", "Tab",
-  "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12"
-};
 
 #define MAX_RESOLUTION 3
 static int RESOLUTIONS[MAX_RESOLUTION][2] = {
@@ -180,219 +128,6 @@ static int deadzone_settings_menu() {
   return display_menu(menu, idx, &geom, &deadzone_loop, NULL, &deadzone_draw, &menu);
 }
 
-/*
- * Special keys
- */
-
-static int special_keys_ord(char *text) {
-  bool did_find = false;
-  int i = 0;
-  for (; i < sizeof(settings_special_codes) / sizeof(int); i++) {
-    if (strcmp(settings_special_names[i], text) == 0) {
-      did_find = true;
-      break;
-    }
-  }
-
-  if (did_find) {
-    return settings_special_codes[i];
-  } else {
-    return 0;
-  }
-}
-
-static void special_keys_name(int ord, char *text) {
-  if (ord == 0) {
-    strcpy(text, "None");
-    return;
-  }
-
-  bool did_find = false;
-  int i = 0;
-  for (; i < sizeof(settings_special_codes) / sizeof(int); i++) {
-    if (settings_special_codes[i] == ord) {
-      did_find = true;
-      break;
-    }
-  }
-
-  if (did_find) {
-    strcpy(text, settings_special_names[i]);
-  } else {
-    sprintf(text, "%d", ord);
-  }
-}
-
-enum {
-  SETTINGS_SELECT_SPECIAL_KEY_MANUAL = -1000
-};
-
-enum {
-  SETTINGS_SPECIAL_KEYS_OFFSET,
-  SETTINGS_SPECIAL_KEYS_SIZE
-};
-
-enum {
-  SETTINGS_SPECIAL_KEYS_NW_VIEW = 3
-};
-
-static void clamp_special_keys_geometry(void) {
-  config_sanitize(&config);
-}
-
-static int select_special_key_loop(int id, void *context, const input_data *input) {
-  int *code = context;
-
-  if ((input->buttons & config.btn_confirm) == 0 || input->buttons & SCE_CTRL_HOLD) {
-    return 0;
-  }
-  if (id != SETTINGS_SELECT_SPECIAL_KEY_MANUAL) {
-    *code = id;
-    return 1;
-  }
-  char key_code_value[512];
-  if (ime_dialog_number(key_code_value, "Enter key code:", "") == 0) {
-      int key_code = atoi(key_code_value);
-      if (key_code) {
-        *code = key_code;
-        return 1;
-      } else {
-        display_error("Incorrect key code entered: %s", key_code_value);
-      }
-  }
-
-  return 0;
-}
-
-static int select_special_key_menu(int *code) {
-  // TODO: sizeof(codes) / sizeof(int) ?
-  menu_entry menu[64];
-  int idx = 0;
-  for (int i = 0; i < sizeof(settings_special_codes) / sizeof(int); i++) {
-    unsigned int id = settings_special_codes[i];
-    menu[idx++] = (menu_entry) {
-      .id = id,
-      .name = malloc(sizeof(char) * 256),
-      .disabled = (id >= INPUT_TYPE_DEF_NAME)
-    };
-    special_keys_name(id, menu[idx-1].name);
-  }
-
-  menu[idx++] = (menu_entry) { .name = "", .disabled = true, .separator = true };
-  menu[idx++] = (menu_entry) { .name = "Enter manually ...", .id = SETTINGS_SELECT_SPECIAL_KEY_MANUAL };
-
-  int return_code = display_menu(menu, idx, NULL, &select_special_key_loop, NULL, NULL, code);
-  for (int i = 0; i < sizeof(settings_special_codes) / sizeof(int); i++) {
-    free(menu[i].name);
-  }
-
-  return return_code;
-}
-
-static int special_keys_loop(int id, void *context, const input_data *input) {
-  bool left = input->buttons & SCE_CTRL_LEFT;
-  bool right = input->buttons & SCE_CTRL_RIGHT;
-  int selected_ord = -1;
-  int delta = left ? -15 : (right ? 15 : 0);
-
-  switch (id) {
-    case SETTINGS_SPECIAL_KEYS_OFFSET:
-      config.special_keys.offset += delta;
-      break;
-    case SETTINGS_SPECIAL_KEYS_SIZE:
-      config.special_keys.size += delta;
-      break;
-    default:
-      if ((input->buttons & config.btn_confirm) == 0 || input->buttons & SCE_CTRL_HOLD) {
-        break;
-      }
-      select_special_key_menu(&selected_ord);
-      if (selected_ord != -1) {
-        switch (id) {
-          case TOUCHSEC_SPECIAL_NW:
-            config.special_keys.nw = selected_ord;
-            break;
-          case TOUCHSEC_SPECIAL_NE:
-            config.special_keys.ne = selected_ord;
-            break;
-          case TOUCHSEC_SPECIAL_SW:
-            config.special_keys.sw = selected_ord;
-            break;
-          case TOUCHSEC_SPECIAL_SE:
-            config.special_keys.se = selected_ord;
-            break;
-        }
-      }
-      break;
-  }
-  clamp_special_keys_geometry();
-
-  menu_entry *menu = context;
-
-  int idx = 0;
-  sprintf(menu[idx++].subname, "%d", config.special_keys.offset);
-  sprintf(menu[idx++].subname, "%d", config.special_keys.size);
-
-  idx++;
-  special_keys_name(config.special_keys.nw, menu[idx++].subname);
-  special_keys_name(config.special_keys.ne, menu[idx++].subname);
-  special_keys_name(config.special_keys.sw, menu[idx++].subname);
-  special_keys_name(config.special_keys.se, menu[idx++].subname);
-
-  return 0;
-}
-
-static void special_keys_draw() {
-  clamp_special_keys_geometry();
-  int special_offset = config.special_keys.offset,
-      special_size = config.special_keys.size;
-
-  unsigned int color = 0xff006000;
-
-  vita2d_draw_rectangle(
-      special_offset,
-      special_offset,
-      special_size,
-      special_size,
-      color);
-  vita2d_draw_rectangle(
-      WIDTH - special_size - special_offset,
-      special_offset,
-      special_size,
-      special_size,
-      color);
-  vita2d_draw_rectangle(
-      special_offset,
-      HEIGHT - special_size - special_offset,
-      special_size,
-      special_size,
-      color);
-  vita2d_draw_rectangle(
-      WIDTH - special_size - special_offset,
-      HEIGHT - special_size - special_offset,
-      special_size,
-      special_size,
-      color);
-}
-
-static int special_keys_menu() {
-  clamp_special_keys_geometry();
-  menu_entry menu[16];
-  int idx = 0;
-
-  menu[idx++] = (menu_entry) { .name = "Offset", .id = SETTINGS_SPECIAL_KEYS_OFFSET };
-  menu[idx++] = (menu_entry) { .name = "Size", .id = SETTINGS_SPECIAL_KEYS_SIZE };
-  menu[idx++] = (menu_entry) { .name = "Assignments", .disabled = true, .separator = false };
-  menu[idx++] = (menu_entry) { .name = "Top left", .id = TOUCHSEC_SPECIAL_NW };
-  menu[idx++] = (menu_entry) { .name = "Top right", .id = TOUCHSEC_SPECIAL_NE };
-  menu[idx++] = (menu_entry) { .name = "Bottom left", .id = TOUCHSEC_SPECIAL_SW };
-  menu[idx++] = (menu_entry) { .name = "Bottom right", .id = TOUCHSEC_SPECIAL_SE };
-
-  return display_menu(menu, idx, NULL, &special_keys_loop, NULL, &special_keys_draw, &menu);
-}
-
-
-
 static const char* touch_mode_names[] = {"Relative mouse", "DS4 Touchpad", "Mouse Absolute", "Tablet (Sunshine)"};
 static const char* psbutton_mode_names[] = {
   "Local double-tap",
@@ -405,6 +140,19 @@ static const char* network_mode_names[] = {
   "Remote / VPN",
   "Auto detect"
 };
+
+static void mapping_location_text(char *output, size_t output_size) {
+  size_t key_dir_length = strlen(config.key_dir);
+  snprintf(
+      output, output_size, "File: %s%s%s",
+      config.key_dir,
+      key_dir_length > 0 && config.key_dir[key_dir_length - 1] != '/'
+          ? "/"
+          : "",
+      config.mapping && config.mapping[0] != '\0'
+          ? config.mapping
+          : "mappings/vita.conf");
+}
 
 /*
  * Main menu
@@ -437,6 +185,7 @@ enum {
   SETTINGS_ENABLE_FRAME_PACER,
   SETTINGS_CENTER_REGION_ONLY,
   SETTINGS_ENABLE_MAPPING,
+  SETTINGS_CONTROLLER_MAPPER,
   SETTINGS_BACK_DEADZONE,
   SETTINGS_SPECIAL_KEYS,
   SETTINGS_ENABLE_SPECIAL_KEYS,
@@ -471,6 +220,7 @@ enum {
   SETTINGS_VIEW_ENABLE_FRAME_PACER,
   SETTINGS_VIEW_CENTER_REGION_ONLY,
   SETTINGS_VIEW_ENABLE_MAPPING,
+  SETTINGS_VIEW_MAPPING_LOCATION,
   SETTINGS_VIEW_BACK_DEADZONE,
   SETTINGS_VIEW_SPECIAL_KEYS,
   SETTINGS_VIEW_ENABLE_SPECIAL_KEYS,
@@ -608,8 +358,7 @@ static int settings_loop(int id, void *context, const input_data *input) {
       // Exclusividad: desactivar mapping si swap está activo
       if (swap_shoulder_buttons) {
         if (config.mapping) {
-          free(config.mapping);
-          config.mapping = NULL;
+          ui_controller_mapping_set_enabled(false);
           strcpy(menu[SETTINGS_VIEW_IDX[SETTINGS_VIEW_ENABLE_MAPPING]].subname, "no");
         }
       }
@@ -619,19 +368,19 @@ static int settings_loop(int id, void *context, const input_data *input) {
       if ((input->buttons & config.btn_confirm) == 0 || input->buttons & SCE_CTRL_HOLD) {
         break;
       }
-      did_change = 1;
-      if (config.mapping) {
-        free(config.mapping);
-        config.mapping = NULL;
-        strcpy(menu[SETTINGS_VIEW_IDX[SETTINGS_VIEW_ENABLE_MAPPING]].subname, "no");
-      } else {
-        config.mapping = strdup("mappings/vita.conf");
-        strcpy(menu[SETTINGS_VIEW_IDX[SETTINGS_VIEW_ENABLE_MAPPING]].subname, "yes");
-        // Si se activa mapping, desactivar swap
-        swap_shoulder_buttons = 0;
-        config.swap_shoulder_buttons = 0;
-        strcpy(menu[SETTINGS_VIEW_IDX[SETTINGS_VIEW_SWAP_SHOULDER_BUTTONS]].subname, "no");
+      bool enable_mapping = config.mapping == NULL;
+      if (!ui_controller_mapping_set_enabled(enable_mapping)) {
+        display_error(
+            "Could not create or load the custom controller map.");
+        break;
       }
+      did_change = 1;
+      strcpy(
+          menu[SETTINGS_VIEW_IDX[SETTINGS_VIEW_ENABLE_MAPPING]].subname,
+          enable_mapping ? "yes" : "no");
+      strcpy(
+          menu[SETTINGS_VIEW_IDX[SETTINGS_VIEW_SWAP_SHOULDER_BUTTONS]].subname,
+          config.swap_shoulder_buttons ? "yes" : "no");
       break;
     }
     // Eliminados SETTINGS_ABSOLUTE_MOUSE y SETTINGS_TOUCHSCREEN_MODE: ahora todo es por touchscreen_mode
@@ -916,11 +665,22 @@ static int settings_loop(int id, void *context, const input_data *input) {
       deadzone_settings_menu();
       did_change = 1;
       break;
+    case SETTINGS_CONTROLLER_MAPPER:
+      if ((input->buttons & config.btn_confirm) == 0 ||
+          input->buttons & SCE_CTRL_HOLD) {
+        break;
+      }
+      if (ui_controller_mapper_menu()) {
+        did_change = 1;
+      }
+      break;
     case SETTINGS_SPECIAL_KEYS:
       if ((input->buttons & config.btn_confirm) == 0 || input->buttons & SCE_CTRL_HOLD) {
         break;
       }
-      special_keys_menu();
+      if (ui_front_touch_mapper_menu()) {
+        did_change = 1;
+      }
       break;
     case SETTINGS_ENABLE_SPECIAL_KEYS:
       if ((input->buttons & config.btn_confirm) == 0 || input->buttons & SCE_CTRL_HOLD) {
@@ -928,6 +688,7 @@ static int settings_loop(int id, void *context, const input_data *input) {
       }
 
       config.enable_front_touchzones = !config.enable_front_touchzones;
+      vitainput_refresh_touchzones();
       did_change = 1;
       break;
     case SETTINGS_PSBUTTON_MODE:
@@ -1048,6 +809,14 @@ static int settings_loop(int id, void *context, const input_data *input) {
   sprintf(current, "%s", config.mapping != 0 ? "yes" : "no");
   MENU_REPLACE(SETTINGS_VIEW_ENABLE_MAPPING, current);
 
+  mapping_location_text(current, sizeof(current));
+  MENU_REPLACE(SETTINGS_VIEW_MAPPING_LOCATION, current);
+
+  sprintf(
+      current, "%s",
+      config.swap_shoulder_buttons ? "yes" : "no");
+  MENU_REPLACE(SETTINGS_VIEW_SWAP_SHOULDER_BUTTONS, current);
+
   sprintf(current, "T:%d L:%d B:%d R:%d",
           config.back_deadzone.top,
           config.back_deadzone.left,
@@ -1130,18 +899,23 @@ int ui_settings_menu() {
   MENU_ENTRY(SETTINGS_CONTROLLER_TYPE, SETTINGS_VIEW_CONTROLLER_TYPE, "Controller preset", ICON_LEFT_RIGHT_ARROWS);
   MENU_ENTRY(SETTINGS_SWAP_SHOULDER_BUTTONS, SETTINGS_VIEW_SWAP_SHOULDER_BUTTONS, "Swap L1/R1 with L2/R2", "");
   MENU_ENTRY(SETTINGS_MOUSE_ACCEL, SETTINGS_VIEW_MOUSE_ACCEL, "Mouse acceleration", ICON_LEFT_RIGHT_ARROWS);
-  MENU_ENTRY(SETTINGS_ENABLE_MAPPING, SETTINGS_VIEW_ENABLE_MAPPING, "Enable mapping file", "");
+  MENU_ENTRY(SETTINGS_ENABLE_MAPPING, SETTINGS_VIEW_ENABLE_MAPPING, "Custom mapping", "");
+  menu[idx++] = (menu_entry) {
+    .name = "Graphical button mapper",
+    .id = SETTINGS_CONTROLLER_MAPPER
+  };
   char mapping_location_msg[256];
-  snprintf(mapping_location_msg, sizeof(mapping_location_msg), "Located at %svita.conf", config.key_dir);
+  mapping_location_text(
+      mapping_location_msg, sizeof(mapping_location_msg));
+  SETTINGS_VIEW_IDX[SETTINGS_VIEW_MAPPING_LOCATION] = idx;
   menu[idx] = (menu_entry) { .name = "", .disabled = true };
   strncpy(menu[idx].subname, mapping_location_msg, sizeof(menu[idx].subname) - 1);
   menu[idx].subname[sizeof(menu[idx].subname) - 1] = '\0';
   idx++;
-  MENU_MESSAGE("Example in github repo.");
   MENU_ENTRY(SETTINGS_PSBUTTON_MODE, SETTINGS_VIEW_PSBUTTON_MODE, "PS button behavior", ICON_LEFT_RIGHT_ARROWS);
   MENU_ENTRY(SETTINGS_BACK_DEADZONE, SETTINGS_VIEW_BACK_DEADZONE, "Back touchscreen deadzone", "");
-  MENU_ENTRY(SETTINGS_ENABLE_SPECIAL_KEYS, SETTINGS_VIEW_ENABLE_SPECIAL_KEYS, "Enable touchscreen special keys", "");
-  MENU_ENTRY(SETTINGS_SPECIAL_KEYS, SETTINGS_VIEW_SPECIAL_KEYS, "Touchscreen special keys", "");
+  MENU_ENTRY(SETTINGS_ENABLE_SPECIAL_KEYS, SETTINGS_VIEW_ENABLE_SPECIAL_KEYS, "Front-touch zones", "");
+  MENU_ENTRY(SETTINGS_SPECIAL_KEYS, SETTINGS_VIEW_SPECIAL_KEYS, "Front-touch zone mapper", "");
   // MENU_ENTRY(SETTINGS_HOTKEYS, SETTINGS_VIEW_HOTKEYS, "Configure hotkeys", ""); // Eliminado: hotkeys fijos
   // NUEVO: Opción para usar la pantalla táctil como touchpad DS4
   MENU_ENTRY(SETTINGS_TOUCH_MODE_SELECT, SETTINGS_VIEW_TOUCH_MODE_SELECT, "Touchscreen mode", "");

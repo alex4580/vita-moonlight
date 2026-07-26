@@ -33,17 +33,26 @@ commit.
    Windows rejects the mode, setup must restore the original topology, show
    the final Windows response as an error, and must not request another reboot
    merely because the mode check failed.
-6. Treat the same machine as an upgrade, not a clean install. Add an unrelated
-   resolution and retain non-default driver options, then rerun the installer.
-   The pinned package must be staged before Vita modes are normalized, the
-   unrelated settings must survive, and the effective mode list must contain
-   only one 960x544/60 entry even when 60 Hz is global. Verification must use a
-   non-persistent live mode change; it must not require
+6. Treat the same machine as an upgrade, not a clean install. Before the first
+   upgrade from a build that did not record a directory identity, add a marker
+   file beneath `C:\VirtualDisplayDriver`. Rerun the installer. Setup must
+   detach that directory without reading or following it, print the randomized
+   quarantine path because it is non-empty, atomically create a protected fixed
+   directory, and continue with a fresh packaged configuration. Restart and
+   retry must be the actionable result if another process prevents the safe
+   rename. Do not copy the marker or any legacy configuration into the new
+   directory.
+7. After the identity-aware setup succeeds, add an unrelated resolution and
+   retain non-default driver options in the now-trusted configuration, then
+   rerun the installer. The pinned package must be staged before Vita modes are
+   normalized, the unrelated settings must survive, and the effective mode
+   list must contain only one 960x544/60 entry even when 60 Hz is global.
+   Verification must use a non-persistent live mode change; it must not require
    `CDS_UPDATEREGISTRY` for the temporary extended topology.
    The existing target may disappear briefly while its device stack restarts;
    setup must wait up to 30 seconds for it to re-enumerate, without changing
    the active physical topology, then continue automatically.
-7. Click **Run health check**. Sunshine, its supported version, ViGEmBus,
+8. Click **Run health check**. Sunshine, its supported version, ViGEmBus,
    Sunshine gamepad, Microsoft Visual C++ runtime, driver bundle, virtual
    display, recovery task, and
    **Stream rescue** must report ready. **Vita display modes** must say the
@@ -241,26 +250,46 @@ it a display-driver crash based on a black game frame alone.
 ## 7. Recovery, uninstall, and artifacts
 
 1. End the stream and verify no display transaction is pending.
-2. Uninstall Vita Moonlight Host. The recovery and stream-rescue tasks must be
-   removed, their background process must stop, and the physical display layout
-   must remain intact.
-3. In a disposable VM, make `session recover` return a nonzero result before
+2. Uninstall Vita Moonlight Host with every shared-dependency checkbox
+   **cleared**. The recovery and stream-rescue tasks must be removed, their
+   background process must stop, exact Vita-managed Sunshine hooks must be
+   gone, unchanged managed settings must be restored to their recorded
+   originals, later user-edited values must remain, the installed `state`
+   directory must be gone,
+   and the physical display layout must remain intact. Sunshine, ViGEmBus, and
+   VDD must remain installed; VDD must be inactive.
+3. Reinstall, enable **Keep the stream-rescue log**, and uninstall again.
+   Settings and recovery records must be removed while only one timestamped
+   `%ProgramData%\VitaMoonlight-stream-rescue-*.log` remains.
+4. In a disposable VM, make `uninstall prepare` return a nonzero result before
    uninstalling. Uninstall must stop before deleting the companion, rescue
-   agent, or recovery task. Restore the test condition, recover the display,
-   and confirm uninstall then completes normally.
-4. Verify the release contains the VPK, Windows installer, portable host ZIP,
+   agent, recovery task, or any requested shared dependency. Restore the test
+   condition, recover the display, and confirm uninstall then completes.
+5. On the disposable VM, reinstall and select VDD, Sunshine, and ViGEmBus on
+   the uninstall options page. Confirm the physical display is active before
+   each dependency is removed. A requested reboot must stop uninstall while
+   the host and safeguards remain; reboot, run uninstall again, and then
+   confirm all three products are absent.
+6. Run the default silent uninstall with `/VERYSILENT /NORESTART`. It must not
+   show a dependency prompt and must keep all three shared dependencies.
+   Repeat with the explicit `/REMOVEVDD`, `/REMOVESUNSHINE`, and
+   `/REMOVEVIGEMBUS` switches only in the disposable VM.
+7. Verify the release contains the VPK, Windows installer, portable host ZIP,
    source archive, licenses, `COMPATIBILITY.md`, `VITA_SETTINGS_GUIDE.md`, and
    `THIRD_PARTY_NOTICES.md`.
-5. Repeat sections 1 through 4 on a second clean PC using the portable ZIP and
-   only release artifacts. **Apply recommended setup** must install or verify
-   the packaged Microsoft Visual C++ runtime before the VDD. No SDK, .NET
-   runtime, PowerShell module, or manual driver download may be required.
-6. On a laptop, repeat task installation and sign-in recovery while running on
+8. Repeat sections 1 through 4 on a second clean PC using the signed installer
+   and only release artifacts. **Apply recommended setup** must install or
+   verify the packaged Microsoft Visual C++ runtime before the VDD. No SDK,
+   .NET runtime, PowerShell module, or manual driver download may be required.
+   Separately extract the portable ZIP: its health check and `self-test` must
+   run, while elevation, setup, display mutation, and task-install controls
+   remain unavailable because portable mode is diagnostics-only.
+9. On a laptop, repeat task installation and sign-in recovery while running on
    battery. Both recovery tasks must run rather than waiting for AC power.
-7. On a PC with two physical displays, disable both through the controlled test
+10. On a PC with two physical displays, disable both through the controlled test
    path and run emergency recovery. Every connected physical display must be
    available again and VDD must be inactive.
-7. If available, test an existing Sunshine installation outside the default
+11. If available, test an existing Sunshine installation outside the default
    Program Files directory. The companion must discover the registered service
    path and its adjacent `config` directory. A compatible newer build remains
    in place; an older build upgrades to the pinned minimum without installing
@@ -281,4 +310,5 @@ Set-Location "C:\Program Files\Vita Moonlight Host"
 .\VitaMoonlight.Host.exe session recover
 .\VitaMoonlight.Host.exe agent status
 .\VitaMoonlight.Host.exe emergency recover-display
+.\VitaMoonlight.Host.exe emergency reset-display-driver
 ```

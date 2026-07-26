@@ -143,19 +143,13 @@ void touchabsolute_handle_ds4(const TouchData* touch, SceRtcTick* current) {
         if (is_active && !ds4_finger_active[i]) {
             LiSendControllerTouchEvent(0, LI_TOUCH_EVENT_DOWN, i,
                                        norm_x, norm_y, 1.0f);
-            vita_debug_log(
-                "[DS4_TOUCHPAD] DOWN finger=%d x=%.3f y=%.3f",
-                i, norm_x, norm_y);
+            vita_debug_log("[DS4_TOUCHPAD] DOWN finger=%d", i);
         } else if (is_active && ds4_finger_active[i]) {
             int dx = abs(x - ds4_x[i]);
             int dy = abs(y - ds4_y[i]);
             if (dx >= move_threshold || dy >= move_threshold) {
                 LiSendControllerTouchEvent(0, LI_TOUCH_EVENT_MOVE, i,
                                            norm_x, norm_y, 1.0f);
-                vita_debug_log(
-                    "[DS4_TOUCHPAD] MOVE finger=%d x=%.3f y=%.3f "
-                    "(dx=%d dy=%d)",
-                    i, norm_x, norm_y, dx, dy);
             }
         } else if (!is_active && ds4_finger_active[i]) {
             LiSendControllerTouchEvent(0, LI_TOUCH_EVENT_UP, i,
@@ -283,16 +277,11 @@ void touchabsolute_handle_tablet(const TouchData* touch) {
             LiSendTouchEvent(LI_TOUCH_EVENT_DOWN, i,
                              norm_x, norm_y,
                              1.0f, 0.0f, 0.0f, LI_ROT_UNKNOWN);
-            vita_debug_log(
-                "[TOUCHSCREEN] DOWN finger=%d x=%.3f y=%.3f",
-                i, norm_x, norm_y);
+            vita_debug_log("[TOUCHSCREEN] DOWN finger=%d", i);
         } else if (is_active && tablet_finger_active[i]) {
             LiSendTouchEvent(LI_TOUCH_EVENT_MOVE, i,
                              norm_x, norm_y,
                              1.0f, 0.0f, 0.0f, LI_ROT_UNKNOWN);
-            vita_debug_log(
-                "[TOUCHSCREEN] MOVE finger=%d x=%.3f y=%.3f",
-                i, norm_x, norm_y);
         } else if (!is_active && tablet_finger_active[i]) {
             LiSendTouchEvent(LI_TOUCH_EVENT_UP, i,
                              normalized_x(tablet_x[i]),

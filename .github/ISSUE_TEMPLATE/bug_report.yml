@@ -1,0 +1,83 @@
+name: Bug report
+description: Report a reproducible Vita client, Windows host, display, or input problem.
+title: "[Bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please search existing issues first. Diagnostic file logging is optional
+        and off by default; enable it only long enough to reproduce the problem.
+        Never post passwords, tokens, pairing data, private IP/MAC addresses, or
+        other personal data.
+  - type: input
+    id: version
+    attributes:
+      label: Vita Moonlight version or commit
+      description: Use the release tag or full commit SHA shared by the VPK and host package.
+      placeholder: v0.14.6-beta.1 or 0123456789abcdef...
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: State what you expected, what happened instead, and the shortest reproduction.
+      placeholder: |
+        1. Start a Recommended stream
+        2. ...
+        Expected:
+        Actual:
+    validations:
+      required: true
+  - type: dropdown
+    id: install_type
+    attributes:
+      label: Installation path
+      options:
+        - Upgrade over an earlier Vita Moonlight Host
+        - Clean installer setup
+        - Portable ZIP
+        - Vita client only
+    validations:
+      required: true
+  - type: textarea
+    id: vita
+    attributes:
+      label: Vita details
+      description: Include Vita 1000/2000/PSTV, firmware, relevant plugins, preset, controller profile, and connection type.
+    validations:
+      required: true
+  - type: textarea
+    id: host
+    attributes:
+      label: Windows host details
+      description: Include Windows build, CPU/GPU and driver, Sunshine version, monitor layout, HDR state, and wired/Wi-Fi network details.
+    validations:
+      required: true
+  - type: textarea
+    id: recovery
+    attributes:
+      label: Display and recovery result
+      description: Say whether normal disconnect and Ctrl+Alt+Shift+F11 restored the physical display.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Redacted logs or screenshots
+      description: |
+        Attach only the shortest relevant capture. Redact host names, addresses,
+        MACs, usernames, and credentials. Include exact timestamps and say
+        whether Vita diagnostic logging was enabled.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Safety checks
+      options:
+        - label: The VPK and Windows host came from the same release or commit.
+          required: true
+        - label: I have removed credentials, pairing data, and private identifiers from attachments.
+          required: true
+

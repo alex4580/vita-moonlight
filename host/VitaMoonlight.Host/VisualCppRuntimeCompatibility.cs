@@ -70,7 +70,13 @@ internal static class VisualCppRuntimeCompatibility
                 before.DetectedVersion);
         }
 
-        var fullInstallerPath = Path.GetFullPath(installerPath);
+        var fullInstallerPath = InstallationTrust.RequireBundledFile(
+            installerPath,
+            Path.Combine(
+                "tools",
+                "DisplayWizard",
+                "VC_redist.x64.exe"),
+            "Microsoft Visual C++ runtime installation");
         if (!File.Exists(fullInstallerPath))
         {
             throw new FileNotFoundException(
