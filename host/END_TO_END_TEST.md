@@ -1,314 +1,419 @@
-# End-to-end acceptance test
+# Full community end-to-end test
 
-This is a GUI-first release test for client Windows 10 version 2004 (build
-19041) or newer, or Windows 11, on x64 and a physical Vita. No terminal is
-required for the normal pass. Record the exact Windows build, GPU and driver, Sunshine or
-Apollo version, Vita model, network type, VPK commit, and host installer
-commit.
+This is the complete public-beta acceptance test for Vita Moonlight. It is
+written for first-time users and uses graphical controls wherever possible.
+No existing Vita Moonlight installation, terminal, SDK, or source checkout is
+assumed.
 
-## 1. Install and configure the host
+Individual testers may submit a partial result. The release as a whole needs
+coverage of every installation state and hardware layout below. For a short
+pass, use the [minimum public-beta test](BETA_SMOKE_TEST.md).
 
-1. Run `Vita-Moonlight-Host-Setup-win-x64.exe` as Administrator with Sunshine,
-   ViGEmBus, and the signed virtual-display driver selected. Setup must not ask
-   to install a private root certificate or expose transient command windows.
-   Every failed prerequisite must stop later configuration with a visible
-   error. If Setup requests a reboot, it must defer Sunshine display
-   configuration and active-display changes; reboot and finish with **Apply
-   recommended setup**.
-2. Reboot only if Windows requests it.
-3. Open **Start > Vita Moonlight Host > Vita Moonlight Host Control Panel** and
-   choose **Restart as Administrator** if shown.
-4. On **Overview**, click **Apply recommended setup**.
-   On a repair pass, this single action must restore a missing/stopped
-   ViGEmBus service, update an unsupported Sunshine build, reinstall and
-   verify the VDD at native mode, and reinstall both safeguards. A requested
-   reboot must stop the workflow and explain how to resume it. During native
-   verification, every active physical monitor must remain part of the
-   topology. A brief display-mode flicker is acceptable; a sustained black
-   physical screen or VDD-only topology is a failure.
-5. Run **Apply recommended setup** again while the VDD is already installed,
-   started, and enabled. A PnPUtil code 50 from the enable-device step must be
-   treated as a verified no-op; setup must continue through restart and
-   960x544 verification instead of showing a generic exit-code failure. If
-   Windows rejects the mode, setup must restore the original topology, show
-   the final Windows response as an error, and must not request another reboot
-   merely because the mode check failed.
-6. Treat the same machine as an upgrade, not a clean install. Before the first
-   upgrade from a build that did not record a directory identity, add a marker
-   file beneath `C:\VirtualDisplayDriver`. Rerun the installer. Setup must
-   detach that directory without reading or following it, print the randomized
-   quarantine path because it is non-empty, atomically create a protected fixed
-   directory, and continue with a fresh packaged configuration. Restart and
-   retry must be the actionable result if another process prevents the safe
-   rename. Do not copy the marker or any legacy configuration into the new
-   directory.
-7. After the identity-aware setup succeeds, add an unrelated resolution and
-   retain non-default driver options in the now-trusted configuration, then
-   rerun the installer. The pinned package must be staged before Vita modes are
-   normalized, the unrelated settings must survive, and the effective mode
-   list must contain only one 960x544/60 entry even when 60 Hz is global.
-   Verification must use a non-persistent live mode change; it must not require
-   `CDS_UPDATEREGISTRY` for the temporary extended topology.
-   The existing target may disappear briefly while its device stack restarts;
-   setup must wait up to 30 seconds for it to re-enumerate, without changing
-   the active physical topology, then continue automatically.
-8. Click **Run health check**. Sunshine, its supported version, ViGEmBus,
-   Sunshine gamepad, Microsoft Visual C++ runtime, driver bundle, virtual
-   display, recovery task, and
-   **Stream rescue** must report ready. **Vita display modes** must say the
-   modes are provisioned and native 960x544 was verified; **Display mode
-   controls** must list 960x544, 960x540, and 1280x720 as ready. **Platform**
-   must report an x64 OS/process. **App
-   coverage** must say every Sunshine app, **Display lifecycle** must say native
-   disconnect recovery enabled, and **Color mode** must say force SDR.
+## Safety and requirements
 
-Opening the executable itself must show a persistent control panel. A terminal
-window that only flashes and closes indicates an obsolete package.
+Use:
 
-## 2. Verify the idle and preview states
+- a homebrew-enabled PlayStation Vita or PlayStation TV with VitaShell;
+- a 64-bit Intel or AMD PC running Windows 10 build 19041 or newer, or
+  Windows 11;
+- a PC keyboard for the emergency display shortcut; and
+- `moonlight.vpk` and `Vita-Moonlight-Host-Setup-win-x64.exe` downloaded from
+  the **same GitHub release**.
 
-1. Open **Displays > List displays**. Identify the physical monitor and **VDD
-   by MTT**. The managed target must be inactive while idle. Its first
-   activation in this release must use 960x544/60; 800x600 indicates that the
-   driver mode provisioning or reload did not complete.
-2. If the desktop is extended onto VDD by MTT, click **Disable idle virtual
-   display**. List displays again and verify the physical monitor is active and
-   the managed virtual target is inactive.
-3. Click **Preview 960x544 for 15 seconds** and approve the warning. The
-   physical monitor may be blank during the countdown.
-4. Wait without terminating the host. The original physical layout must return
-   automatically. Click **Session status** and verify no transaction is pending.
+Save open work before testing. The physical monitor can go blank while
+Sunshine captures the Vita virtual display. The normal disconnect path,
+recovery agent, and sign-in safeguard should restore it.
 
-Do not perform a forced-process-termination test on a normal single-monitor
-desktop. It intentionally removes the only locally visible control surface. On
-a dedicated lab PC with independent remote administration, an optional crash
-test may terminate the host while switched, then sign out and in to verify the
-recovery safeguard.
+Do not deliberately terminate Windows display or host processes on a personal
+single-monitor PC. Crash testing belongs on a disposable machine with an
+independent way to recover it. Press **Ctrl + Alt + Shift + F11** on the PC
+keyboard if the physical display does not return.
 
-## 3. Install, pair, and launch
+## Test matrix
 
-1. Install the VPK from the same build on the Vita.
-2. Pair the Vita with Sunshine and confirm the PIN in Sunshine's web UI.
-3. Launch Sunshine's built-in **Steam Big Picture** entry, not only the
-   generated Vita Moonlight entry.
-4. Verify Windows activates **VDD by MTT** at 960x544/60 before capture and the
-   Vita shows Steam without the physical monitor's HDR washout.
-5. End the stream from the Vita overlay. Verify the physical display returns
-   and **Session status** is clear.
-6. Repeat with **Desktop** and one custom Sunshine game. This is the regression
-   test for global native display-lifecycle coverage.
-7. Repeat one connection with Wi-Fi loss and one with Vita suspend. In both
-   cases the physical display must recover or the logon safeguard must recover
-   it at the next sign-in.
+Record every configuration you test. A complete community release evaluation
+needs all of these paths; they may be split among testers:
 
-## 4. Overlay and video quality
+| Path | Required starting state |
+|---|---|
+| Clean install | Vita Moonlight Host has never been installed on this Windows installation. |
+| Older-version upgrade | A named older Vita Moonlight Host release is installed and paired before the candidate is run over it. |
+| Same-version reinstall/repair | The exact candidate is installed, then the same installer and recommended setup are run again. |
+| Vita package lifecycle | Candidate VPK is installed over itself, removed from LiveArea, and installed again. |
+| Keep-dependencies uninstall | Host is uninstalled while Sunshine, ViGEmBus, and VDD are retained. |
+| Remove-dependencies uninstall | Disposable PC/snapshot where all three shared components can safely be removed. |
+| Laptop | Internal panel, including a stream and recovery while on battery. |
+| Multiple monitors | Two or more connected physical displays. |
 
-1. During a stream, hold **START**, then press **L + R** within one second. The
-   session menu must appear over live video with separate **Stream & virtual
-   display**, **Controller & input**, performance-overlay, and **Real-time
-   diagnostics** entries. Use a Windows controller-input viewer to confirm
-   START, L, and R are never forwarded. Close it and repeat by pressing all
-   three together, then by pressing L + R before START; both fallback orders
-   must still open the menu and release any host input.
-2. Before connecting, select **Recommended** in Settings and record its stream
-   and controller values. During the stream, verify the matching core values
-   appear on the two in-stream pages. Change bitrate, network mode, PS behavior,
-   and touch mode in-stream, disconnect normally, and verify those saved values
-   appear in Settings.
-3. Cycle **Performance overlay** through **Off**, **Frame rate**, **Frame rate +
-   network**, and **Advanced**. Each enabled mode must stay in the top-right
-   corner over a translucent 50%-alpha background. Off must draw nothing;
-   Frame rate must show rendered/target FPS; Frame rate + network must add
-   connection health, RTT, and measured encoded-video rate; Advanced must add
-   stream, decode-time, dropped-frame, and recovered/failed/out-of-sequence
-   packet data.
-4. Open **Real-time diagnostics**. It must replace the session menu with a
-   dedicated live view of session, FPS, network, video rate, stream/packet,
-   decode, drops, controller, gyro, overlay, logging, and log-path state. No
-   inline input-diagnostic line may remain in the normal menu.
-   **O** and **START** must return to the menu.
-5. Disconnect, open pre-stream Settings, use **Reset all to recommended**, and
-   reconnect. Verify diagnostic file logging is Off. With performance overlay
-   Off and the diagnostics screen closed, stream for one minute and confirm no
-   new diagnostic lines are appended. Open Real-time diagnostics, press
-   **Triangle**, reproduce a short stream/input issue, and verify logging shows
-   Enabled. Toggle **Diagnostic file logging** from the main in-stream menu and
-   verify it shows and changes the same state. The first completed one-second
-   sample must start from fresh counters, with no cumulative bitrate, FEC, or
-   out-of-sequence spike. Disable logging again, then use VitaShell to copy the
-   append-only
-   `ux0:data/moonlight/moonlight.log`. The capture must include the reproduction
-   interval. If fallback storage is in use, copy the exact path displayed by
-   the diagnostics screen instead.
-6. Close the menu with **O**, reopen it with the same chord, and select **Close
-   Windows game**. The first **X** must show a confirmation; **O** must cancel.
-7. Launch a normal game from Steam Big Picture, reopen the menu, select
-   **Close Windows game**, and press **X** twice. The foreground game must exit
-   while Moonlight remains connected and Steam Big Picture becomes visible.
-   **Help & recovery > Rescue agent status** must record a successful
-   `close-foreground` action. Repeat with a disposable test app that ignores
-   its normal close request and verify the agent force-terminates that app only.
-8. Select **End Sunshine app** and press **X** twice. Sunshine must end its
-   current app session, Moonlight must disconnect, and the physical monitor
+For a genuine upgrade result, do not uninstall the older release first. If you
+do not already have an older build, install a prior published release on a
+test PC, pair it, complete one stream, and then install the candidate over it.
+
+## 1. Record the starting environment
+
+Before installing, record:
+
+- release name and commit, if shown;
+- clean install, older-version upgrade, or same-version repair;
+- older installed version, if applicable;
+- Windows edition, version, and OS build;
+- desktop or laptop, CPU, GPU, and GPU driver version;
+- Sunshine version if it was installed independently;
+- Ethernet/Wi-Fi arrangement and Wi-Fi band;
+- physical monitor count, arrangement, resolutions, and HDR state; and
+- Vita/PSTV model, firmware, relevant plugins, and storage location.
+
+Take a screenshot of **Windows Settings > System > Display**. This makes an
+unexpected layout change much easier to diagnose.
+
+## 2. Exercise every installation state
+
+### Clean install
+
+1. Confirm Vita Moonlight Host is absent from **Windows Settings > Apps >
+   Installed apps** (Windows 11) or **Apps & features** (Windows 10).
+2. Run the candidate setup file as Administrator and accept the recommended
+   components.
+3. Setup must not ask you to install an unknown root certificate. Any failed
+   prerequisite must produce a visible explanation and stop later
+   configuration.
+4. If Windows requests a restart, restart. Open **Vita Moonlight Host** from
+   Start, choose **Restart as Administrator** if offered, and click
+   **Set up or repair this PC**.
+5. Click **Check readiness**. Sunshine, Microsoft Visual C++ runtime,
+   ViGEmBus/controller support, VDD/virtual display, display modes, recovery,
+   and Stream rescue must be ready.
+
+No separate .NET runtime, SDK, PowerShell module, driver download, or command
+line should be required.
+
+### Upgrade from an older release
+
+1. Before updating, verify that the older installation can still see the
+   paired Vita and any unrelated Sunshine applications.
+2. End the stream and run the candidate installer directly over the older
+   installation.
+3. Restart Windows if requested, then open the Administrator control panel and
+   click **Set up or repair this PC**.
+4. Run **Check readiness**. Confirm there is one Vita Moonlight Host entry, one
+   managed virtual display, and no second Sunshine installation.
+5. Confirm Sunshine credentials, Vita pairing, unrelated applications, and
+   user-created Sunshine settings were not discarded.
+6. Complete a stream before judging the upgrade successful.
+
+### Same-version reinstall and repair
+
+1. With the candidate already working, run the exact same installer again.
+2. Open the Administrator control panel and click **Set up or repair this PC**
+   twice: once as repair and once when everything is already ready.
+3. Neither pass may leave a sustained black physical screen, create duplicate
+   devices, duplicate Sunshine installs, or lose pairing/settings.
+4. Run **Check readiness** and complete another stream.
+
+If setup requests a restart at any point, it must stop safely before applying
+stream-display configuration. Restart once and resume with
+**Set up or repair this PC**; it must not enter an unexplained restart loop.
+
+## 3. Check the Windows control panel and idle display
+
+1. Launching **Vita Moonlight Host** must open a persistent graphical control
+   panel. A command window that flashes and disappears indicates the wrong or
+   obsolete file.
+2. On **Get started**, read the ready state and run **Check readiness**.
+   Instructions should describe a user action rather than expose raw developer
+   commands.
+3. On **Streaming**, confirm:
+   - automatic Vita-display switching is enabled;
+   - Force SDR is enabled; and
+   - the virtual-display match is blank unless the PC has multiple virtual
+     display drivers.
+4. On **Display & recovery**, click **Show detected displays**. Record the physical display names
+   and **VDD by MTT**. VDD should be inactive while idle and must not be the
+   only active display.
+5. If VDD is active while idle, click **Turn off idle Vita display**, list
+   displays again, and verify the physical display remains active.
+6. Choose **Test Vita display for 15 seconds**. The physical screen may go blank
+   during the preview. Do not end the host process.
+7. Wait for automatic restoration. Click **Show current session state** and verify no
+   display transaction remains pending.
+8. Run **Ctrl + Alt + Shift + F11** while idle. A short blink is acceptable;
+   physical displays must remain usable and Sunshine must restart.
+9. Open **Diagnostics & support**, run **Run full health check**, and choose
+   **Save support report...**. Confirm the saved JSON identifies the host
+   version and current component/display/recovery state. Review it in a text
+   editor. Creating it must be an explicit one-time action; the control panel
+   must not continuously write a host log.
+10. Test **Copy technical details** and **Open diagnostics folder**. Neither
+    action may change the display or streaming configuration.
+
+Record every unclear, overlapping, clipped, or incorrectly rendered control
+panel label.
+
+## 4. Install, pair, and launch on the Vita
+
+1. Transfer `moonlight.vpk` with VitaShell USB or FTP, select it in VitaShell,
+   and install it. For a Vita-side upgrade, install the new VPK over the older
+   app instead of deleting the old app first.
+2. Start Vita Moonlight. On a clean first run, confirm **Recommended** is
+   selected: 960x544, 60 FPS, 8 Mbps, H.264 SDR.
+3. Discover the PC. If discovery fails, test manual host entry and record the
+   address type used.
+4. Select the PC and enter the displayed PIN in Sunshine's web page.
+5. Launch **Steam Big Picture**. Confirm Windows activates the dedicated VDD
+   at 960x544 and the Vita shows that display rather than merely mirroring a
+   physical monitor.
+6. Confirm the image fills the Vita panel, is not 4:3, and is not washed out
+   by HDR.
+7. Disconnect normally from the Vita menu. The physical display must return.
+8. Repeat with **Desktop** and one custom Sunshine game. The virtual-display
+   lifecycle must cover every Sunshine application, not only Steam.
+9. Test deleting a saved host, rediscovery, manual entry, pairing again,
+   Wake-on-LAN if the PC supports it, and reconnect.
+
+## 5. Check the Vita interface and stream controls
+
+1. During a stream, hold **START**, then press **L + R** within one second.
+   Confirm the in-stream menu opens and START/L/R do not reach Windows.
+2. Open and close every menu and settings page. Record text that is clipped,
+   poorly aligned, rendered incorrectly, or covered by another element.
+3. Compare pre-stream Settings with **Stream & virtual display** and
+   **Controller & input** in the stream menu. Shared choices must show the same
+   saved values.
+4. Cycle **Performance overlay** through **Off**, **Frame rate**,
+   **Frame rate + network**, and **Advanced**. Enabled modes must appear at the
+   top right on a translucent background without blocking menus. Off must draw
+   nothing.
+5. Open **Real-time diagnostics**. It should show understandable session,
+   decoder, network, controller, gyro, overlay, and support-log state. It must
+   not start a support log by itself. Press **O** or **START** to return.
+6. Test **Reliable**, **Recommended**, **High quality**, and **Remote / VPN**.
+   Confirm their visible values are respectively:
+   - 960x544, 30 FPS, 5 Mbps, Auto;
+   - 960x544, 60 FPS, 8 Mbps, Auto;
+   - 960x544, 60 FPS, 12 Mbps, Auto; and
+   - 960x544, 30 FPS, 4 Mbps, Remote.
+7. Change bitrate manually and verify the preset becomes **Custom**. Choose
+   **Restore recommended defaults** and confirm Recommended, Maximum
+   compatibility, performance overlay Off, and support log Not capturing are
+   restored.
+8. Leave Settings, disconnect, restart Vita Moonlight, and confirm settings
+   persist.
+
+## 6. Check video, reconnection, and game recovery
+
+1. Run a motion-heavy game for at least 20 minutes on Recommended. Record
+   frame rate, RTT, measured video rate, decode time, frame drops, audio
+   breakup, visible compression, and reconnect behavior.
+2. Repeat a shorter pass on High quality with strong Wi-Fi and Reliable on a
+   constrained link. Higher bitrate should improve motion only when the link
+   can sustain it.
+3. While a game is running, select 960x540, 960x544, and 1280x720 one at a
+   time. After each selection choose **Apply resolution + reconnect**.
+   Sunshine must reconnect at the selected desktop/encoder dimensions without
+   closing the Windows game.
+4. Change the controller profile in-stream and choose
+   **Apply input changes + reconnect**. This must recreate the controller
+   without resetting the display.
+5. If a game goes black but the Vita-rendered menu still opens, select
+   **Close Windows game**. The first confirmation must be cancellable; after
+   confirming twice, only the foreground game should close and Steam should
+   remain.
+6. Test **End Sunshine app**. The session must end and the physical display
    must return.
-9. Reconnect, select **Recover host display**, and press **X** twice. The
-   stream must disconnect. Within roughly ten seconds the physical monitor must
-   be active, VDD must be inactive, Sunshine must be running, and rescue status
-   must report success. Reconnect successfully.
-10. Reopen the menu and choose **Disconnect stream**. The stream must end
-   cleanly and restore Windows.
-11. In Vita settings leave **PS button behavior** on its default **Local
-   double-tap**. During a stream, pause host media and press PS once. Nothing
-   may reach the Windows gamepad viewer and the media must stay paused. Quickly
-   press PS twice: the Vita must return to LiveArea. Resume Moonlight and verify
-   capture is restored without a stuck PS/Xbox button.
-12. Select **Safe PC Guide**, reconnect, and press PS once. Windows must receive
-   one Guide press after about 250 ms. Reconnect and double-press PS; the Vita
-   must return to LiveArea without any Guide event reaching Windows. Verify
-   **Immediate PC Guide** sends Guide without the delay and **System / LiveArea**
-   returns home on one press without sending Guide. Restore **Local
-   double-tap** after this test.
-13. Select **Reliable**, **Recommended**, **High quality**, and **Remote /
-    VPN** in turn. Verify their differing values are respectively 30 FPS /
-    5 Mbps / Auto, 60 FPS / 8 Mbps / Auto, 60 FPS / 12 Mbps / Auto, and
-    30 FPS / 4 Mbps / Remote. Each selection must also restore 960x544,
-    1024-byte packets, H.264 Rec. 709 limited-range SDR, stereo with local audio
-    off, 60 Hz client timing, host optimization, packet-loss recovery, frame
-    pacing, fit scaling, vblank off, and Vita power-save suppression.
-14. Change bitrate manually and verify the preset reads **Custom** without
-    discarding the value. Choose **Reset all to recommended** and verify it
-    additionally selects **Maximum compatibility**, performance overlay Off,
-    and diagnostic file logging Off.
-15. Select **Recommended**, reconnect, and confirm all values persist. Compare
-    Settings with the in-stream pages again; controls shared by both surfaces
-    must read identically.
-16. Launch a Windows game, then choose 960x540, 960x544, and 1280x720 from
-    **Stream & virtual display**. For each choice, select **Apply resolution +
-    reconnect** and verify the host agent reports a successful
-    `display-mode-WxH` action, the Vita performs a controlled video reconnect,
-    Sunshine reports matching desktop and encoder dimensions, and the same
-    Windows game remains running. The physical topology must not flash on.
-    End the stream after each mode and verify normal physical-display recovery.
-    An unsupported value such as 800x600 must be rejected by the host command.
-17. Run a 20-minute motion-heavy stream with Advanced enabled. Check fine
-    textures, camera pans, frame pacing, audio, reconnect behavior, measured
-    video rate, decode time, and drops. Repeat at 12 Mbps on a strong network
-    and at 5 Mbps/30 FPS on constrained Wi-Fi.
-18. Confirm the 8 Mbps native Recommended profile has materially fewer motion
-    artifacts than the former 5 Mbps default and does not produce sustained
-    decode errors.
-19. Exercise the Vita render-watchdog path on hardware. While streaming,
-    temporarily stop host capture without closing the Moonlight session; the
-    last frame must remain visible and the menu, performance overlay, and
-    diagnostics screen must remain responsive. Rapidly open and close the menu,
-    toggle vblank on and off several times, disconnect while the watchdog is
-    drawing, and complete five reconnect cycles. There must be no crash,
-    deadlock, torn UI, use-after-free symptom, or stuck input. If the decoder
-    itself becomes unresponsive and UI cannot be drawn, double PS must still
-    return to LiveArea; restart Moonlight before the next stream.
+7. Test **Recover host display**. The stream should disconnect; within roughly
+   15 seconds the physical display should be active, VDD inactive, and
+   Sunshine available for a new stream.
 
-For the reported Doom Eternal case, run one pass in borderless SDR and one in
-exclusive fullscreen with the normal game HDR setting. Record whether the
-black frame begins during the title-to-menu transition, whether the Vita
-overlay remains visible, whether **Close Windows game** returns to Steam, and
-the matching Sunshine, rescue, and optional Vita diagnostic logs. Do not label
-it a display-driver crash based on a black game frame alone.
+For a Doom Eternal result, state whether the game used borderless or exclusive
+fullscreen and whether in-game HDR was enabled. Record whether the black frame
+began during a menu transition and whether the Vita menu remained visible. A
+black game frame alone does not prove a display-driver crash.
 
-## 5. Controller and motion
+## 7. Check controller, gyro, touch, and keyboard
 
-1. Choose **Maximum compatibility** and reconnect. Steam Big Picture and a
-   gamepad tester must see one XInput controller with correct sticks, triggers,
-   D-pad, face buttons, START/SELECT, and shoulder behavior. The profile must
-   also restore Relative mouse, Local double-tap, gyro off, mapping off,
-   shoulder swap off, and sprint helper off. Motion and controller-touchpad
-   capabilities must not appear.
-2. Choose **Steam / DS4 + gyro**, select **Apply input changes + reconnect**,
-   and verify one DS4 with DS4 Touchpad and Safe PC Guide. The VDD must remain
-   active at the same mode and rescue status must not gain a display-mode
-   action. Test pitch, roll, and yaw with no drift at rest and the correct
-   direction on all axes.
-   Real-time diagnostics must progress from awaiting a host gyro request to a
-   report rate and increasing events while Steam Input polls motion.
-3. Disable motion, select **Apply input changes + reconnect**, and verify
-   motion is no longer advertised.
-4. Suspend and resume during motion input. The next stream must start with
-   fresh sensor state and no stuck buttons or axes.
+1. Choose **Maximum compatibility**, reconnect, and confirm Windows sees one
+   XInput controller. Test sticks, D-pad, face buttons, L/R, triggers,
+   START/SELECT, and stick clicks. Press and release each input; no button or
+   axis may stay active.
+2. Press **O** repeatedly in a game that uses it. Each press must produce one
+   action rather than a continuous held input.
+3. With the default **Local double-tap** PS behavior, pause Windows media and
+   press PS once. It must not resume media or send Guide. Double-press PS and
+   confirm the Vita can always return to LiveArea.
+4. Select **Safe PC Guide**, reconnect, and confirm a single PS press reaches
+   Steam after its short safety delay while double PS remains a local escape.
+   Also test Immediate PC Guide and System/LiveArea, then restore Local
+   double-tap.
+5. Choose **Steam / DS4 + gyro**, select **Apply input changes + reconnect**,
+   and confirm Steam sees a DS4 motion source. Test pitch, roll, and yaw, no
+   obvious drift at rest, suspend/resume, and gyro disable. Real-time
+   diagnostics should show whether the host requested motion and whether
+   reports are being sent. Under **Settings > Controller**, change **Gyro
+   horizontal sensitivity** and **Gyro vertical sensitivity** independently.
+   Confirm the corresponding axis becomes less responsive near 0.1x and more
+   responsive near 5.0x, then restore the starting values. Use Steam Input
+   afterward for optional per-game response curves, dead zones, and activation
+   behavior.
+6. Open **Settings > Controller > Graphical button mapper**. Remap at least one face
+   button, one shoulder/trigger, Guide, and a rear-touch zone. Enable the
+   custom map, verify each assignment, then disable it and confirm hardware
+   defaults return.
+7. Open **Settings > Touch and keyboard > Front-touch zone mapper**. Change
+   zone size/inset and assign one local action plus one gamepad, mouse, or
+   keyboard action. Confirm the preview is readable, touches correspond to the
+   drawn zones, and settings survive an app restart.
+8. Test Relative mouse, DS4 Touchpad, Absolute mouse, and Tablet touch modes.
+   Record app compatibility and corner alignment.
+9. Focus a non-secret Windows text field. Open the keyboard with
+   **START + D-pad Left**, type, use Backspace/Enter, and close it. Repeat from
+   **Open on-screen keyboard** in the stream menu. No menu-confirm/cancel input
+   should leak to the game.
 
-## 6. Touch, keyboard, and host management
+## 8. Capture one readable support log
 
-1. Change each touch mode in the overlay: Relative mouse, DS4 Touchpad,
-   Absolute mouse, and Tablet. Verify the new mode persists and no
-   confirm/cancel press leaks to the host when the overlay closes.
-2. In DS4 Touchpad mode test click, drag, and two-finger interaction.
-3. In Absolute mouse mode touch all four corners and verify pixel alignment.
-4. In Tablet mode test contact and pressure in a compatible application.
-5. Press **START + Left** and type into a normal and an Administrator app.
-   Repeat with **Open on-screen keyboard** from the in-stream menu.
-6. Test discovery, manual host entry, pairing, Wake-on-LAN, reconnect, and
-   deleting a saved host.
+Support logging is optional and **off by default**. Follow
+[Logging and support](../docs/LOGGING_AND_SUPPORT.md).
 
-## 7. Recovery, uninstall, and artifacts
+1. Start with the support log Not capturing and performance overlay Off.
+   Stream for one minute. Vita Moonlight must not open, create, or write a
+   support-log file.
+2. Choose **Start support log** immediately before one short reproduction,
+   note the local clock time and time zone, reproduce the issue once, then
+   choose **Stop and save support log**.
+3. Copy the path displayed by Real-time diagnostics using VitaShell. The
+   normal path is `ux0:data/moonlight/moonlight.log`.
+4. Confirm the file begins with `schema=vita-support-v1` records for
+   `session.start`, `system.snapshot`, `config.snapshot`,
+   `connection.snapshot`, and `stream.snapshot`, and ends with a
+   `session.end` summary. Starting another capture must rotate this one to
+   `moonlight.previous.log` and create a fresh `moonlight.log`.
+5. Inspect it before sharing. A useful stream capture should use
+   `connection.state`, `connection.stage`, `stream.action`, `decoder.state`,
+   `network.state`, 10-second `network.summary`, `motion.state`, and
+   rate-limited `error.legacy` records as applicable. Ordinary touch movement,
+   every button sample, typed characters, and every gyro sample must not flood
+   the file.
+6. Redact host names, usernames, IP/MAC addresses, pairing information, and
+   other personal data. Attach the log with the exact problem timestamp and
+   report metadata.
+7. If Python 3 is available, run the packaged
+   `tools\SupportLog\summarize-vita-log.py` once in normal and `--json` modes.
+   Both summaries must omit raw legacy text, unknown fields, arbitrary
+   filenames, and paths. Python is optional for community reporters; a
+   reviewed raw log is acceptable.
 
-1. End the stream and verify no display transaction is pending.
-2. Uninstall Vita Moonlight Host with every shared-dependency checkbox
-   **cleared**. The recovery and stream-rescue tasks must be removed, their
-   background process must stop, exact Vita-managed Sunshine hooks must be
-   gone, unchanged managed settings must be restored to their recorded
-   originals, later user-edited values must remain, the installed `state`
-   directory must be gone,
-   and the physical display layout must remain intact. Sunshine, ViGEmBus, and
-   VDD must remain installed; VDD must be inactive.
-3. Reinstall, enable **Keep the stream-rescue log**, and uninstall again.
-   Settings and recovery records must be removed while only one timestamped
-   `%ProgramData%\VitaMoonlight-stream-rescue-*.log` remains.
-4. In a disposable VM, make `uninstall prepare` return a nonzero result before
-   uninstalling. Uninstall must stop before deleting the companion, rescue
-   agent, recovery task, or any requested shared dependency. Restore the test
-   condition, recover the display, and confirm uninstall then completes.
-5. On the disposable VM, reinstall and select VDD, Sunshine, and ViGEmBus on
-   the uninstall options page. Confirm the physical display is active before
-   each dependency is removed. A requested reboot must stop uninstall while
-   the host and safeguards remain; reboot, run uninstall again, and then
-   confirm all three products are absent.
-6. Run the default silent uninstall with `/VERYSILENT /NORESTART`. It must not
-   show a dependency prompt and must keep all three shared dependencies.
-   Repeat with the explicit `/REMOVEVDD`, `/REMOVESUNSHINE`, and
-   `/REMOVEVIGEMBUS` switches only in the disposable VM.
-7. Verify the release contains the VPK, Windows installer, portable host ZIP,
-   source archive, licenses, `COMPATIBILITY.md`, `VITA_SETTINGS_GUIDE.md`, and
-   `THIRD_PARTY_NOTICES.md`.
-8. Repeat sections 1 through 4 on a second clean PC using the signed installer
-   and only release artifacts. **Apply recommended setup** must install or
-   verify the packaged Microsoft Visual C++ runtime before the VDD. No SDK,
-   .NET runtime, PowerShell module, or manual driver download may be required.
-   Separately extract the portable ZIP: its health check and `self-test` must
-   run, while elevation, setup, display mutation, and task-install controls
-   remain unavailable because portable mode is diagnostics-only.
-9. On a laptop, repeat task installation and sign-in recovery while running on
-   battery. Both recovery tasks must run rather than waiting for AC power.
-10. On a PC with two physical displays, disable both through the controlled test
-   path and run emergency recovery. Every connected physical display must be
-   available again and VDD must be inactive.
-11. If available, test an existing Sunshine installation outside the default
-   Program Files directory. The companion must discover the registered service
-   path and its adjacent `config` directory. A compatible newer build remains
-   in place; an older build upgrades to the pinned minimum without installing
-   a second copy or losing credentials.
+## 9. Recovery and interrupted sessions
 
-## Optional command-line equivalents
+Complete all safe tests available on the machine:
 
-For troubleshooting only, open Windows Terminal as Administrator:
+1. **Normal disconnect:** choose Disconnect stream. The original physical
+   layout returns without sign-out or reboot.
+2. **Vita suspend:** suspend during a stream. The PC returns to a physical
+   display automatically or at next sign-in; resume and reconnect.
+3. **Network loss:** temporarily disconnect the Vita network during a stream.
+   Confirm PC recovery independently of whether Vita firmware restores Wi-Fi
+   to the running app.
+4. **Emergency hotkey:** during a stream, press
+   **Ctrl + Alt + Shift + F11** on the PC keyboard. The stream ends, physical
+   displays return, the VDD reloads, Sunshine restarts, and another stream can
+   begin.
+5. **Sign-in safeguard:** if an interruption leaves a pending display state,
+   sign out and back in. Confirm the physical layout is restored, open the
+   control panel, choose **Show current session state**, and verify that no
+   display transaction remains pending.
 
-```powershell
-Set-Location "C:\Program Files\Vita Moonlight Host"
-.\VitaMoonlight.Host.exe doctor
-.\VitaMoonlight.Host.exe display list
-.\VitaMoonlight.Host.exe display disable-virtual
-.\VitaMoonlight.Host.exe session test --width 960 --height 544 --fps 60 --seconds 15
-.\VitaMoonlight.Host.exe session mode --width 960 --height 544 --fps 60
-.\VitaMoonlight.Host.exe session status
-.\VitaMoonlight.Host.exe session recover
-.\VitaMoonlight.Host.exe agent status
-.\VitaMoonlight.Host.exe emergency recover-display
-.\VitaMoonlight.Host.exe emergency reset-display-driver
-```
+Optional crash injection is for a disposable lab PC with independent remote
+administration only. End the host/recovery process while the stream display is
+active, then sign out and in to verify recovery. Do not perform this on a
+normal single-monitor personal PC.
+
+## 10. Laptop and multi-monitor passes
+
+### Laptop
+
+1. Repeat clean install or upgrade, one normal stream, network/suspend
+   interruption, F11 recovery, same-version repair, and uninstall on a laptop.
+2. Perform at least one stream and recovery while on battery. Recovery must
+   not wait for AC power.
+3. Repeat once docked or with an external display if available.
+
+### Multiple physical monitors
+
+1. Record the original enabled displays, primary display, arrangement,
+   resolutions, scaling, and HDR state.
+2. Complete one normal stream/disconnect, one interrupted stream, and one F11
+   recovery.
+3. Verify every connected physical display is available again, VDD is
+   inactive while idle, and the original arrangement is preserved.
+
+Report layout changes even when every screen becomes visible again.
+
+## 11. Reinstall and remove the Vita app
+
+Complete this while the Windows host is still available:
+
+1. In VitaShell, install the exact candidate `moonlight.vpk` over the current
+   app.
+2. Start Vita Moonlight. Confirm settings, graphical mappings, touch zones,
+   and the paired host remain, then complete one short stream.
+3. Stop and copy any support capture you need.
+4. Highlight Vita Moonlight in LiveArea, press **Triangle**, and choose
+   **Delete**. Confirm the app icon is gone.
+5. External Moonlight settings and support-log files may remain so they can
+   survive a reinstall. Record what remains, but do not delete a parent storage
+   directory merely to remove a log.
+6. Reinstall the candidate VPK. Confirm the app starts safely whether external
+   settings were preserved or the test Vita presents a fresh configuration.
+
+## 12. Uninstall the Windows host while keeping shared components
+
+This is the recommended path on a normal PC.
+
+1. End all streams and confirm a physical display is visible.
+2. Open **Windows Settings > Apps > Installed apps** (Windows 11) or
+   **Apps & features** (Windows 10), find **Vita Moonlight Host**, and choose
+   **Uninstall**.
+3. Leave removal of MTT VDD, Sunshine, and ViGEmBus **unselected**. Optionally
+   keep the one stream-rescue log when diagnosing a recovery failure.
+4. If Windows requests a restart, restart and run uninstall again.
+5. Confirm:
+   - Vita Moonlight Host and its Start-menu entry are gone;
+   - the physical display is usable and VDD is inactive;
+   - Sunshine, ViGEmBus, and VDD remain installed;
+   - Vita-owned recovery tasks and Sunshine integration are removed; and
+   - unrelated Sunshine applications and later user changes remain.
+
+Reinstall once after this test and repeat the install, health-check, and stream
+steps. This checks installation over retained shared dependencies.
+
+## 13. Uninstall the Windows host while removing shared components
+
+Use a disposable PC or reversible snapshot. Removing these components can
+break other streaming/controller applications.
+
+1. Start with a healthy candidate installation and a visible physical display.
+2. Run uninstall and explicitly select MTT VDD, Sunshine, and ViGEmBus.
+3. The uninstaller must restore and verify a physical display before removing
+   the driver or recovery safeguards.
+4. If a dependency removal fails or requests a restart, the host and recovery
+   safeguards must remain. Restart Windows and run uninstall again.
+5. Confirm the host, VDD, Sunshine, and ViGEmBus are absent and the physical
+   display remains usable.
+6. Reinstall from the release files once more. The all-in-one setup must
+   restore every selected prerequisite without a manual download.
+
+## 14. Submit the result
+
+Use the copyable template in
+[Community testing](../docs/COMMUNITY_TESTING.md). For every failure include:
+
+- the shortest exact reproduction;
+- expected and actual results;
+- whether the display recovered automatically, with F11, at sign-in, or not
+  at all;
+- the exact local time and time zone of the failure;
+- a screenshot/video when it clarifies UI or display behavior; and
+- the shortest optional, redacted log covering that time.
+
+Never post credentials, pairing data, public/private tokens, usernames, or
+unredacted network identifiers.

@@ -162,10 +162,11 @@ int main(int argc, char* argv[]) {
   check_and_create_moonlight_dir(out_path, out_key_dir);
   config_path = out_path;
   strcpy(config.key_dir, out_key_dir);
-  vita_debug_log("[Moonlight] Carpeta seleccionada: %s", config.key_dir);
   // Ya no se guarda config antes de inicializar todos los valores
   config_parse(argc, argv, &config);
-  vita_debug_set_logging_enabled(config.save_debug_log);
+  /* Support logs are explicit per-run captures and never resume at startup. */
+  config.save_debug_log = false;
+  vita_debug_set_logging_enabled(false);
 
   // Restaurar estado de Absolute Touch al iniciar
   touchabsolute_enable(config.touchscreen_mode == 2);

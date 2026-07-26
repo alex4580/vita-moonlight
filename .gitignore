@@ -13,3 +13,6 @@ mdns_discovery.py
 .vscode/
 ip_vita.txt
 psp2core_tmp.psp2dmp
+moonlight.log
+moonlight.previous.log
+Vita-Moonlight-Host-Support-*.json

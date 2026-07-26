@@ -410,9 +410,6 @@ static void confirm_main_action(void) {
     bool enabled = !vita_debug_is_logging_enabled();
     vita_debug_set_logging_enabled(enabled);
     save_settings();
-    if (enabled) {
-      vita_debug_log("[DIAGNOSTICS] Optional file logging enabled by user");
-    }
     return;
   }
   if (selected_item == MAIN_KEYBOARD) {
@@ -597,8 +594,11 @@ static void draw_main_page(void) {
       ui_diagnostics_overlay_mode_name(ui_diagnostics_get_overlay_mode()));
   draw_row(MAIN_DIAGNOSTICS, first_y, row_height, "Real-time diagnostics", ">");
   draw_row(
-      MAIN_LOGGING, first_y, row_height, "Diagnostic file logging",
-      vita_debug_is_logging_enabled() ? "On" : "Off");
+      MAIN_LOGGING, first_y, row_height,
+      vita_debug_is_logging_enabled()
+          ? "Stop and save support log"
+          : "Start support log",
+      vita_debug_is_logging_enabled() ? "Capturing" : "Fresh file");
   draw_row(MAIN_KEYBOARD, first_y, row_height, "Open on-screen keyboard", "X");
   draw_row(MAIN_CLOSE_GAME, first_y, row_height, "Close Windows game", "X");
   draw_row(MAIN_QUIT_APP, first_y, row_height, "End Sunshine app", "X");
@@ -694,6 +694,11 @@ static const char *footer_text(void) {
   }
   if (page == OVERLAY_PAGE_INPUT) {
     return "Controller-type changes take full effect after reconnecting";
+  }
+  if (page == OVERLAY_PAGE_MAIN && selected_item == MAIN_LOGGING) {
+    return vita_debug_is_logging_enabled()
+        ? "Reproduce the issue, then stop to save moonlight.log"
+        : "Start a fresh log, reproduce the issue, then stop and save";
   }
   if (settings_changed) {
     return "Saved. D-pad changes values; stream-format changes need reconnect";

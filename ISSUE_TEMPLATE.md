@@ -16,15 +16,20 @@ profile, and whether the problem survives a reconnect.
 ## Diagnostics
 
 Copy the relevant values from **In-stream menu > Real-time diagnostics**. For a
-reproducible problem, enable optional file logging immediately before the test,
-disable it afterward, and attach the log from the exact path shown on that
-screen. The usual path is `ux0:data/moonlight/moonlight.log`, but fallback
-storage may differ.
+reproducible problem, choose **Start support log** immediately before the test,
+choose **Stop and save support log** afterward, and attach the shortest
+reviewed log from the exact path shown on that screen. The usual path is
+`ux0:data/moonlight/moonlight.log`, but fallback storage may differ.
 
-For host/display problems, also attach Sunshine's log and
-`%ProgramData%\VitaMoonlight\stream-rescue.log` with matching timestamps.
-Diagnostic logs can contain host names or network addresses; redact private
-values before posting publicly.
+For host or display problems, open **Vita Moonlight Host > Diagnostics &
+support** and choose **Save support report...**. Attach the reviewed JSON
+report with the matching reproduction time. Add Sunshine or stream-rescue logs
+only when a maintainer requests them.
+
+Logs and reports can contain host names, network addresses, paths, pairing
+details, or other personal values. Remove credentials, tokens, pairing data,
+usernames, host names, IP/MAC addresses, and unrelated application details
+before posting publicly.
 
 ## Additional context
 

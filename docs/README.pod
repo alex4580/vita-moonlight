@@ -18,9 +18,9 @@ restores the physical display after a stream.
 =head1 USAGE
 
 Install the VPK on the Vita. On Windows, run the packaged host installer and
-open Vita Moonlight Host from the Start menu. Apply the recommended setup, run
-the health check, pair the Vita in Sunshine, and launch Steam Big Picture,
-Desktop, or a configured game.
+open Vita Moonlight Host from the Start menu. Choose C<Set up or repair this
+PC>, run C<Check readiness>, pair the Vita in Sunshine, and launch Steam Big
+Picture, Desktop, or a configured game.
 
 The Vita interface provides the same core stream and input settings before and
 during a session. In-stream resolution or controller capability changes use
@@ -30,8 +30,10 @@ their corresponding controlled reconnect action.
 
 The top-right performance overlay can show frame rate, network information, or
 advanced decoder and packet statistics. The dedicated real-time diagnostics
-screen does not write a file unless optional logging is enabled. File logging
-is off by default.
+screen does not write a file. Optional support logging is off by default and
+begins only when the user chooses C<Start support log>. It records concise
+system, configuration, connection, decoder, motion-state, and periodic network
+events rather than every touch, button, typed character, or gyro sample.
 
 =head1 FILES
 
@@ -44,7 +46,7 @@ fallback storage location.
 
 =item F<ux0:data/moonlight/moonlight.log>
 
-Typical optional diagnostic-log path. The diagnostics screen shows the exact
+Typical optional support-log path. The diagnostics screen shows the exact
 active path.
 
 =back

@@ -7,10 +7,13 @@ body:
   - type: markdown
     attributes:
       value: |
-        Please search existing issues first. Diagnostic file logging is optional
-        and off by default; enable it only long enough to reproduce the problem.
-        Never post passwords, tokens, pairing data, private IP/MAC addresses, or
-        other personal data.
+        Please search existing issues first. Support logging is optional and
+        off by default. Choose **Start support log** immediately before
+        reproducing the problem, choose **Stop and save support log**
+        afterward, and attach the resulting file. The Windows control panel
+        can also save a point-in-time host support report. Review every
+        attachment first. Never post passwords, tokens, pairing data, IP/MAC
+        addresses, or other personal data.
   - type: input
     id: version
     attributes:
@@ -36,9 +39,11 @@ body:
     attributes:
       label: Installation path
       options:
-        - Upgrade over an earlier Vita Moonlight Host
-        - Clean installer setup
-        - Portable ZIP
+        - First installation on this PC
+        - Upgrade over an older Vita Moonlight Host
+        - Reinstall or repair of the same version
+        - Uninstall or post-uninstall problem
+        - Portable diagnostics ZIP
         - Vita client only
     validations:
       required: true
@@ -66,11 +71,12 @@ body:
   - type: textarea
     id: evidence
     attributes:
-      label: Redacted logs or screenshots
+      label: Support files and screenshots
       description: |
-        Attach only the shortest relevant capture. Redact host names, addresses,
-        MACs, usernames, and credentials. Include exact timestamps and say
-        whether Vita diagnostic logging was enabled.
+        Attach the fresh Vita support log and the Windows host support JSON when
+        available. Add screenshots or video only when they make the behavior
+        clearer. Include the approximate reproduction time. Inspect attachments
+        and remove any personal information before posting.
   - type: checkboxes
     id: checks
     attributes:
@@ -80,4 +86,3 @@ body:
           required: true
         - label: I have removed credentials, pairing data, and private identifiers from attachments.
           required: true
-

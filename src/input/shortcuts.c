@@ -7,7 +7,6 @@
 #include <string.h>
 #include "../keyboardsystem.h"
 #include "../connection.h"
-#include "../debug.h"
 #include "../gui/ui_stream_overlay.h"
 
 #define OVERLAY_CHORD_MASK (SCE_CTRL_START | SCE_CTRL_L1 | SCE_CTRL_R1)
@@ -34,7 +33,6 @@ static bool open_stream_overlay(SceCtrlData* pad) {
     pad->buttons &= ~OVERLAY_CHORD_MASK;
     overlay_state = OVERLAY_CHORD_CONSUMED;
     overlay_pending_buttons = 0;
-    vita_debug_log("Shortcut: START+L1+R1 opened the stream overlay");
     stream_overlay_open();
     return true;
 }
@@ -110,7 +108,6 @@ bool process_physical_shortcuts(SceCtrlData* pad, const SceCtrlData* pad_old) {
 
     // Detectar flanco de subida de cualquiera de los dos
     if ((start_now && !start_prev) || (left_now && !left_prev)) {
-        vita_debug_log("Shortcut: Flanco de subida detectado (START=%d, LEFT=%d) en t=%llu", start_now, left_now, now);
         shortcut_time = now;
         shortcut_state = 1;
     }
@@ -118,13 +115,11 @@ bool process_physical_shortcuts(SceCtrlData* pad, const SceCtrlData* pad_old) {
     if (start_now && left_now) {
         if (shortcut_state == 1 && (now - shortcut_time) < 300000) {
             if (!keyboard_shortcut_blocked) {
-                vita_debug_log("Shortcut: START+LEFT detectado en t=%llu (delta=%llu)", now, now-shortcut_time);
                 // Limpiar input local y en el host ANTES de abrir el teclado
                 // Snapshots eliminados: solo se usan en vita.c
                 // Obligatorio porque es bloqueante
                 memset((void*)pad, 0, sizeof(SceCtrlData));
                 LiSendMultiControllerEvent(0, 1, 0, 0, 0, 0, 0, 0, 0);
-                vita_debug_log("[SHORTCUT] Overlay activo: ABRIR teclado, frame vacío enviado al host");
                 keyboardsystem_open_keyboard();
                 keyboard_shortcut_blocked = true;
                 shortcut_state = 0;
@@ -135,7 +130,6 @@ bool process_physical_shortcuts(SceCtrlData* pad, const SceCtrlData* pad_old) {
     }
     if (!start_now && !left_now) {
         if (keyboard_shortcut_blocked || shortcut_state != 0) {
-            vita_debug_log("Shortcut: START y LEFT liberados, reseteando estado");
         }
         keyboard_shortcut_blocked = false;
         shortcut_state = 0;

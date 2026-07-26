@@ -11,9 +11,11 @@ Read `README.md`, `docs/VITA_SETTINGS_GUIDE.md`, and
 bug-report form so reports include the Vita, Windows, host, GPU, network, and
 diagnostic context needed to reproduce the problem.
 
-Optional Vita file logging is off by default. Enable it only for the
-reproduction, disable it afterward, and redact private host or network values
-before posting a log.
+Optional Vita support logging is off by default. Choose **Start support log**
+only immediately before a reproduction, choose **Stop and save support log**
+afterward, and review the file before posting it. It records structured
+system, configuration, connection, decoder, motion-state, and periodic network
+events rather than every touch or input sample.
 
 ## Pull requests
 
@@ -21,7 +23,8 @@ before posting a log.
 - Do not commit build output, downloaded installers, local configuration,
   pairing data, logs, IP addresses, certificates, or credentials.
 - Preserve unrelated Sunshine applications and Windows display state.
-- Keep the Vita client usable without diagnostics or file logging enabled.
+- Keep the Vita client usable without the overlay, diagnostics screen, or
+  support logging enabled.
 - Update user documentation and the acceptance test when behavior changes.
 - Explain hardware-only validation that remains outstanding.
 

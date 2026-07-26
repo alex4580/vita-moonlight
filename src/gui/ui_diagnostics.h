@@ -155,7 +155,7 @@ void ui_diagnostics_draw_overlay(void);
 /*
  * Dedicated real-time diagnostics screen. The caller retains ownership of
  * opening/closing its parent menu and should route controller input here while
- * this screen is open. Triangle toggles the optional file log.
+ * this screen is open. Triangle starts or stops a fresh support-log capture.
  */
 bool ui_diagnostics_screen_is_open(void);
 void ui_diagnostics_screen_open(void);

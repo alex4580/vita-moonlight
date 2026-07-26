@@ -121,7 +121,7 @@ internal static class SunshineConfigurator
             {
                 throw new InvalidOperationException(
                     "Sunshine did not enumerate the Vita virtual display within 30 seconds. " +
-                    "Restart Windows if the display driver was just installed, then click Apply recommended setup.");
+                    "Restart Windows if the display driver was just installed, then open Get started and choose Set up or repair this PC.");
             }
             ConfigureNativeDisplayManagement(
                 configurationLines,

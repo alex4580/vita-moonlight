@@ -179,9 +179,13 @@ void motion_process_gyro(void) {
   }
 
   // Vita gyro values follow SDL's axes and are radians/second. Moonlight's
-  // controller motion protocol requires degrees/second.
-  float x = motion_state_sample.angularVelocity.x * RADIANS_TO_DEGREES;
-  float y = motion_state_sample.angularVelocity.y * RADIANS_TO_DEGREES;
+  // controller motion protocol requires degrees/second. In SDL coordinates,
+  // X is pitch (vertical aim) and Y is yaw (horizontal aim), matching the
+  // sensitivity mapping used by the legacy gyro-to-mouse path.
+  float x = motion_state_sample.angularVelocity.x *
+      RADIANS_TO_DEGREES * config.motion_controls_scalar_y;
+  float y = motion_state_sample.angularVelocity.y *
+      RADIANS_TO_DEGREES * config.motion_controls_scalar_x;
   float z = motion_state_sample.angularVelocity.z * RADIANS_TO_DEGREES;
   LiSendControllerMotionEvent(0, LI_MOTION_TYPE_GYRO, x, y, z);
   lock_motion_state();

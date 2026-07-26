@@ -19,6 +19,16 @@ internal sealed class HostControlPanel : Form
         ForeColor = Color.FromArgb(226, 232, 240),
         Font = new Font(FontFamily.GenericMonospace, 9.25f),
         BorderStyle = BorderStyle.None,
+        Text = "Run a health check or support action to see technical details.",
+    };
+    private readonly Label readinessSummary = new()
+    {
+        AutoSize = true,
+        MaximumSize = new Size(850, 0),
+        ForeColor = Color.FromArgb(64, 76, 98),
+        UseMnemonic = false,
+        Text = "Checking this PC…",
+        Padding = new Padding(0, 4, 0, 0),
     };
     private readonly ToolStripStatusLabel status = new("Ready");
     private readonly List<Control> actionControls = new();
@@ -27,16 +37,21 @@ internal sealed class HostControlPanel : Form
     private readonly CheckBox integrateAllApps = new()
     {
         AutoSize = true,
-        Text = "Automatically switch to the Vita display for every Sunshine application",
+        Text = "Use the Vita display with every streamed application (recommended)",
     };
     private readonly CheckBox forceSdr = new()
     {
         AutoSize = true,
         Text = "Force SDR for Vita virtual-display sessions",
     };
-    private readonly TextBox displayMatch = new() { Width = 320 };
+    private readonly TextBox displayMatch = new()
+    {
+        Width = 320,
+        PlaceholderText = "Leave blank for automatic selection",
+    };
     private readonly bool isAdministrator;
     private readonly bool isInstalledPayload;
+    private string lastTechnicalOutput = string.Empty;
 
     private HostControlPanel()
     {
@@ -55,27 +70,25 @@ internal sealed class HostControlPanel : Form
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
-            RowCount = 5,
+            RowCount = 4,
             Padding = new Padding(0),
         };
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 92));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 220));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 
         root.Controls.Add(CreateHeader(), 0, 0);
         root.Controls.Add(CreateAdministratorBanner(), 0, 1);
         root.Controls.Add(CreateTabs(), 0, 2);
-        root.Controls.Add(CreateActivityPanel(), 0, 3);
 
         var statusStrip = new StatusStrip { SizingGrip = false };
         statusStrip.Items.Add(status);
-        root.Controls.Add(statusStrip, 0, 4);
+        root.Controls.Add(statusStrip, 0, 3);
         Controls.Add(root);
 
         LoadSettings();
-        Shown += async (_, _) => await RunCommandAsync(new[] { "doctor" }, allowNonZeroExit: true);
+        Shown += async (_, _) => await RunHealthCheckAsync();
     }
 
     internal static void Run()
@@ -93,6 +106,7 @@ internal sealed class HostControlPanel : Form
             AutoSize = true,
             Font = new Font("Segoe UI Semibold", 20f),
             ForeColor = Color.White,
+            UseMnemonic = false,
             Text = "Vita Moonlight Host",
             Location = new Point(22, 12),
         };
@@ -101,7 +115,8 @@ internal sealed class HostControlPanel : Form
             AutoSize = true,
             Font = new Font("Segoe UI", 9.5f),
             ForeColor = Color.FromArgb(190, 204, 228),
-            Text = "Configure Sunshine, the Vita-native virtual display, SDR color, controllers, and recovery.",
+            UseMnemonic = false,
+            Text = "Set up, stream, and recover your Vita connection without using a terminal.",
             Location = new Point(25, 53),
         };
         panel.Controls.Add(title);
@@ -130,6 +145,7 @@ internal sealed class HostControlPanel : Form
             ForeColor = setupAvailable
                 ? Color.FromArgb(22, 101, 52)
                 : Color.FromArgb(145, 91, 0),
+            UseMnemonic = false,
             Text = !isInstalledPayload
                 ? "Portable mode is diagnostics-only. Use the installer for setup and recovery safeguards."
                 : elevated
@@ -163,36 +179,45 @@ internal sealed class HostControlPanel : Form
 
     private TabPage CreateOverviewPage()
     {
-        var page = CreatePage("Overview");
-        AddHeading(page, "Ready the PC for Vita streaming", "The recommended setup is automatic and safe to repeat after an update.");
+        var page = CreatePage("Get started");
+        AddHeading(
+            page,
+            "Set up this PC for Vita streaming",
+            "One guided repair handles first-time setup, upgrades, and most connection problems. It is safe to run again.");
 
         var actions = CreateActionRow();
-        AddCommandButton(actions, "Apply recommended setup", ButtonKind.Primary,
+        AddCommandButton(actions, "Set up or repair this PC", ButtonKind.Primary,
             async () => await ApplyConfigurationAsync(
                 restartSunshine: true,
-                repairPrerequisites: true), 220);
-        AddCommandButton(actions, "Run health check", ButtonKind.Secondary,
-            async () => { await RunCommandAsync(new[] { "doctor" }, allowNonZeroExit: true); }, 180,
+                repairPrerequisites: true), 230);
+        AddCommandButton(actions, "Check readiness", ButtonKind.Secondary,
+            RunHealthCheckAsync, 170,
             requiresAdministrator: false);
-        AddCommandButton(actions, "Restart Sunshine", ButtonKind.Secondary,
-            async () => { await RunCommandAsync(new[] { "host", "restart", "--host", "sunshine" }); }, 180,
-            "Restart Sunshine now? Any active stream will disconnect.");
         AddPageControl(page, actions);
 
+        AddPageControl(page, CreateReadinessCard());
         AddPageControl(page, CreateInfoCard(
-            "Recommended Vita profile",
-            "960 x 544  •  60 FPS  •  8 Mbps  •  H.264 SDR\n" +
-            "Choose any Sunshine application—including Steam Big Picture. The host switches to the virtual display before capture and restores your desktop afterward."));
+            "What happens next",
+            "1. Install and open the Vita VPK.\n" +
+            "2. Add this PC in Moonlight and approve the PIN in Sunshine.\n" +
+            "3. Launch Steam Big Picture, Desktop, or a game. The host switches to the Vita display for the stream and restores your physical display when the session ends."));
         AddPageControl(page, CreateInfoCard(
-            "In-stream controls",
-            "Hold START, then press L + R within one second. Pressing all three together or in another order also works; START first prevents the chord from reaching Windows. The overlay can force-close the foreground game, end the Sunshine app, or recover a failed display/host. By default, single PS stays local and double-PS is the forced escape to Vita LiveArea."));
+            "Recommended starting profile",
+            "960 × 544  •  60 FPS  •  8 Mbps  •  H.264  •  SDR\n" +
+            "This profile matches the Vita screen and is selected for dependable Wi-Fi performance. Tune quality later from the Vita settings menu."));
+        AddPageControl(page, CreateInfoCard(
+            "If a game or display gets stuck",
+            "On the Vita, hold START and then press L + R within one second to open the stream menu without sending the shortcut to the PC. Close the Windows game first; if video does not recover, choose Recover display + Sunshine. Double-press PS remains the forced return to Vita LiveArea."));
         return page;
     }
 
     private TabPage CreateStreamingPage()
     {
         var page = CreatePage("Streaming");
-        AddHeading(page, "Streaming behavior", "These settings configure Sunshine's global display lifecycle and compatibility launcher.");
+        AddHeading(
+            page,
+            "Streaming preferences",
+            "The recommended defaults work for most PCs. Change these only when you use Apollo or have more than one virtual display.");
 
         var form = new TableLayoutPanel
         {
@@ -204,8 +229,8 @@ internal sealed class HostControlPanel : Form
         form.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 210));
         form.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         hostMode.Items.AddRange(new object[] { "Sunshine", "Apollo" });
-        AddField(form, "Streaming host", hostMode);
-        AddField(form, "Virtual display match", displayMatch);
+        AddField(form, "Streaming service", hostMode);
+        AddField(form, "Preferred virtual display", displayMatch);
         var optionsRow = form.RowCount++;
         form.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         form.Controls.Add(new Label { AutoSize = true, Text = "Options", ForeColor = Ink, Padding = new Padding(0, 7, 10, 0) }, 0, optionsRow);
@@ -216,79 +241,119 @@ internal sealed class HostControlPanel : Form
         AddPageControl(page, form);
 
         var actions = CreateActionRow();
-        AddCommandButton(actions, "Save and apply", ButtonKind.Primary,
-            async () => await ApplyConfigurationAsync(restartSunshine: true), 180);
-        AddCommandButton(actions, "Save without restart", ButtonKind.Secondary,
-            async () => await ApplyConfigurationAsync(restartSunshine: false), 170);
+        AddCommandButton(actions, "Save and restart streaming", ButtonKind.Primary,
+            async () => await ApplyConfigurationAsync(restartSunshine: true), 220);
+        AddCommandButton(actions, "Save for next session", ButtonKind.Secondary,
+            async () => await ApplyConfigurationAsync(restartSunshine: false), 190);
+        AddCommandButton(actions, "Restart Sunshine now", ButtonKind.Secondary,
+            async () => { await RunCommandAsync(new[] { "host", "restart", "--host", "sunshine" }); }, 190,
+            "Restart Sunshine now? Any active stream will disconnect.");
         AddPageControl(page, actions);
         AddPageControl(page, CreateInfoCard(
-            "Why “every application” is recommended",
-            "Sunshine's native display manager covers Desktop, Steam Big Picture, and custom games, then restores the physical desktop when every client disconnects—even if Steam remains open for resume."));
+            "Recommended choices",
+            "Leave Preferred virtual display blank unless the health check finds more than one virtual monitor. Keep every-application switching and SDR enabled: they cover Desktop, Steam, and custom games, avoid washed-out HDR color, and restore the physical desktop after the last client disconnects."));
         return page;
     }
 
     private TabPage CreateDisplaysPage()
     {
-        var page = CreatePage("Displays");
-        AddHeading(page, "Virtual display and recovery", "Preview the Vita display safely, inspect Windows targets, or restore the physical desktop.");
+        var page = CreatePage("Display & recovery");
+        AddHeading(
+            page,
+            "Restore or test the Vita display",
+            "Recovery always prioritizes a working physical monitor. Testing is optional and restores the original layout automatically.");
         var actions = CreateActionRow();
-        AddCommandButton(actions, "Preview 960x544 for 15 seconds", ButtonKind.Primary,
-            async () => { await RunCommandAsync(new[] { "session", "test", "--width", "960", "--height", "544", "--fps", "60", "--seconds", "15" }); }, 250,
-            "The physical monitor may go blank for 15 seconds. The original layout will then be restored automatically.");
-        AddCommandButton(actions, "List displays", ButtonKind.Secondary,
-            async () => { await RunCommandAsync(new[] { "display", "list" }); }, 150,
-            requiresAdministrator: false);
-        AddCommandButton(actions, "Disable idle virtual display", ButtonKind.Secondary,
-            async () => { await RunCommandAsync(new[] { "display", "disable-virtual" }); }, 220,
-            "Disable only the idle Vita virtual monitor and keep the physical monitor active?");
-        AddCommandButton(actions, "Emergency display reset", ButtonKind.Warning,
+        AddCommandButton(actions, "Restore physical display now", ButtonKind.Warning,
             async () => { await RunCommandAsync(new[] { "emergency", "recover-display" }); }, 200,
-            "Disconnect active streams, activate the physical monitor, reload the virtual display driver, and restart Sunshine?");
+            "End the current stream, restore the physical monitor, reload the Vita display driver, and restart Sunshine?");
+        AddCommandButton(actions, "Turn off idle Vita display", ButtonKind.Secondary,
+            async () => { await RunCommandAsync(new[] { "display", "disable-virtual" }); }, 210,
+            "Turn off only the idle Vita virtual monitor while keeping a physical monitor active?");
         AddPageControl(page, actions);
+        AddPageControl(page, CreateInfoCard(
+            "Recovery without this window",
+            "Press Ctrl + Alt + Shift + F11 on the PC keyboard. The background rescue agent performs the same physical-display and driver recovery even when this control panel is closed."));
+
+        var testing = CreateActionRow();
+        AddCommandButton(testing, "Test Vita display for 15 seconds", ButtonKind.Primary,
+            async () => { await RunCommandAsync(new[] { "session", "test", "--width", "960", "--height", "544", "--fps", "60", "--seconds", "15" }); }, 240,
+            "Windows will test the Vita-sized display for 15 seconds, then restore the exact current physical layout.");
+        AddCommandButton(testing, "Show detected displays", ButtonKind.Secondary,
+            async () => { await RunCommandAsync(new[] { "display", "list" }); }, 190,
+            requiresAdministrator: false);
+        AddPageControl(page, testing);
 
         var maintenance = CreateActionRow();
-        AddCommandButton(maintenance, "Install/update display driver", ButtonKind.Secondary,
-            async () => { await RepairDisplayDriverAsync(); }, 220,
-            "Install or update the signed virtual display driver? Windows may briefly refresh connected displays.");
-        AddCommandButton(maintenance, "Reload display driver", ButtonKind.Secondary,
-            async () => { await RunCommandAsync(new[] { "driver", "reload" }); }, 180,
-            "Reload the virtual display driver now? Connected displays may briefly flicker.");
-        AddCommandButton(maintenance, "Session status", ButtonKind.Secondary,
-            async () => { await RunCommandAsync(new[] { "session", "status" }); }, 150,
+        AddCommandButton(maintenance, "Repair Vita display driver", ButtonKind.Secondary,
+            async () => { await RepairDisplayDriverAsync(); }, 210,
+            "Repair the signed Vita virtual-display driver? Windows may briefly refresh connected displays.");
+        AddCommandButton(maintenance, "Restart Vita display driver", ButtonKind.Secondary,
+            async () => { await RunCommandAsync(new[] { "driver", "reload" }); }, 210,
+            "Restart the Vita virtual-display driver now? Connected displays may briefly flicker.");
+        AddCommandButton(maintenance, "Show current session state", ButtonKind.Secondary,
+            async () => { await RunCommandAsync(new[] { "session", "status" }); }, 210,
             requiresAdministrator: false);
-        AddPageControl(page, maintenance);
+        AddPageControl(page, CreateSection(
+            "Advanced display maintenance",
+            "Use these only when readiness reports a driver or session problem.",
+            maintenance));
         return page;
     }
 
     private TabPage CreateSupportPage()
     {
-        var page = CreatePage("Help & recovery");
-        AddHeading(page, "Help and recovery", "Everything required for normal use is available here; a terminal is optional.");
+        var page = CreatePage("Diagnostics & support");
+        AddHeading(
+            page,
+            "Diagnostics and support",
+            "Start with a readiness check. Technical output and component-specific repairs are kept here so normal setup stays simple.");
         var actions = CreateActionRow();
-        AddCommandButton(actions, "Run diagnostics", ButtonKind.Primary,
-            async () => { await RunCommandAsync(new[] { "doctor" }, allowNonZeroExit: true); }, 170,
+        AddCommandButton(actions, "Run full health check", ButtonKind.Primary,
+            RunHealthCheckAsync, 190,
             requiresAdministrator: false);
-        AddCommandButton(actions, "Install recovery safeguard", ButtonKind.Secondary,
+        AddCommandButton(actions, "Save support report…", ButtonKind.Secondary,
+            SaveSupportReportAsync, 190,
+            requiresAdministrator: false);
+        AddCommandButton(actions, "Copy technical details", ButtonKind.Secondary,
+            CopyTechnicalDetailsAsync, 190,
+            requiresAdministrator: false);
+        AddCommandButton(actions, "Open diagnostics folder", ButtonKind.Secondary,
+            OpenDiagnosticsFolderAsync, 190,
+            requiresAdministrator: false);
+        AddPageControl(page, actions);
+        AddPageControl(page, CreateInfoCard(
+            "Safe to share?",
+            "The JSON report is created only when you ask. It contains Windows and component versions, readiness results, and sanitized display names. It omits usernames, file paths, network and MAC addresses, credentials, and continuous logs. Review it before sharing."));
+
+        var repairActions = CreateActionRow();
+        AddCommandButton(repairActions, "Repair sign-in display recovery", ButtonKind.Secondary,
             async () => { await RunCommandAsync(new[] { "recovery", "install" }); }, 210,
             "Install or repair the logon recovery task for interrupted display sessions?");
-        AddCommandButton(actions, "Install stream rescue agent", ButtonKind.Secondary,
+        AddCommandButton(repairActions, "Repair stream rescue shortcuts", ButtonKind.Secondary,
             async () => { await RunCommandAsync(new[] { "agent", "install" }); }, 210,
             "Install or repair the background hotkey agent used by the Vita overlay for game and display recovery?");
-        AddCommandButton(actions, "Repair controller support", ButtonKind.Secondary,
+        AddCommandButton(repairActions, "Repair controller support", ButtonKind.Secondary,
             async () => { await RepairGamepadAsync(); }, 210,
             "Install or repair ViGEmBus, then verify its service is running?");
-        AddCommandButton(actions, "Update/repair Sunshine", ButtonKind.Secondary,
+        AddCommandButton(repairActions, "Repair Sunshine", ButtonKind.Secondary,
             async () => { await RepairSunshineAsync(); }, 210,
             "Install or repair the packaged compatible Sunshine build? Active streams will end.");
-        AddCommandButton(actions, "Rescue agent status", ButtonKind.Secondary,
+        AddCommandButton(repairActions, "Check rescue shortcuts", ButtonKind.Secondary,
             async () => { await RunCommandAsync(new[] { "agent", "status" }, allowNonZeroExit: true); }, 180,
             requiresAdministrator: false);
-        AddDocumentButton(actions, "Open setup guide", "README.md");
-        AddDocumentButton(actions, "Open acceptance test", "END_TO_END_TEST.md");
-        AddDocumentButton(actions, "Open release checklist", "FINAL_RELEASE_CHECKLIST.md");
-        AddDocumentButton(actions, "Compatibility", "COMPATIBILITY.md");
-        AddDocumentButton(actions, "Vita settings guide", "VITA_SETTINGS_GUIDE.md");
-        AddPageControl(page, actions);
+        AddPageControl(page, CreateSection(
+            "Repair one component",
+            "The guided setup on Get started already runs these repairs in the correct order. Use an individual repair only when the health check names that component.",
+            repairActions));
+
+        var guides = CreateActionRow();
+        AddDocumentButton(guides, "Setup and usage guide", "README.md");
+        AddDocumentButton(guides, "Community beta test", Path.Combine("host", "BETA_SMOKE_TEST.md"));
+        AddDocumentButton(guides, "Logging and support guide", Path.Combine("docs", "LOGGING_AND_SUPPORT.md"));
+        AddDocumentButton(guides, "Compatibility and limits", Path.Combine("host", "COMPATIBILITY.md"));
+        AddDocumentButton(guides, "Vita settings guide", Path.Combine("docs", "VITA_SETTINGS_GUIDE.md"));
+        AddPageControl(page, guides);
+        AddPageControl(page, CreateActivityPanel());
         AddPageControl(page, CreateInfoCard(
             "Black-screen recovery",
             "From the Vita overlay, first choose Close Windows game. If video does not recover, choose Recover display + Sunshine; the stream will disconnect while Windows activates the physical monitor, reloads VDD, and restarts Sunshine. Sign out and back in only if the rescue agent cannot run."));
@@ -297,14 +362,31 @@ internal sealed class HostControlPanel : Form
 
     private Control CreateActivityPanel()
     {
+        var toggle = CreateButton(
+            "Show technical details",
+            ButtonKind.Secondary,
+            190);
+        toggle.Dock = DockStyle.Top;
+        toggle.Margin = new Padding(0, 0, 0, 6);
+        output.Visible = false;
         var group = new GroupBox
         {
-            Text = "Activity and recommendations",
-            Dock = DockStyle.Fill,
+            Text = "Technical details (advanced)",
+            Height = 70,
             Padding = new Padding(10),
-            Margin = new Padding(18, 2, 18, 8),
+            Margin = new Padding(0, 4, 0, 8),
+        };
+        toggle.Click += (_, _) =>
+        {
+            output.Visible = !output.Visible;
+            group.Height = output.Visible ? 280 : 70;
+            toggle.Text = output.Visible
+                ? "Hide technical details"
+                : "Show technical details";
         };
         group.Controls.Add(output);
+        group.Controls.Add(toggle);
+        actionControls.Add(toggle);
         return group;
     }
 
@@ -342,6 +424,7 @@ internal sealed class HostControlPanel : Form
             AutoSize = true,
             MaximumSize = new Size(850, 0),
             ForeColor = Color.FromArgb(85, 96, 115),
+            UseMnemonic = false,
             Text = description,
             Padding = new Padding(0, 2, 0, 10),
         };
@@ -350,6 +433,7 @@ internal sealed class HostControlPanel : Form
             AutoSize = true,
             Font = new Font("Segoe UI Semibold", 15f),
             ForeColor = Ink,
+            UseMnemonic = false,
             Text = title,
             Padding = new Padding(0, 0, 0, 2),
         };
@@ -396,6 +480,7 @@ internal sealed class HostControlPanel : Form
             AutoSize = true,
             MaximumSize = new Size(850, 0),
             ForeColor = Color.FromArgb(64, 76, 98),
+            UseMnemonic = false,
             Text = text,
             Padding = new Padding(0, 4, 0, 0),
         };
@@ -404,11 +489,75 @@ internal sealed class HostControlPanel : Form
             AutoSize = true,
             Font = new Font("Segoe UI Semibold", 10.5f),
             ForeColor = Ink,
+            UseMnemonic = false,
             Text = title,
         };
         card.Controls.Add(heading, 0, 0);
         card.Controls.Add(body, 0, 1);
         return card;
+    }
+
+    private Control CreateReadinessCard()
+    {
+        var card = new TableLayoutPanel
+        {
+            AutoSize = true,
+            ColumnCount = 1,
+            RowCount = 2,
+            BackColor = Color.FromArgb(241, 246, 255),
+            Padding = new Padding(14, 12, 14, 12),
+            Margin = new Padding(0, 8, 0, 0),
+        };
+        card.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        card.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        card.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        card.Controls.Add(new Label
+        {
+            AutoSize = true,
+            Font = new Font("Segoe UI Semibold", 10.5f),
+            ForeColor = Ink,
+            UseMnemonic = false,
+            Text = "PC readiness",
+        }, 0, 0);
+        card.Controls.Add(readinessSummary, 0, 1);
+        return card;
+    }
+
+    private static Control CreateSection(
+        string title,
+        string description,
+        Control content)
+    {
+        var section = new TableLayoutPanel
+        {
+            AutoSize = true,
+            ColumnCount = 1,
+            RowCount = 3,
+            BackColor = Color.FromArgb(249, 250, 252),
+            Padding = new Padding(12, 10, 12, 8),
+            Margin = new Padding(0, 4, 0, 8),
+        };
+        section.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        section.Controls.Add(new Label
+        {
+            AutoSize = true,
+            Font = new Font("Segoe UI Semibold", 11f),
+            ForeColor = Ink,
+            UseMnemonic = false,
+            Text = title,
+        }, 0, 0);
+        section.Controls.Add(new Label
+        {
+            AutoSize = true,
+            MaximumSize = new Size(850, 0),
+            ForeColor = Color.FromArgb(85, 96, 115),
+            UseMnemonic = false,
+            Text = description,
+            Padding = new Padding(0, 3, 0, 4),
+        }, 0, 1);
+        content.Margin = new Padding(0);
+        section.Controls.Add(content, 0, 2);
+        return section;
     }
 
     private static void AddField(TableLayoutPanel form, string label, Control control)
@@ -420,6 +569,7 @@ internal sealed class HostControlPanel : Form
             AutoSize = true,
             Text = label,
             ForeColor = Ink,
+            UseMnemonic = false,
             Padding = new Padding(0, 7, 10, 0),
         }, 0, row);
         control.Margin = new Padding(3, 4, 3, 7);
@@ -428,11 +578,156 @@ internal sealed class HostControlPanel : Form
 
     private void LoadSettings()
     {
-        var settings = HostSettings.Load();
+        HostSettings settings;
+        try
+        {
+            settings = HostSettings.Load();
+        }
+        catch (Exception error) when (
+            error is IOException or
+                UnauthorizedAccessException or
+                InvalidDataException or
+                System.ComponentModel.Win32Exception or
+                System.Text.Json.JsonException)
+        {
+            settings = HostSettings.Default;
+            readinessSummary.Text =
+                "Saved settings could not be read. Safe recommended values are shown; run Set up or repair this PC.";
+            readinessSummary.ForeColor = Color.FromArgb(145, 91, 0);
+            lastTechnicalOutput =
+                $"Host settings could not be read:{Environment.NewLine}{error}";
+            output.Text = lastTechnicalOutput;
+        }
         hostMode.SelectedItem = settings.HostMode.Equals("apollo", StringComparison.OrdinalIgnoreCase) ? "Apollo" : "Sunshine";
         integrateAllApps.Checked = settings.IntegrateAllSunshineApps;
         forceSdr.Checked = settings.ForceSdr;
         displayMatch.Text = settings.DisplayMatch ?? string.Empty;
+    }
+
+    private async Task RunHealthCheckAsync()
+    {
+        readinessSummary.Text = "Checking Windows, streaming, display, controller, and recovery components…";
+        readinessSummary.ForeColor = Color.FromArgb(64, 76, 98);
+        var ready = await RunCommandAsync(
+            new[] { "doctor" },
+            allowNonZeroExit: true);
+        readinessSummary.Text = ready
+            ? "Ready to stream. Required host, display, controller, and recovery checks passed."
+            : "This PC needs attention. Open Diagnostics & support for the full recommendations, then use Set up or repair this PC.";
+        readinessSummary.ForeColor = ready
+            ? Color.FromArgb(22, 101, 52)
+            : Color.FromArgb(145, 91, 0);
+    }
+
+    private async Task SaveSupportReportAsync()
+    {
+        using var dialog = new SaveFileDialog
+        {
+            AddExtension = true,
+            DefaultExt = "json",
+            Filter = "JSON support report (*.json)|*.json",
+            FileName =
+                $"Vita-Moonlight-Support-" +
+                $"{DateTime.Now:yyyyMMdd-HHmmss}.json",
+            InitialDirectory = Environment.GetFolderPath(
+                Environment.SpecialFolder.DesktopDirectory),
+            OverwritePrompt = true,
+            RestoreDirectory = true,
+            Title = "Save Vita Moonlight support report",
+        };
+        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+
+        if (await RunCommandAsync(new[]
+            {
+                "support",
+                "export",
+                "--output",
+                dialog.FileName,
+            }))
+        {
+            // The generic command runner displays its full argument list,
+            // including the user's chosen destination. Replace that output
+            // with the privacy-safe report before it can be copied as
+            // technical details.
+            try
+            {
+                lastTechnicalOutput = await File.ReadAllTextAsync(dialog.FileName);
+                output.Text = lastTechnicalOutput;
+            }
+            catch (Exception error) when (
+                error is IOException or UnauthorizedAccessException)
+            {
+                lastTechnicalOutput =
+                    "The support report was created, but the control panel could not reopen it for copying.";
+                output.Text = lastTechnicalOutput;
+            }
+            MessageBox.Show(
+                this,
+                "The support report was saved. Review the JSON file before sharing it.",
+                "Support report saved",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information);
+        }
+    }
+
+    private async Task CopyTechnicalDetailsAsync()
+    {
+        if (string.IsNullOrWhiteSpace(lastTechnicalOutput))
+        {
+            await RunHealthCheckAsync();
+        }
+        if (string.IsNullOrWhiteSpace(lastTechnicalOutput)) return;
+
+        try
+        {
+            Clipboard.SetText(lastTechnicalOutput);
+            status.Text = "Technical details copied";
+        }
+        catch (Exception error) when (
+            error is ExternalException or
+                ThreadStateException)
+        {
+            MessageBox.Show(
+                this,
+                $"Windows could not copy the details: {error.Message}",
+                "Copy technical details",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+        }
+    }
+
+    private Task OpenDiagnosticsFolderAsync()
+    {
+        var directory = HostStatePaths.DiagnosticsDirectory;
+        if (!Directory.Exists(directory))
+        {
+            MessageBox.Show(
+                this,
+                "No host rescue or recovery diagnostic files have been created. This is normal when no host-side recovery action has needed a log.",
+                "Diagnostics folder",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information);
+            return Task.CompletedTask;
+        }
+
+        try
+        {
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = directory,
+                UseShellExecute = true,
+            });
+        }
+        catch (System.ComponentModel.Win32Exception error)
+        {
+            MessageBox.Show(
+                this,
+                $"Windows could not open the diagnostics folder: {error.Message}",
+                "Diagnostics folder",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+        }
+        return Task.CompletedTask;
     }
 
     private async Task ApplyConfigurationAsync(
@@ -470,8 +765,9 @@ internal sealed class HostControlPanel : Form
         if (!await RunCommandAsync(new[] { "agent", "install" })) return;
         if (restartSunshine && selectedHost == "sunshine")
         {
-            await RunCommandAsync(new[] { "host", "restart", "--host", "sunshine" });
+            if (!await RunCommandAsync(new[] { "host", "restart", "--host", "sunshine" })) return;
         }
+        await RunHealthCheckAsync();
     }
 
     private Task<bool> RepairGamepadAsync() =>
@@ -557,7 +853,27 @@ internal sealed class HostControlPanel : Form
                 MessageBox.Show(this, $"The installed document was not found:\n{path}", text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
-            Process.Start(new ProcessStartInfo(path) { UseShellExecute = true });
+            try
+            {
+                var startInfo = new ProcessStartInfo
+                {
+                    FileName = Path.Combine(
+                        Environment.GetFolderPath(Environment.SpecialFolder.System),
+                        "notepad.exe"),
+                    UseShellExecute = false,
+                };
+                startInfo.ArgumentList.Add(path);
+                Process.Start(startInfo);
+            }
+            catch (System.ComponentModel.Win32Exception error)
+            {
+                MessageBox.Show(
+                    this,
+                    $"Windows could not open this guide: {error.Message}",
+                    text,
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+            }
         };
         actionControls.Add(button);
         parent.Controls.Add(button);
@@ -587,7 +903,7 @@ internal sealed class HostControlPanel : Form
 
     private async Task<bool> RunCommandAsync(string[] arguments, bool allowNonZeroExit = false)
     {
-        SetBusy(true, $"Running: {string.Join(' ', arguments)}");
+        SetBusy(true, DescribeCommand(arguments));
         try
         {
             var executable = Environment.ProcessPath
@@ -612,13 +928,14 @@ internal sealed class HostControlPanel : Form
                 Environment.NewLine,
                 new[] { await standardOutput, await standardError }.Where(value => !string.IsNullOrWhiteSpace(value)));
             output.Text = $"> VitaMoonlight.Host.exe {string.Join(' ', arguments)}{Environment.NewLine}{Environment.NewLine}{combined}";
+            lastTechnicalOutput = output.Text;
             if (process.ExitCode == RestartRequiredExitCode)
             {
                 status.Text = "Windows restart required";
                 MessageBox.Show(
                     this,
                     string.IsNullOrWhiteSpace(combined)
-                        ? "Restart Windows, then click Apply recommended setup again."
+                        ? "Restart Windows, then open Get started and choose Set up or repair this PC again."
                         : combined,
                     "Restart required",
                     MessageBoxButtons.OK,
@@ -626,25 +943,65 @@ internal sealed class HostControlPanel : Form
                 return false;
             }
             var accepted = process.ExitCode == 0 || allowNonZeroExit;
-            status.Text = process.ExitCode == 0 ? "Completed successfully" : "Check completed — review the recommendation";
+            status.Text = process.ExitCode == 0
+                ? "Completed successfully"
+                : "Check completed — review the support page";
             if (!accepted)
             {
-                status.Text = $"Action failed with exit code {process.ExitCode}";
-                MessageBox.Show(this, combined, "Vita Moonlight action failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                status.Text = "Action needs attention";
+                MessageBox.Show(
+                    this,
+                    string.IsNullOrWhiteSpace(combined)
+                        ? "Windows could not complete this action. Open Diagnostics & support for technical details."
+                        : combined,
+                    "Vita Moonlight needs attention",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
             }
             return process.ExitCode == 0;
         }
         catch (Exception error)
         {
             output.Text = error.ToString();
+            lastTechnicalOutput = output.Text;
             status.Text = "Action failed";
-            MessageBox.Show(this, error.Message, "Vita Moonlight action failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            MessageBox.Show(this, error.Message, "Vita Moonlight needs attention", MessageBoxButtons.OK, MessageBoxIcon.Error);
             return false;
         }
         finally
         {
             SetBusy(false, status.Text ?? "Ready");
         }
+    }
+
+    private static string DescribeCommand(IReadOnlyList<string> arguments)
+    {
+        if (arguments.Count == 0) return "Working…";
+        var command = string.Join(
+            " ",
+            arguments.Take(Math.Min(arguments.Count, 2)))
+            .ToLowerInvariant();
+        return command switch
+        {
+            "doctor" => "Checking PC readiness…",
+            "configure --host" => "Saving streaming preferences…",
+            "host restart" => "Restarting Sunshine…",
+            "host ensure-compatible" => "Repairing Sunshine…",
+            "gamepad ensure-compatible" => "Repairing controller support…",
+            "runtime ensure-compatible" => "Checking the display runtime…",
+            "driver install" => "Repairing the Vita display driver…",
+            "driver reload" => "Restarting the Vita display driver…",
+            "display list" => "Detecting Windows displays…",
+            "display disable-virtual" => "Turning off the idle Vita display…",
+            "session test" => "Testing the Vita display safely…",
+            "session status" => "Checking the current display session…",
+            "recovery install" => "Repairing sign-in display recovery…",
+            "agent install" => "Repairing rescue shortcuts…",
+            "agent status" => "Checking rescue shortcuts…",
+            "emergency recover-display" => "Restoring the physical display…",
+            "support export" => "Creating the support report…",
+            _ => "Working…",
+        };
     }
 
     private void SetBusy(bool busy, string message)

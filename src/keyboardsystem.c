@@ -12,7 +12,6 @@
 #include "Limelight.h" // Asegúrate de que la ruta sea correcta según tu proyecto
 #include "input/keyboardkeys.h"
 #include "config.h"
-#include "../src/debug.h"
 
 #define WORK_BUFFER_SIZE (SCE_IME_WORK_BUFFER_SIZE)
 
@@ -93,7 +92,6 @@ static void keyboardsystem_ime_event_handler(void *arg, const SceImeEventData *e
             }
         }
         if (ch == 0) {
-            vita_debug_log("[IME MOONLIGHT] Primer evento de borrado tras abrir teclado ignorado (ch==0).");
             ime_just_opened = 0;
             // Limpiar buffer/caret
             SceWChar16 dummy[4] = {1, 1, 1, 0};
@@ -176,7 +174,6 @@ static void keyboardsystem_ime_event_handler(void *arg, const SceImeEventData *e
     }
     // --- CERRAR IME (Minimizar/cancelar) ---
     if (e->id == 4) {
-        vita_debug_log("[IME MOONLIGHT] Cerrar IME (id=4, caretIndex=%d)", caret);
         sceImeClose();
         return;
     }
@@ -210,7 +207,6 @@ void keyboardsystem_open_keyboard(void) {
 
     // Asegura que el layout global esté sincronizado con la config antes de abrir el IME
     keyboardsystem_set_layout((KeyboardLayout)config.keyboard_layout);
-    vita_debug_log("[IME MOONLIGHT] keyboard opened");
     // Inicializar buffer y caret IME robustos para movimiento infinito
     ime_working_buffer[0] = 1;
     ime_working_buffer[1] = 1;
@@ -261,7 +257,6 @@ void keyboardsystem_open_keyboard(void) {
     // 4) Abrir el teclado en pantalla
     int res = sceImeOpen(&param);
     if (res < 0) {
-        vita_debug_log("[IME MOONLIGHT] keyboard open failed: 0x%08X", res);
         keyboard_flag_store(&keyboard_overlay_open, false);
         return;
     }
@@ -288,7 +283,6 @@ void keyboardsystem_open_keyboard(void) {
         }
         int status = sceImeUpdate();
         if (status < 0) {
-            vita_debug_log("[IME MOONLIGHT] keyboard closed");
             break;
         }
         sceKernelDelayThread(1000); // Esperar 1 ms

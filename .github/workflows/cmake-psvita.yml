@@ -30,6 +30,9 @@ jobs:
       - name: Verify release version consistency
         run: python3 tools/check-version-consistency.py
 
+      - name: Test privacy-safe support-log summarizer
+        run: python3 tools/summarize-vita-log.py --self-test
+
       - name: Set up dependencies
         run: |
           sudo apt-get update

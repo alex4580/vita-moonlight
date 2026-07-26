@@ -25,12 +25,22 @@
 * Added the `emergency reset-display-driver` recovery alias and packaged the
   beta smoke-test, build/fork, and signed-release guides with both Windows
   distributions.
-* Reduced optional Vita logging overhead without lowering stream quality:
-  touch MOVE and per-keystroke payload records are omitted, writes flush in
-  batches and at disconnect, and displayed FPS is normalized to elapsed time.
+* Replaced input-by-input diagnostics with an optional, privacy-safe support
+  log. Each capture starts a fresh structured session, keeps one previous
+  capture, records concise system/connection/decoder/network summaries, and
+  can be converted into a shareable report with the bundled summarizer.
 * Added structured public issue and pull-request templates plus signed GitHub
   provenance attestations for the VPK, Windows packages, and checksum
   manifest.
+* Reorganized the Vita settings and Windows control panel around ordinary
+  setup, streaming, controller, touch, recovery, and support tasks instead of
+  developer diagnostics.
+* Rewrote the quick start, minimum beta test, full end-to-end test, logging
+  guide, and community report template for clean installs, in-place upgrades,
+  same-version repairs, and both shared-component uninstall choices.
+* Made the Windows installer lifecycle-aware, added a reviewable one-click host
+  support report, and packaged the matching user, testing, logging, build, and
+  release documentation with both Windows distributions.
 
 ## 0.14.5
 

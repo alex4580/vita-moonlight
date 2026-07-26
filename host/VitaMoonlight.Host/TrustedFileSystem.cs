@@ -217,7 +217,7 @@ internal static class TrustedFileSystem
                 throw new InvalidOperationException(
                     $"The fixed path {fullPath} changed while its protected " +
                     "replacement was being installed. Restart Windows, then " +
-                    "run Install/update display driver again.",
+                    "open Display & recovery and choose Repair Vita display driver again.",
                     error);
             }
             finally

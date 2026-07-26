@@ -34,7 +34,6 @@
 
 #include "../connection.h"
 #include "../config.h"
-#include "../debug.h"
 #include "psp2/kernel/threadmgr/thread.h"
 #include "psp2common/types.h"
 #include "vita.h"
@@ -452,9 +451,6 @@ float QuatLength(SceFQuaternion v1, SceFQuaternion v2) {
 }
 
 inline void check_for_double_click(input_data *curr) {
-//can uncomment this if I ever need to debug this
-//#define DOUBLETAP_DEBUG
-
   uint64_t current_time = sceKernelGetSystemTimeWide();
   uint32_t doubleclick_step_time = 0;
   if (config.double_tap_sprint_step_time) {
@@ -463,50 +459,25 @@ inline void check_for_double_click(input_data *curr) {
 
 //Condition 1: Y is maximum
   if (curr->ly < Y_MAXIMIUM_DEADZONE && !dc_tracker.y_max_once && !dc_tracker.currently_sprinting) {
-    #ifdef DOUBLETAP_DEBUG
-    vita_debug_log("Condition one triggered, current Y: %d", curr.ly);
-    #endif
     dc_tracker.y_max_once = true;  
     dc_tracker.y_max_once_time = current_time;
-    #ifdef DOUBLETAP_DEBUG
-    vita_debug_log("Stamping y_max_once_time at: %llu", dc_tracker.y_max_once_time);
-    #endif
   }
 
   //Condition 2: Y is minimum and less than doubleclicksteptime ms has passed
   if (dc_tracker.y_max_once && curr->ly > Y_MINIMUM_DEADZONE && !dc_tracker.returned_to_center && !dc_tracker.currently_sprinting) {
-    #ifdef DOUBLETAP_DEBUG
-    vita_debug_log("Condition two triggered, current Y: %d", curr.ly);
-    #endif
     if ((current_time - dc_tracker.y_max_once_time) < doubleclick_step_time) {
-      #ifdef DOUBLETAP_DEBUG
-      vita_debug_log("Condition two: Y max once was less than step time, delta: %llu", current_time-dc_tracker.y_max_once_time);
-      #endif
       dc_tracker.returned_to_center = true;
       dc_tracker.returned_to_center_time = current_time;
-      #ifdef DOUBLETAP_DEBUG
-      vita_debug_log("Condition two: Stamping returned_to_center_time at: %llu", dc_tracker.returned_to_center_time);
-      #endif
     } else {
-      #ifdef DOUBLETAP_DEBUG
-      vita_debug_log("Condition two: Y Max once was more than step time, delta: %llu", current_time-dc_tracker.y_max_once_time);
-      #endif
       dc_tracker.y_max_once = false;
     }
   }
 
   //Condition 3: Y is maximium and condition 2 passed
   if (dc_tracker.returned_to_center && curr->ly < Y_MAXIMIUM_DEADZONE && !dc_tracker.currently_sprinting) {
-    #ifdef DOUBLETAP_DEBUG
-    vita_debug_log("Condition three triggered, current Y: %d", curr.ly);
-    #endif
     dc_tracker.y_max_once = false;
     dc_tracker.returned_to_center = false;
     if ((current_time - dc_tracker.returned_to_center_time) < doubleclick_step_time) {
-      #ifdef DOUBLETAP_DEBUG
-      vita_debug_log("Condition three: return to center was less than step time, delta: %llu", current_time - dc_tracker.returned_to_center_time);
-      vita_debug_log("Should be sprinting");
-      #endif
       dc_tracker.currently_sprinting = true;
     }
   }
@@ -525,10 +496,6 @@ inline void check_for_double_click(input_data *curr) {
         dc_tracker.sprinting_returned_center = false;
       }
     }
-    //Mark that we've returned to center
-    #ifdef DOUBLETAP_DEBUG
-    vita_debug_log("We stopped sprinting");
-    #endif
     dc_tracker.currently_sprinting = false;
 
   } else {
@@ -976,10 +943,8 @@ inline void vitainput_process(void) {
     curr.lx = 128; curr.ly = 128; curr.rx = 128; curr.ry = 128;
     curr.lt = 0;
     curr.rt = 0;
-    vita_debug_log("[VITA.C] Overlay activo: ABRIR teclado, input bloqueado (sticks centrados, sin enviar frame vacío)");
     keyboard_overlay_active = true;
   } else if (!keyboard_now && keyboard_overlay_active) {
-    vita_debug_log("[VITA.C] Teclado virtual CERRADO: restaurando snapshot (sin enviar frame vacío)");
     memcpy(&pad, &pad_snapshot, sizeof(SceCtrlData));
     memcpy(&curr, &curr_snapshot, sizeof(input_data));
     keyboard_overlay_active = false;

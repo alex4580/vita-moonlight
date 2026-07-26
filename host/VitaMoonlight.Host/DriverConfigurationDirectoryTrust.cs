@@ -247,7 +247,7 @@ internal static class DriverConfigurationDirectoryTrust
 
     private static InvalidOperationException RepairRequired(string reason) =>
         new(
-            $"{reason} Run Install/update display driver as Administrator. " +
+            $"{reason} Open Display & recovery and choose Repair Vita display driver as Administrator. " +
             "The repair action safely detaches an older directory without " +
             "reading it and creates a new protected configuration directory. " +
             "If Windows reports a sharing violation, restart Windows and " +

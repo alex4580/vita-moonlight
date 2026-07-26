@@ -43,6 +43,7 @@ internal static class Program
                 "recovery" => RecoveryCommand(remaining),
                 "agent" => AgentCommand(remaining),
                 "emergency" => EmergencyCommand(remaining),
+                "support" => SupportCommand(remaining),
                 "uninstall" => UninstallCommand(remaining),
                 "self-test" => RunSelfTest(),
                 "help" or "--help" or "-h" => PrintHelp(),
@@ -150,7 +151,7 @@ internal static class Program
             {
                 throw new InvalidOperationException(
                     "The signed virtual display driver is not installed. " +
-                    "Click Apply recommended setup or Install/update display driver first.");
+                    "Open Get started and choose Set up or repair this PC first.");
             }
 
             var modesChanged = wizard.EnsureVitaCompatibilityModes();
@@ -423,7 +424,7 @@ internal static class Program
         if (!DriverNativeModeVerification.IsCurrent(out var verification))
         {
             message =
-                $"Virtual display driver: installed, but {verification}. Run Install/update display driver.";
+                $"Virtual display driver: installed, but {verification}. Open Display & recovery and choose Repair Vita display driver.";
             return false;
         }
         try
@@ -657,7 +658,7 @@ internal static class Program
             Console.WriteLine($"Administrator: {Status(report.IsAdministrator, report.IsAdministrator ? "yes" : "no (required for setup)")}");
             Console.WriteLine($"Host mode:     {report.HostMode}");
             Console.WriteLine($"App coverage:  {(report.IntegrateAllSunshineApps ? "every Sunshine app" : "Vita Moonlight app only")}");
-            Console.WriteLine($"Display lifecycle: {Status(report.NativeDisplayLifecycleReady, report.NativeDisplayLifecycleReady ? "native disconnect recovery enabled" : "reapply recommended setup")}");
+            Console.WriteLine($"Display lifecycle: {Status(report.NativeDisplayLifecycleReady, report.NativeDisplayLifecycleReady ? "native disconnect recovery enabled" : "run Set up or repair this PC")}");
             Console.WriteLine($"Color mode:    {(report.ForceSdr ? "force SDR for Vita sessions" : "leave Windows color mode unchanged")}");
             Console.WriteLine($"Sunshine:      {Status(report.SunshinePath is not null, report.SunshinePath ?? "not found")}");
             Console.WriteLine($"Sunshine version: {Status(
@@ -724,6 +725,31 @@ internal static class Program
             Console.WriteLine($"Gamepad:    {profile.SunshineGamepadMode}");
             Console.WriteLine($"Motion:     {profile.SunshineMotionAsDs4}");
         }
+        return ExitSuccess;
+    }
+
+    private static int SupportCommand(string[] args)
+    {
+        EnsureWindows();
+        var action = args.FirstOrDefault()?.ToLowerInvariant() ?? "export";
+        if (action != "export")
+        {
+            throw new ArgumentException("Support action must be `export`.");
+        }
+
+        var output = GetOption(args, "--output");
+        if (string.IsNullOrWhiteSpace(output))
+        {
+            var desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+            output = Path.Combine(
+                string.IsNullOrWhiteSpace(desktop) ? Environment.CurrentDirectory : desktop,
+                SupportReportExporter.DefaultFileName());
+        }
+
+        var reportPath = SupportReportExporter.Export(output);
+        Console.WriteLine($"Support report saved: {reportPath}");
+        Console.WriteLine(
+            "The report omits usernames, filesystem paths, network addresses, MAC addresses, and credentials.");
         return ExitSuccess;
     }
 
@@ -1317,6 +1343,63 @@ internal static class Program
         Require(HostRecoveryActions.IsProtectedProcessName("StartMenuExperienceHost"), "Windows Start menu protection failed.");
         Require(HostRecoveryActions.IsProtectedProcessName("Sunshine"), "Sunshine process protection failed.");
         Require(!HostRecoveryActions.IsProtectedProcessName("DOOMEternalx64vk"), "Game process was incorrectly protected.");
+        var supportDiagnostics = new HostDiagnosticReport(
+            IsWindows: true,
+            OperatingSystem: "Test Windows",
+            Architecture: "x64; Client",
+            IsSupportedPlatform: true,
+            IsAdministrator: false,
+            HostMode: @"C:\Users\PrivateName\malformed-host-mode",
+            SunshinePath: @"C:\Users\PrivateName\Sunshine\sunshine.exe",
+            SunshineVersion: "1.2.3",
+            SunshineVersionSupported: true,
+            ApolloPath: null,
+            ViGEmBusInstalled: true,
+            ViGEmBusRunning: true,
+            SunshineNeedsRestart: false,
+            DisplayWizardPath: @"C:\Private\Bundle\DisplayWizard.exe",
+            VisualCppRuntimeVersion: "14.44",
+            VisualCppRuntimeSupported: true,
+            VirtualDisplayDriverInstalled: true,
+            VirtualDisplayModesReady: true,
+            RecoveryPending: false,
+            RecoveryTaskInstalled: true,
+            RescueAgentInstalled: true,
+            RescueAgentRunning: true,
+            ModeHotkeys: Array.Empty<HostModeHotkeyStatus>(),
+            IntegrateAllSunshineApps: true,
+            ForceSdr: true,
+            NativeDisplayLifecycleReady: true,
+            Recommendation: "Ready");
+        var supportReport = SupportReportExporter.Create(
+            supportDiagnostics,
+            new[]
+            {
+                new SupportDisplayReport(
+                    1,
+                    @"\\?\DISPLAY#PrivateName#1",
+                    true,
+                    true,
+                    true,
+                    false,
+                    WindowsDisplayNative.OutputTechnologyIndirectWired),
+            },
+            null,
+            installedPackage: true,
+            hostVersion: "0.0-test");
+        var supportJson = SupportReportExporter.Serialize(supportReport);
+        Require(
+            supportReport.SchemaVersion == SupportReportExporter.CurrentSchemaVersion &&
+            supportReport.SunshineInstalled &&
+            supportReport.HostMode == "unknown" &&
+            supportReport.Displays.Count == 1 &&
+            supportReport.Displays[0].Name == "Vita virtual display",
+            "Support report schema or component projection failed.");
+        Require(
+            !supportJson.Contains("PrivateName", StringComparison.Ordinal) &&
+            !supportJson.Contains(@"C:\Private", StringComparison.Ordinal) &&
+            !supportJson.Contains("sunshine.exe", StringComparison.OrdinalIgnoreCase),
+            "Support report exposed a private component path.");
 
         Console.WriteLine("Host companion self-test passed.");
         return ExitSuccess;
@@ -1344,6 +1427,7 @@ internal static class Program
         Console.WriteLine("VitaMoonlight.Host recovery install|uninstall|status");
         Console.WriteLine("VitaMoonlight.Host agent run [--background]|install|uninstall|status");
         Console.WriteLine("VitaMoonlight.Host emergency close-foreground|recover-display|reset-display-driver");
+        Console.WriteLine("VitaMoonlight.Host support export [--output PATH]");
         Console.WriteLine("VitaMoonlight.Host uninstall prepare|cleanup-integration");
         Console.WriteLine("VitaMoonlight.Host self-test");
         return ExitSuccess;
@@ -1612,7 +1696,7 @@ internal static class HostDiagnostics
             : !supportedPlatform
                 ? platform.RequirementMessage
             : recoveryPending
-                ? "An earlier session did not restore its display topology. Run `session recover` before streaming."
+                ? "An earlier session did not restore its display layout. Open Display & recovery and choose Restore physical display now before streaming."
                 : settings.HostMode == "apollo" && apollo is null
                     ? "Install Apollo or configure Sunshine mode, then run this check again."
                     : settings.HostMode == "sunshine" && sunshine is null
@@ -1620,28 +1704,28 @@ internal static class HostDiagnostics
                         : settings.HostMode == "sunshine" && !sunshineCompatibility.IsSupported
                             ? $"Update Sunshine to {SunshineCompatibility.MinimumVersionText} or newer with the Vita Moonlight host installer."
                     : settings.HostMode == "sunshine" && !visualCppRuntime.IsSupported
-                        ? $"Install Microsoft Visual C++ runtime {VisualCppRuntimeCompatibility.MinimumVersionText} or newer by clicking Apply recommended setup."
+                        ? $"Microsoft Visual C++ runtime {VisualCppRuntimeCompatibility.MinimumVersionText} or newer is required. Open Get started and choose Set up or repair this PC."
                     : !vigem
-                        ? "Install ViGEmBus from the host's troubleshooting page, reboot, and run this check again."
+                        ? "Controller support is missing. Open Get started and choose Set up or repair this PC, then restart Windows if requested."
                         : !vigemRunning
-                            ? "ViGEmBus is installed but is not running. Reboot Windows; if it remains stopped, repair the ViGEmBus installation."
+                                ? "Controller support is installed but is not running. Restart Windows; if it remains stopped, open Diagnostics & support and choose Repair controller support."
                             : sunshineNeedsRestart
-                                ? "ViGEmBus is running, but Sunshine started before it was available. Click Restart Sunshine in the control panel."
+                                    ? "Controller support is ready, but Sunshine started before it. Open Get started and choose Set up or repair this PC to restart Sunshine safely."
                         : !nativeDisplayLifecycleReady
-                            ? "Sunshine is not configured to restore displays when the Vita disconnects. Click Apply recommended setup."
+                            ? "Sunshine is not configured to restore displays when the Vita disconnects. Open Get started and choose Set up or repair this PC."
                         : settings.HostMode == "sunshine" && displayWizard is null
                             ? "Reinstall the host companion's signed display-driver bundle or switch to Apollo."
                             : settings.HostMode == "sunshine" && !virtualDisplay
                                 ? "Install the signed virtual display driver, reboot if requested, and run this check again."
                                 : settings.HostMode == "sunshine" && !virtualDisplayModesReady
-                                    ? "The virtual display modes are missing or native 960x544 has not been verified. Click Install/update display driver, then Apply recommended setup."
+                                    ? "The Vita display modes are missing or native 960x544 is not verified. Open Display & recovery, repair the Vita display driver, then run Set up or repair this PC."
                                 : !recoveryTaskInstalled
-                                    ? "The host is ready, but automatic logon recovery is not installed. In the Administrator control panel, click Install recovery safeguard."
+                                    ? "Automatic sign-in recovery is not installed. Open the control panel as Administrator, then run Set up or repair this PC."
                                 : !rescueAgentInstalled || !rescueAgentRunning
-                                    ? "Install or repair the stream rescue agent from Help & recovery so the Vita can close a hung game or recover the host display."
+                                    ? "Stream recovery shortcuts are not ready. Open Get started and choose Set up or repair this PC."
                                 : !modeHotkeysReady
-                                    ? "One or more display-mode rescue hotkeys are unavailable. Close software using Ctrl+Alt+Shift+F8/F9/F10, then repair the stream rescue agent."
-                                : "The host is ready. Click Apply recommended setup after an install or update, then launch any Sunshine application from the Vita.";
+                                    ? "One or more display-mode shortcuts are unavailable. Close software using Ctrl+Alt+Shift+F8/F9/F10, then open Diagnostics & support and repair stream rescue shortcuts."
+                                : "This PC is ready. Install the matching Vita VPK, pair with Sunshine, and launch Steam Big Picture, Desktop, or a game.";
 
         return new HostDiagnosticReport(
             isWindows,

@@ -16,6 +16,7 @@
 
 #define DIAGNOSTICS_OVERLAY_ALPHA 128
 #define DIAGNOSTICS_SAMPLE_US 1000000ULL
+#define DIAGNOSTICS_LOG_INTERVAL_US 10000000ULL
 
 enum UiDiagnosticsConsumer {
   UI_DIAGNOSTICS_CONSUMER_OVERLAY = 1U << 0,
@@ -51,6 +52,16 @@ typedef struct UiDiagnosticsMetrics {
   uint32_t last_failed_fec_packets;
   uint32_t last_out_of_sequence_packets;
   UiDiagnosticsNetworkState network_state;
+  uint64_t last_log_summary_us;
+  uint64_t log_video_bytes;
+  uint64_t log_decode_us;
+  uint32_t log_frames;
+  uint32_t log_presented_frames;
+  uint32_t log_dropped_frames;
+  uint32_t log_max_decode_us;
+  uint32_t log_recovered_packets;
+  uint32_t log_failed_fec_packets;
+  uint32_t log_out_of_sequence_packets;
 } UiDiagnosticsMetrics;
 
 static UiDiagnosticsMetrics metrics;
@@ -91,6 +102,17 @@ static const char *network_state_name(UiDiagnosticsNetworkState state) {
   }
 }
 
+static const char *network_state_token(UiDiagnosticsNetworkState state) {
+  switch (state) {
+    case UI_DIAGNOSTICS_NETWORK_GOOD:
+      return "good";
+    case UI_DIAGNOSTICS_NETWORK_DEGRADED:
+      return "degraded";
+    default:
+      return "waiting";
+  }
+}
+
 static void clear_sampling_locked(void) {
   metrics.window_started_us = 0;
   metrics.window_video_bytes = 0;
@@ -115,6 +137,15 @@ static void clear_sampling_locked(void) {
   metrics.last_failed_fec_packets = 0;
   metrics.last_out_of_sequence_packets = 0;
   metrics.sample_consumer_generation = 0;
+  metrics.log_video_bytes = 0;
+  metrics.log_decode_us = 0;
+  metrics.log_frames = 0;
+  metrics.log_presented_frames = 0;
+  metrics.log_dropped_frames = 0;
+  metrics.log_max_decode_us = 0;
+  metrics.log_recovered_packets = 0;
+  metrics.log_failed_fec_packets = 0;
+  metrics.log_out_of_sequence_packets = 0;
 }
 
 static void set_metrics_consumer(uint32_t consumer, bool enabled) {
@@ -203,6 +234,9 @@ static void finish_sample(uint64_t now_us) {
   }
 
   const RTP_VIDEO_STATS *video_stats = LiGetRTPVideoStats();
+  metrics.sampled_recovered_packets = 0;
+  metrics.sampled_failed_fec_packets = 0;
+  metrics.sampled_out_of_sequence_packets = 0;
   if (video_stats) {
     metrics.sampled_recovered_packets =
         video_stats->packetCountFecRecovered - metrics.last_recovered_packets;
@@ -215,32 +249,93 @@ static void finish_sample(uint64_t now_us) {
     metrics.last_out_of_sequence_packets = video_stats->packetCountOOS;
   }
 
-  if (vita_debug_is_logging_enabled()) {
-    int active_fps = metrics.active_stream_valid
-        ? metrics.active_settings.stream_fps
-        : config.stream.fps;
-    int active_bitrate = metrics.active_stream_valid
-        ? metrics.active_settings.stream_bitrate_kbps
-        : config.stream.bitrate;
-    vita_debug_log(
-        "[PERF] fps=%u/%d video=%u kbps configured=%d kbps "
-        "frames=%u dropped=%u decode_avg=%u us decode_max=%u us "
-        "network=%s rtt=%u ms variance=%u ms fec_recovered=%u "
-        "fec_failed=%u out_of_sequence=%u",
-        metrics.sampled_frames,
-        active_fps,
-        metrics.measured_video_kbps,
-        active_bitrate,
-        metrics.window_frames,
-        metrics.sampled_dropped_frames,
-        metrics.average_decode_us,
-        metrics.maximum_decode_us,
-        network_state_name(metrics.network_state),
-        metrics.estimated_rtt_ms,
-        metrics.estimated_rtt_variance_ms,
-        metrics.sampled_recovered_packets,
-        metrics.sampled_failed_fec_packets,
-        metrics.sampled_out_of_sequence_packets);
+  if (vita_debug_is_logging_enabled() &&
+      metrics.last_log_summary_us != 0) {
+    metrics.log_video_bytes += metrics.window_video_bytes;
+    metrics.log_decode_us += metrics.window_decode_us;
+    metrics.log_frames += metrics.window_frames;
+    metrics.log_presented_frames += metrics.window_presented_frames;
+    metrics.log_dropped_frames += metrics.window_dropped_frames;
+    if (metrics.window_max_decode_us > metrics.log_max_decode_us) {
+      metrics.log_max_decode_us = metrics.window_max_decode_us;
+    }
+    metrics.log_recovered_packets += metrics.sampled_recovered_packets;
+    metrics.log_failed_fec_packets += metrics.sampled_failed_fec_packets;
+    metrics.log_out_of_sequence_packets +=
+        metrics.sampled_out_of_sequence_packets;
+
+    uint64_t log_elapsed_us = now_us - metrics.last_log_summary_us;
+    if (log_elapsed_us >= DIAGNOSTICS_LOG_INTERVAL_US) {
+      int active_fps = metrics.active_stream_valid
+          ? metrics.active_settings.stream_fps
+          : config.stream.fps;
+      int active_bitrate = metrics.active_stream_valid
+          ? metrics.active_settings.stream_bitrate_kbps
+          : config.stream.bitrate;
+      uint32_t log_rendered_fps = log_elapsed_us == 0
+          ? 0
+          : (uint32_t)(
+              (metrics.log_presented_frames * 1000000ULL +
+               log_elapsed_us / 2) /
+              log_elapsed_us);
+      uint32_t log_dropped_fps = log_elapsed_us == 0
+          ? 0
+          : (uint32_t)(
+              (metrics.log_dropped_frames * 1000000ULL +
+               log_elapsed_us / 2) /
+              log_elapsed_us);
+      uint32_t log_video_kbps = log_elapsed_us == 0
+          ? 0
+          : (uint32_t)(
+              (metrics.log_video_bytes * 8000ULL) / log_elapsed_us);
+      uint32_t log_average_decode_us = metrics.log_frames == 0
+          ? 0
+          : (uint32_t)(
+              metrics.log_decode_us / metrics.log_frames);
+      VitaDebugLevel level =
+          metrics.network_state == UI_DIAGNOSTICS_NETWORK_DEGRADED ||
+                  metrics.log_dropped_frames > 0 ||
+                  metrics.log_failed_fec_packets > 0
+              ? VITA_DEBUG_LEVEL_WARNING
+              : VITA_DEBUG_LEVEL_INFO;
+      vita_debug_event(
+          level, "network.summary",
+          "sample_ms=%llu state=%s rendered_fps=%u target_fps=%d "
+          "video_kbps=%u configured_kbps=%d decoded_frames=%u "
+          "dropped_frames=%u dropped_fps=%u decode_avg_us=%u "
+          "decode_max_us=%u "
+          "rtt_ms=%u rtt_variance_ms=%u fec_recovered=%u "
+          "fec_failed=%u out_of_sequence=%u total_frames=%u "
+          "total_dropped=%u",
+          (unsigned long long)(log_elapsed_us / 1000ULL),
+          network_state_token(metrics.network_state),
+          log_rendered_fps,
+          active_fps,
+          log_video_kbps,
+          active_bitrate,
+          metrics.log_frames,
+          metrics.log_dropped_frames,
+          log_dropped_fps,
+          log_average_decode_us,
+          metrics.log_max_decode_us,
+          metrics.estimated_rtt_ms,
+          metrics.estimated_rtt_variance_ms,
+          metrics.log_recovered_packets,
+          metrics.log_failed_fec_packets,
+          metrics.log_out_of_sequence_packets,
+          metrics.total_video_frames,
+          metrics.total_dropped_frames);
+      metrics.last_log_summary_us = now_us;
+      metrics.log_video_bytes = 0;
+      metrics.log_decode_us = 0;
+      metrics.log_frames = 0;
+      metrics.log_presented_frames = 0;
+      metrics.log_dropped_frames = 0;
+      metrics.log_max_decode_us = 0;
+      metrics.log_recovered_packets = 0;
+      metrics.log_failed_fec_packets = 0;
+      metrics.log_out_of_sequence_packets = 0;
+    }
   }
 
   metrics.window_started_us = now_us;
@@ -286,6 +381,9 @@ void ui_diagnostics_reset_session(void) {
   UiDiagnosticsNetworkState state = metrics.network_state;
   memset(&metrics, 0, sizeof(metrics));
   metrics.network_state = state;
+  if (vita_debug_is_logging_enabled()) {
+    metrics.last_log_summary_us = sceKernelGetSystemTimeWide();
+  }
   pthread_mutex_unlock(&metrics_mutex);
 }
 
@@ -348,6 +446,22 @@ void ui_diagnostics_set_active_stream(
   metrics.active_settings = *settings;
   metrics.active_stream_valid = true;
   pthread_mutex_unlock(&metrics_mutex);
+  vita_debug_event(
+      VITA_DEBUG_LEVEL_INFO, "stream.snapshot",
+      "state=connected source=negotiated width=%d height=%d fps=%d "
+      "bitrate_kbps=%d packet_size=%d "
+      "video_formats=0x%x audio_config=0x%x controller=%s "
+      "motion=%d frame_pacer=%d vblank_wait=%d scaling=%s",
+      settings->stream_width, settings->stream_height,
+      settings->stream_fps, settings->stream_bitrate_kbps,
+      settings->packet_size,
+      (unsigned int)settings->supported_video_formats,
+      (unsigned int)settings->audio_configuration,
+      settings->controller_type == 2 ? "dualshock4" : "xbox",
+      settings->motion_enabled ? 1 : 0,
+      settings->frame_pacer ? 1 : 0,
+      settings->vblank_wait ? 1 : 0,
+      settings->crop_to_fill ? "crop_fill" : "fit");
 }
 
 UiDiagnosticsOverlayMode ui_diagnostics_get_overlay_mode(void) {
@@ -398,12 +512,49 @@ void ui_diagnostics_set_network_state(UiDiagnosticsNetworkState state) {
     state = UI_DIAGNOSTICS_NETWORK_UNKNOWN;
   }
   pthread_mutex_lock(&metrics_mutex);
+  UiDiagnosticsNetworkState previous = metrics.network_state;
   metrics.network_state = state;
   pthread_mutex_unlock(&metrics_mutex);
+  if (previous != state) {
+    vita_debug_event(
+        state == UI_DIAGNOSTICS_NETWORK_DEGRADED
+            ? VITA_DEBUG_LEVEL_WARNING
+            : VITA_DEBUG_LEVEL_INFO,
+        "network.state", "previous=%s state=%s",
+        network_state_token(previous), network_state_token(state));
+  }
 }
 
 void ui_diagnostics_set_logging_consumer(bool enabled) {
   set_metrics_consumer(UI_DIAGNOSTICS_CONSUMER_LOGGING, enabled);
+  UiDiagnosticsReconnectSettings active;
+  bool active_valid = false;
+  pthread_mutex_lock(&metrics_mutex);
+  if (enabled) {
+    clear_sampling_locked();
+    active_valid = metrics.active_stream_valid;
+    if (active_valid) active = metrics.active_settings;
+  }
+  metrics.last_log_summary_us =
+      enabled ? sceKernelGetSystemTimeWide() : 0;
+  pthread_mutex_unlock(&metrics_mutex);
+  if (enabled) {
+    if (!active_valid) {
+      ui_diagnostics_capture_reconnect_settings(&active);
+    }
+    vita_debug_event(
+        VITA_DEBUG_LEVEL_INFO, "stream.snapshot",
+        "state=%s source=%s width=%d height=%d fps=%d "
+        "bitrate_kbps=%d packet_size=%d video_formats=0x%x "
+        "controller=%s motion=%d",
+        connection_is_connected() ? "connected" : "idle",
+        active_valid ? "active" : "selected",
+        active.stream_width, active.stream_height, active.stream_fps,
+        active.stream_bitrate_kbps, active.packet_size,
+        (unsigned int)active.supported_video_formats,
+        active.controller_type == 2 ? "dualshock4" : "xbox",
+        active.motion_enabled ? 1 : 0);
+  }
 }
 
 void ui_diagnostics_record_video_frame(uint32_t encoded_bytes,
@@ -716,9 +867,6 @@ void ui_diagnostics_screen_handle_input(const SceCtrlData *pad,
     bool enabled = !vita_debug_is_logging_enabled();
     vita_debug_set_logging_enabled(enabled);
     if (config_path) config_save(config_path, &config);
-    if (enabled) {
-      vita_debug_log("[DIAGNOSTICS] Optional file logging enabled by user");
-    }
     return;
   }
   if (pressed(pad, previous, config.btn_cancel) ||
@@ -730,8 +878,11 @@ void ui_diagnostics_screen_handle_input(const SceCtrlData *pad,
 static void draw_screen_row(int y, const char *label, const char *value,
                             unsigned int value_color) {
   vita2d_font_draw_text(font, 196, y, RGBA8(170, 184, 207, 255), 16, label);
-  int value_width = vita2d_font_text_width(font, 16, value);
-  vita2d_font_draw_text(font, 764 - value_width, y, value_color, 16, value);
+  char fitted_value[128];
+  int value_width = guilib_fit_text(
+      fitted_value, sizeof(fitted_value), value, 16, 300);
+  vita2d_font_draw_text(
+      font, 764 - value_width, y, value_color, 16, fitted_value);
 }
 
 void ui_diagnostics_screen_draw(void) {
@@ -845,9 +996,8 @@ void ui_diagnostics_screen_draw(void) {
   } else if (!snapshot.gyro_requested) {
     snprintf(value, sizeof(value), "Awaiting host request");
   } else {
-    snprintf(value, sizeof(value), "%u Hz, %u events",
-             (unsigned int)snapshot.gyro_report_rate,
-             snapshot.gyro_events_sent);
+    snprintf(value, sizeof(value), "%u Hz, reporting",
+             (unsigned int)snapshot.gyro_report_rate);
   }
   draw_screen_row(335, "Gyroscope", value,
                    snapshot.motion_sensor_error < 0
@@ -855,8 +1005,8 @@ void ui_diagnostics_screen_draw(void) {
                        : RGBA8(235, 240, 250, 255));
 
   snprintf(value, sizeof(value), "%s",
-           snapshot.file_logging_enabled ? "Enabled" : "Disabled");
-  draw_screen_row(358, "Diagnostic log", value,
+           snapshot.file_logging_enabled ? "Capturing" : "Not capturing");
+  draw_screen_row(358, "Support log", value,
                    snapshot.file_logging_enabled
                        ? RGBA8(116, 230, 160, 255)
                        : RGBA8(235, 240, 250, 255));
@@ -869,10 +1019,16 @@ void ui_diagnostics_screen_draw(void) {
 
   char log_path[96] = "Unavailable";
   vita_debug_get_log_path(log_path, sizeof(log_path));
-  draw_screen_row(404, "Log file", log_path,
-                  RGBA8(235, 240, 250, 255));
+  draw_screen_row(404, "Support log file", log_path,
+                   RGBA8(235, 240, 250, 255));
 
+  char footer[160];
+  guilib_fit_text(
+      footer, sizeof(footer),
+      snapshot.file_logging_enabled
+          ? "Reproduce the issue, then Triangle: stop and save. Cancel / START: back"
+          : "Triangle: start support log. Reproduce the issue, then stop and save.",
+      15, 568);
   vita2d_font_draw_text(
-      font, 196, 467, RGBA8(166, 181, 208, 255), 15,
-      "Triangle: file logging on/off   Cancel / START: back");
+      font, 196, 467, RGBA8(166, 181, 208, 255), 15, footer);
 }

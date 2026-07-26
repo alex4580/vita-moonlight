@@ -4,7 +4,6 @@
 #include "touchabsolute.h"
 #include "../config.h"
 #include "vita.h"
-#include "../debug.h"
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -143,7 +142,6 @@ void touchabsolute_handle_ds4(const TouchData* touch, SceRtcTick* current) {
         if (is_active && !ds4_finger_active[i]) {
             LiSendControllerTouchEvent(0, LI_TOUCH_EVENT_DOWN, i,
                                        norm_x, norm_y, 1.0f);
-            vita_debug_log("[DS4_TOUCHPAD] DOWN finger=%d", i);
         } else if (is_active && ds4_finger_active[i]) {
             int dx = abs(x - ds4_x[i]);
             int dy = abs(y - ds4_y[i]);
@@ -155,7 +153,6 @@ void touchabsolute_handle_ds4(const TouchData* touch, SceRtcTick* current) {
             LiSendControllerTouchEvent(0, LI_TOUCH_EVENT_UP, i,
                                        normalized_x(ds4_x[i]),
                                        normalized_y(ds4_y[i]), 0.0f);
-            vita_debug_log("[DS4_TOUCHPAD] UP finger=%d", i);
         }
 
         ds4_finger_active[i] = is_active;
@@ -191,7 +188,6 @@ void touchabsolute_handle_absolute(
             absolute_left_down = false;
         }
         if (absolute_two_finger_active && !absolute_two_finger_scroll) {
-            vita_debug_log("[ABS_MOUSE] two-finger right click");
             LiSendMouseButtonEvent(BUTTON_ACTION_PRESS, BUTTON_RIGHT);
             LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_RIGHT);
         }
@@ -234,7 +230,6 @@ void touchabsolute_handle_absolute(
 
     if (absolute_two_finger_active) {
         if (!absolute_two_finger_scroll) {
-            vita_debug_log("[ABS_MOUSE] two-finger right click");
             LiSendMouseButtonEvent(BUTTON_ACTION_PRESS, BUTTON_RIGHT);
             LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_RIGHT);
         }
@@ -261,8 +256,6 @@ void touchabsolute_handle_tablet(const TouchData* touch) {
         LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_RIGHT);
         LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_MIDDLE);
         LiSendMousePositionEvent(-1, -1, 960, 544);
-        vita_debug_log(
-            "[TOUCHSCREEN] mouse released and moved off-screen");
         tablet_mouse_released = true;
     }
 
@@ -277,7 +270,6 @@ void touchabsolute_handle_tablet(const TouchData* touch) {
             LiSendTouchEvent(LI_TOUCH_EVENT_DOWN, i,
                              norm_x, norm_y,
                              1.0f, 0.0f, 0.0f, LI_ROT_UNKNOWN);
-            vita_debug_log("[TOUCHSCREEN] DOWN finger=%d", i);
         } else if (is_active && tablet_finger_active[i]) {
             LiSendTouchEvent(LI_TOUCH_EVENT_MOVE, i,
                              norm_x, norm_y,
@@ -287,7 +279,6 @@ void touchabsolute_handle_tablet(const TouchData* touch) {
                              normalized_x(tablet_x[i]),
                              normalized_y(tablet_y[i]),
                              0.0f, 0.0f, 0.0f, LI_ROT_UNKNOWN);
-            vita_debug_log("[TOUCHSCREEN] UP finger=%d", i);
         }
 
         tablet_finger_active[i] = is_active;

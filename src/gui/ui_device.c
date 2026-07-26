@@ -289,7 +289,9 @@ int ui_search_device_loop() {
   MENU_SEPARATOR();
   MENU_ENTRY(DEVICE_EXIT_SEARCH, DEVICE_VIEW_EXIT_SEARCH, "Return", "");
 
-  return display_menu(menu, idx, NULL, &ui_search_device_callback, &ui_search_device_back, NULL, &menu);
+  return display_menu(
+      menu, idx, NULL, &ui_search_device_callback,
+      &ui_search_device_back, NULL, menu);
 }
 
 void ui_search_device() {

@@ -391,7 +391,7 @@ internal sealed class DisplayTopologyService
         throw new InvalidOperationException(
             $"The virtual display did not become available within {attempts * 0.5:0.#} seconds after its driver restart. " +
             $"{detail}{response} Keep the physical display enabled, wait a few seconds, then click " +
-            "Install/update display driver again. If the target is listed under Displays, select it there.");
+            "Repair Vita display driver again. If more than one virtual display is listed, select the intended one under Streaming.");
     }
 
     private static string DisplayIdentity(DisplayDescriptor display) =>

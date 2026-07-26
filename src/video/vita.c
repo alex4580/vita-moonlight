@@ -76,6 +76,7 @@ enum {
 #define UI_REQUEST_MIN_INTERVAL_US 16000ULL
 #define VIDEO_CLEANUP_WAIT_US 2000000
 #define VIDEO_CLEANUP_LOCK_POLL_US 1000
+#define DECODER_ERROR_LOG_INTERVAL_US 10000000ULL
 
 static char* decoder_buffer = NULL;
 
@@ -131,6 +132,8 @@ static uint32_t rendered_redraw_generation = 0;
 static bool decoded_frame_available = false;
 static uint64_t last_video_activity_us = 0;
 static uint64_t last_render_us = 0;
+static uint64_t last_decoder_error_log_us = 0;
+static uint32_t suppressed_decoder_errors = 0;
 
 static uint32_t frame_count = 0;
 static uint32_t need_drop = 0;
@@ -342,9 +345,9 @@ static bool stop_pacer_thread(void) {
      * Quarantine all video resources instead of risking a use-after-free if
      * the watchdog is still inside Vita2D or waiting for the display.
      */
-    vita_debug_log(
-        "Pacer thread did not stop safely (0x%08x); "
-        "video resources are quarantined until application restart",
+    vita_debug_event(
+        VITA_DEBUG_LEVEL_ERROR, "decoder.state",
+        "state=quarantined phase=pacer_stop code=0x%08x",
         (unsigned int)wait_result);
     atomic_store_u32(&video_cleanup_blocked, 1);
     return false;
@@ -352,8 +355,9 @@ static bool stop_pacer_thread(void) {
 
   int delete_result = sceKernelDeleteThread(pacer_thread);
   if (delete_result < 0) {
-    vita_debug_log(
-        "Ended pacer thread handle could not be deleted: 0x%08x",
+    vita_debug_event(
+        VITA_DEBUG_LEVEL_WARNING, "decoder.state",
+        "state=cleanup_warning phase=pacer_delete code=0x%08x",
         (unsigned int)delete_result);
   }
   pacer_thread = -1;
@@ -367,10 +371,10 @@ static bool lock_video_render_bounded(const char *operation) {
       sceKernelGetSystemTimeWide() + VIDEO_CLEANUP_WAIT_US;
   while (pthread_mutex_trylock(&video_render_mutex) != 0) {
     if (sceKernelGetSystemTimeWide() >= deadline) {
-      vita_debug_log(
-          "%s could not acquire the video render lock; "
-          "video is quarantined until application restart",
-          operation);
+      (void)operation;
+      vita_debug_event(
+          VITA_DEBUG_LEVEL_ERROR, "decoder.state",
+          "state=quarantined phase=render_lock code=timeout");
       atomic_store_u32(&video_cleanup_blocked, 1);
       return false;
     }
@@ -380,6 +384,7 @@ static bool lock_video_render_bounded(const char *operation) {
 }
 
 static void vita_cleanup() {
+  enum VideoStatus previous_status = video_status;
   atomic_store_u32(&active_video_thread, 0);
   if (!stop_pacer_thread()) return;
   bool render_mutex_locked =
@@ -457,20 +462,36 @@ static void vita_cleanup() {
       atomic_store_u32(&video_render_mutex_initialized, 0);
       atomic_store_u32(&video_cleanup_blocked, 0);
     } else {
-      vita_debug_log(
-          "Video render mutex could not be destroyed: 0x%08x",
+      vita_debug_event(
+          VITA_DEBUG_LEVEL_WARNING, "decoder.state",
+          "state=cleanup_warning phase=render_mutex_destroy code=0x%08x",
           (unsigned int)destroy_result);
       atomic_store_u32(&video_cleanup_blocked, 1);
     }
+  }
+  if (previous_status != NOT_INIT) {
+    vita_debug_event(
+        VITA_DEBUG_LEVEL_INFO, "decoder.state",
+        "state=stopped previous_state_id=%d", previous_status);
   }
 }
 
 static int vita_setup(int videoFormat, int width, int height, int redrawRate, void* context, int drFlags) {
   int ret;
-  printf("vita video setup\n");
+  (void)context;
+  vita_debug_event(
+      VITA_DEBUG_LEVEL_INFO, "decoder.state",
+      "state=initializing backend=vita_hw_h264 format_mask=0x%x "
+      "width=%d height=%d refresh_hz=%d flags=0x%x",
+      (unsigned int)videoFormat, width, height, redrawRate,
+      (unsigned int)drFlags);
+  last_decoder_error_log_us = 0;
+  suppressed_decoder_errors = 0;
 
   if (atomic_load_u32(&video_cleanup_blocked)) {
-    printf("Previous video cleanup did not complete safely\n");
+    vita_debug_event(
+        VITA_DEBUG_LEVEL_ERROR, "decoder.state",
+        "state=error phase=preflight code=cleanup_blocked");
     return VITA_VIDEO_ERROR_CLEANUP_BLOCKED;
   }
 
@@ -478,6 +499,10 @@ static int vita_setup(int videoFormat, int width, int height, int redrawRate, vo
     ret = pthread_mutex_init(&video_render_mutex, NULL);
     if (ret != 0) {
       printf("pthread_mutex_init: 0x%x\n", ret);
+      vita_debug_event(
+          VITA_DEBUG_LEVEL_ERROR, "decoder.state",
+          "state=error phase=setup code=0x%08x",
+          (unsigned int)ret);
       return VITA_VIDEO_ERROR_CREATE_RENDER_MUTEX;
     }
     atomic_store_u32(&video_render_mutex_initialized, 1);
@@ -636,9 +661,24 @@ static int vita_setup(int videoFormat, int width, int height, int redrawRate, vo
     video_status++;
   }
 
+  vita_debug_event(
+      VITA_DEBUG_LEVEL_INFO, "decoder.state",
+      "state=ready backend=vita_hw_h264 codec=h264 format_mask=0x%x "
+      "width=%d height=%d texture_width=%u texture_height=%u "
+      "refresh_hz=%d ref_frames=%u frame_pacer=%d",
+      (unsigned int)videoFormat, width, height,
+      (unsigned int)image_scaling.texture_width,
+      (unsigned int)image_scaling.texture_height, redrawRate,
+      (unsigned int)(init ? init->numOfRefFrames : 0),
+      config.enable_frame_pacer ? 1 : 0);
   return VITA_VIDEO_INIT_OK;
 
 cleanup:
+  vita_debug_event(
+      VITA_DEBUG_LEVEL_ERROR, "decoder.state",
+      "state=error phase=setup code=0x%08x format_mask=0x%x "
+      "width=%d height=%d",
+      (unsigned int)ret, (unsigned int)videoFormat, width, height);
   vita_cleanup();
   return ret;
 }
@@ -714,7 +754,21 @@ static int vita_submit_decode_unit(PDECODE_UNIT decodeUnit) {
       ui_diagnostics_record_video_frame(
           decodeUnit->fullLength, decode_time_us, false);
     }
-    printf("sceAvcdecDecode (len=0x%x): 0x%x numOfOutput %d\n", decodeUnit->fullLength, ret, array_picture.numOfOutput);
+    uint64_t now_us = sceKernelGetSystemTimeWide();
+    if (last_decoder_error_log_us == 0 ||
+        now_us - last_decoder_error_log_us >=
+            DECODER_ERROR_LOG_INTERVAL_US) {
+      vita_debug_event(
+          VITA_DEBUG_LEVEL_ERROR, "decoder.state",
+          "state=error phase=decode code=0x%08x unit_bytes=%u outputs=%d "
+          "repeats_suppressed=%u",
+          (unsigned int)ret, (unsigned int)decodeUnit->fullLength,
+          array_picture.numOfOutput, suppressed_decoder_errors);
+      last_decoder_error_log_us = now_us;
+      suppressed_decoder_errors = 0;
+    } else {
+      suppressed_decoder_errors++;
+    }
     pthread_mutex_unlock(&video_render_mutex);
     return DR_NEED_IDR;
   }
@@ -738,7 +792,6 @@ static int vita_submit_decode_unit(PDECODE_UNIT decodeUnit) {
   if (atomic_load_u32(&active_video_thread)) {
     uint32_t frames_to_drop = atomic_load_u32(&need_drop);
     if (frames_to_drop > 0) {
-      vita_debug_log("remain frameskip: %d\n", frames_to_drop);
       // skip
       atomic_sub_u32(&need_drop, 1);
     } else {

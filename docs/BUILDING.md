@@ -97,11 +97,30 @@ generated changelog section before committing.
 
 Desktop CI can compile both products, enforce version consistency, exercise
 the portable companion's diagnostics-only boundary on Windows 10/11 runners,
-and assemble the packages. It
-cannot prove Vita rendering, hardware decoding, controller timing, gyro,
+validate the privacy-safe support-log summarizer, and assemble the packages.
+It cannot prove Vita rendering, hardware decoding, controller timing, gyro,
 Wi-Fi behavior, or Windows display recovery on a real GPU and monitor.
 
-Before publishing a beta, run `BETA_SMOKE_TEST.md`. Final releases use
-`END_TO_END_TEST.md` and `FINAL_RELEASE_CHECKLIST.md`. In a source checkout,
-those three files are under `host/`; packaged Windows builds place them beside
-the companion executable.
+The support-log summarizer has no third-party Python dependencies:
+
+```powershell
+python tools\summarize-vita-log.py --self-test
+python tools\summarize-vita-log.py "C:\path\to\moonlight.log"
+python tools\summarize-vita-log.py --json "C:\path\to\moonlight.log"
+```
+
+Its self-test covers structured sessions, interval/cumulative network
+aggregation, malformed or foreign records, sequence gaps, and privacy
+filtering. The release packages place the script at
+`tools\SupportLog\summarize-vita-log.py`.
+
+Before publishing a beta, run `host\BETA_SMOKE_TEST.md`. Final releases use
+`host\END_TO_END_TEST.md` and `host\FINAL_RELEASE_CHECKLIST.md`. Packaged
+Windows builds preserve the same layout:
+
+- the simple `README.md` is at the package root;
+- acceptance, compatibility, host, and release-checklist documents are under
+  `host\`;
+- community, logging, Vita settings, build, and release guides are under
+  `docs\`; and
+- the optional support-log summarizer is under `tools\SupportLog\`.

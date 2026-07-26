@@ -107,7 +107,8 @@ sends a neutral controller state and consumes Vita input locally. Settings are
 saved immediately; negotiation settings apply through the controlled reconnect,
 while input policies and performance-overlay modes can update during the
 current session. The dedicated diagnostics page is read-only except for its
-optional logging toggle. Destructive rescue items require a second confirmation.
+explicit **Start support log** / **Stop and save support log** action.
+Destructive rescue items require a second confirmation.
 Disconnect, Sunshine-app termination, display-mode changes, and host-recovery
 requests are consumed by the connection UI loop so network teardown remains
 ordered; close-game recovery keeps the current stream alive.

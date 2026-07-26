@@ -5,7 +5,7 @@ The first-run configuration is designed to work without tuning:
 - **Recommended** stream preset: 960x544, 60 FPS, 8 Mbps, H.264 SDR.
 - **Maximum compatibility** controller: Xbox/XInput, relative-mouse touch,
   local PS button, gyro off.
-- Performance overlay and diagnostic file logging off.
+- Performance overlay Off and support log Not capturing.
 
 The Vita's panel is 960x544. Matching the Windows virtual display, Sunshine
 encoder, decoder, and panel avoids the 4:3 fallback and unnecessary scaling
@@ -41,9 +41,9 @@ Changing any owned stream value changes the displayed preset to **Custom**;
 your custom values remain saved. Selecting a named preset restores every owned
 value listed above. It does not change controller/touch settings.
 
-**Reset all to recommended** is broader than selecting the Recommended stream
+**Restore recommended defaults** is broader than selecting the Recommended stream
 preset. It also selects Maximum compatibility input, turns the performance
-overlay off, and turns diagnostic file logging off.
+overlay off, and stops any support-log capture.
 
 ## Resolution and the Windows virtual display
 
@@ -75,20 +75,22 @@ a brief black screen while this happens.
 
 If the Vita still receives the physical monitor, an 800x600 desktop, or a 4:3
 picture after reconnecting, the host display lifecycle is not active. Run the
-Windows control-panel health check, verify automatic Vita-display switching is
-enabled, and use **Save and apply** before retrying 960x544.
+Windows control panel's **Check readiness**, verify every-application
+Vita-display switching and Force SDR are enabled under **Streaming**, and use
+**Save and restart streaming** before retrying 960x544.
 
 ## Settings before and during a stream
 
 The pre-stream Settings screen and in-stream menu use the same saved
 configuration.
 
-| Area | Available in Settings | Available in-stream |
+| Settings category | Available before a stream | Matching in-stream access |
 |---|---|---|
-| Stream | Preset, managed resolution, FPS, bitrate, host optimization, packet recovery, network mode, vblank, frame pacing, aspect scaling, local audio | Preset, managed resolution, FPS, bitrate, host optimization, packet recovery, network mode, vblank, frame pacing, aspect scaling, plus Apply resolution + reconnect |
-| Input | Controller preset, gyro, sprint helper/timing, shoulder swap, PS behavior, touch mode, mappings, touch zones, mouse acceleration | Controller preset, gyro, sprint helper, shoulder swap, PS behavior, touch mode, plus Apply input changes + reconnect |
-| Diagnostics | Performance-overlay mode and diagnostic file-logging toggle | Performance-overlay mode and dedicated Real-time diagnostics screen with logging toggle |
-| System | Power behavior, X/O layout, keyboard layout | Rescue and disconnect actions |
+| **Stream quality** | Preset, managed resolution, FPS, and bitrate | **Stream & virtual display**, plus Apply resolution + reconnect |
+| **Advanced streaming** | Host optimization, packet recovery, network mode, display synchronization, frame pacing, and aspect scaling | **Stream & virtual display**, plus Apply resolution + reconnect |
+| **Controller** | Controller preset, gyro/sensitivity, sprint helper, PS behavior, shoulder swap, and graphical button mapping | **Controller & input**, plus Apply input changes + reconnect |
+| **Touch and keyboard** | Touch mode, front/rear zones, mouse acceleration, and keyboard layout | Core touch mode under **Controller & input**; keyboard on the main stream menu |
+| **System and support** | Performance overlay, Start/Stop support log, PC audio, Vita power behavior, and X/O layout | Performance overlay, Real-time diagnostics, and Start/Stop support log on the main stream menu |
 
 Immediate settings such as performance-overlay mode update while streaming.
 Stream-format settings and controller type require a reconnect. Each in-stream
@@ -129,17 +131,17 @@ It is drawn in the top-right corner over a 50%-alpha background.
 
 | Mode | Shows | Collection behavior |
 |---|---|---|
-| **Off** | Nothing | Extended per-frame diagnostics are skipped unless the diagnostics screen or file logging is active. |
+| **Off** | Nothing | Extended per-frame diagnostics are skipped unless the diagnostics screen or a support-log capture needs them. |
 | **Frame rate** | Rendered FPS / target FPS | Smallest on-screen view. |
 | **Frame rate + network** | FPS, Moonlight connection health, estimated round-trip time, and measured encoded-video Kbps | Useful for separating encoder artifacts from an unstable link. |
 | **Advanced** | The above, stream resolution/configured bitrate, average and maximum decode time, dropped frames, and recovered/failed/out-of-sequence packet counts | Best for short tuning sessions; more screen area and metric collection. |
 
-These are local Vita measurements. “Network degraded” is Moonlight's
+These are local Vita measurements. "Network degraded" is Moonlight's
 connection-health signal, measured video Kbps is the received encoded-video
 rate, and RTT is Moonlight's current transport estimate; none is a router speed
 test.
 
-## Real-time diagnostics and optional logging
+## Real-time diagnostics and optional support log
 
 Live diagnostic values no longer clutter the normal stream menu. Open the
 in-stream menu and select the dedicated **Real-time diagnostics** item to see:
@@ -151,49 +153,61 @@ in-stream menu and select the dedicated **Real-time diagnostics** item to see:
 - average/maximum decode time and dropped frames;
 - virtual-controller type;
 - gyro enabled/requested state, report rate, event count, and sensor errors;
-- performance-overlay and file-logging state;
-- the actual diagnostic-log path.
+- performance-overlay and support-log state;
+- the actual support-log path.
 
 Opening this screen collects the metrics required to update it, but does not
-write a file. Toggle **Diagnostic file logging** directly on the in-stream
-menu, or press **Triangle** on this screen. Press **O** or **START** to return.
+write a file. Choose **Start support log** on the main in-stream menu, or press
+**Triangle** while this screen says **Not capturing**. After reproducing the
+problem, choose **Stop and save support log** or press Triangle again. Press
+**O** or **START** to return.
 
-File logging is off by default. In the disabled state, log calls return after a
-single check and the file remains closed. When enabled, logs append to:
+Support logging is off by default. When it is not capturing, Vita Moonlight
+does not open, create, or write a support-log file. A capture writes:
 
 `ux0:data/moonlight/moonlight.log`
 
-Enabled logging buffers writes and flushes about once per second and when the
-stream disconnects, logging is disabled, or Moonlight exits. Normal
-diagnostics omit touch MOVE samples, precise touch coordinates, and typed
-characters. This substantially reduces logging overhead and prevents the IME
-from copying text entry into the diagnostic file. Network and host identifiers
-can still appear; inspect and redact the file before sharing it.
+An active capture buffers writes and flushes about once per second and when the
+stream disconnects, Stop is selected, or Moonlight exits. Normal support
+records omit touch movement, precise touch coordinates, ordinary controller
+samples, typed characters, and individual gyro samples. This reduces overhead
+and prevents the IME from copying text entry into the support file. Inspect
+and redact every file before sharing it.
 
-If that directory is unavailable, Moonlight may select
-`ux0:moonlight/moonlight.log` or
-`uma0:data/moonlight/moonlight.log`. Trust the path displayed on the
-Real-time diagnostics screen.
+Depending on storage and upgrade history, Moonlight may select another path,
+including `ux0:moonlight/moonlight.log`,
+`uma0:data/moonlight/moonlight.log`, or `ux0:data/moonlight.log`. Do not guess:
+trust the exact **Support log file** path displayed on Real-time diagnostics.
 
 For a useful reproduction:
 
 1. Leave the performance overlay on the mode that best demonstrates the
    problem, if needed.
-2. Enable **Settings > System > Diagnostic file logging**, toggle it on the
-   in-stream menu, or press Triangle on Real-time diagnostics immediately
-   before the test.
-3. Reproduce one problem once and note the approximate time and game.
-4. Disable logging again to close the file, or exit Moonlight.
+2. Choose **Settings > System and support > Start support log**, choose
+   **Start support log** on the in-stream menu, or press Triangle on
+   Real-time diagnostics immediately before the test.
+3. Reproduce one problem once and note the exact local time, time zone, and
+   game.
+4. Choose **Stop and save support log** or press Triangle again to close the
+   file. Exiting Moonlight also closes it.
 5. Use VitaShell USB or FTP to copy `moonlight.log` to the PC.
 6. Include the selected preset, controller profile, host connection type, and
    what was visible when the issue occurred.
 
-The file is append-only, so an older capture remains above the new one. Rename
-or delete it before testing if you need an isolated log. Inspect it for host
-names or network addresses before sharing it publicly. While logging is
-enabled, its once-per-second performance records include FPS, received video
-rate, decode time, drops, network state, RTT/variance, FEC recovery/failure,
-and out-of-sequence packets.
+The first **Start support log** creates a fresh `moonlight.log`. On later
+captures, the current file becomes `moonlight.previous.log`, replacing the one
+previous backup, and a fresh `moonlight.log` is created. Copy a capture before
+starting another when you need to preserve it.
+
+The `vita-support-v1` file uses one `key=value` record per line. It captures
+system/configuration/connection snapshots, connection stages, stream actions,
+decoder state, gyro negotiation changes, network state, and a
+`network.summary` about every 10 seconds. That summary includes FPS, received
+and configured video rate, decode time, drops, RTT/variance, FEC
+recovery/failure, and out-of-sequence packets. The capture ends with duration
+and warning/error/suppression counts. See
+[Logging and support](LOGGING_AND_SUPPORT.md) for privacy review and the
+optional Python summarizer.
 
 ## On-screen keyboard
 
@@ -203,9 +217,10 @@ keyboard** from the in-stream menu. Typed characters are forwarded
 immediately; Backspace, Left/Right, and Enter are sent as PC keys. Close or
 minimize the Vita keyboard to return to the stream.
 
-Select the matching US, Spanish, or Latin American layout under **Settings >
-Input > Keyboard layout**. The keyboard translates supported characters to PC
-virtual keys; it is not a Unicode paste or clipboard feature.
+Select the matching US, Spanish, or Latin American layout under
+**Settings > Touch and keyboard > Keyboard layout**. The keyboard translates
+supported characters to PC virtual keys; it is not a Unicode paste or
+clipboard feature.
 
 ## Controller profiles
 
@@ -239,12 +254,15 @@ Choose **Apply input changes + reconnect** after selecting it so Sunshine
 recreates the virtual controller. This is an input-only reconnect: it does not
 change or reset the active virtual display.
 Steam should then see a DS4-class controller and can map its gyro through Steam
-Input. Moonlight sends raw motion; configure camera/action behavior and
-sensitivity in the game's Steam Input layout.
+Input. Under **Settings > Controller**, **Gyro horizontal sensitivity** and
+**Gyro vertical sensitivity** scale horizontal yaw and vertical pitch response
+from 0.1x to 5.0x before Moonlight sends the controller report. Use these
+settings for device-wide axis balance. Use Steam Input for each game's
+activation behavior, response curve, dead zone, and final sensitivity.
 
 Motion samples are produced only while the gyro-capable profile is active and
 the host has requested them. The normal 100 Hz report path does not write one
-log entry per sample, even when diagnostic file logging is enabled. Its runtime
+log entry per sample, even during a support capture. Its runtime
 cost is small, but Maximum compatibility disables gyro entirely when motion
 input is not needed.
 
@@ -274,12 +292,12 @@ specific game's need; they do not improve video performance.
 
 #### Graphical button mapper
 
-Open **Settings > Input > Graphical button mapper** to map Vita inputs to every
-logical remote button: A/B/X/Y, all four D-pad directions, View, Menu, Guide,
-LB/RB, LT/RT, and both stick clicks. Select a target in the list, then choose a
-face button, D-pad direction, control/shoulder button, or back-touch quadrant.
-LT and RT can also use an analog trigger on Vita TV. **Reset to hardware
-defaults** restores the normal Vita or Vita TV layout.
+Open **Settings > Controller > Graphical button mapper** to map Vita inputs to
+every logical remote button: A/B/X/Y, all four D-pad directions, View, Menu,
+Guide, LB/RB, LT/RT, and both stick clicks. Select a target in the list, then
+choose a face button, D-pad direction, control/shoulder button, or back-touch
+quadrant. LT and RT can also use an analog trigger on Vita TV.
+**Reset to hardware defaults** restores the normal Vita or Vita TV layout.
 
 The editor creates and maintains a writable
 `mappings/vita.conf` under the active Moonlight data directory. The usual path
@@ -305,13 +323,13 @@ Custom mapping are mutually exclusive.
 
 #### Front-touch zone mapper
 
-Open **Settings > Input > Front-touch zone mapper** for a scaled Vita-screen
-preview. White dots show current front touches. The four corner zones share an
-**Edge inset** and square **Zone size**, while each corner has its own action.
-Available actions include the local stream menu and keyboard, PC Guide and
-gamepad buttons, mouse buttons, Esc/Tab/I/M, F1-F12, or a manual keyboard code.
-Set a corner to **None** when touches there should continue to the selected
-normal touch mode.
+Open **Settings > Touch and keyboard > Front-touch zone mapper** for a scaled
+Vita-screen preview. White dots show current front touches. The four corner
+zones share an **Edge inset** and square **Zone size**, while each corner has
+its own action. Available actions include the local stream menu and keyboard,
+PC Guide and gamepad buttons, mouse buttons, Esc/Tab/I/M, F1-F12, or a manual
+keyboard code. Set a corner to **None** when touches there should continue to
+the selected normal touch mode.
 
 The **Enabled** row in the graphical editor and the **Front-touch zones** row
 in the main Input menu control the same setting. Geometry, enabled state, and
@@ -341,8 +359,8 @@ Guide, and the other corners unassigned.
    with the controlled reconnect.
 6. Use Steam / DS4 + gyro only when the game or Steam layout benefits from
    those capabilities, then reconnect.
-7. Enable file logging only for a reproducible problem, copy the log, and turn
-   it off again.
+7. Start a support log only for a reproducible problem, then stop, review, and
+   copy the short capture.
 
 ## Vita system Wi-Fi toggle
 

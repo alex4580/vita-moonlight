@@ -46,11 +46,11 @@ SignedUninstaller=no
 #endif
 
 [Tasks]
-Name: "gamepaddriver"; Description: "Install or repair ViGEmBus for Xbox/DS4 controller emulation"; GroupDescription: "Host setup:"
-Name: "host"; Description: "Configure a streaming host now"; GroupDescription: "Host setup:"
-Name: "host\sunshine"; Description: "Sunshine (signed virtual display)"; Flags: exclusive
-Name: "host\sunshine\virtualdriver"; Description: "Install or repair the pinned, officially signed virtual display driver"
-Name: "host\apollo"; Description: "Apollo (built-in virtual display)"; Flags: exclusive unchecked
+Name: "gamepaddriver"; Description: "Controller support (recommended for Xbox, DS4, and Steam Input)"; GroupDescription: "Choose what setup should prepare:"
+Name: "host"; Description: "Configure this PC for Vita streaming now (recommended)"; GroupDescription: "Choose what setup should prepare:"
+Name: "host\sunshine"; Description: "Sunshine - recommended for most users"; Flags: exclusive
+Name: "host\sunshine\virtualdriver"; Description: "Vita-sized virtual display (recommended with Sunshine)"
+Name: "host\apollo"; Description: "Apollo - select only if this PC already uses Apollo"; Flags: exclusive unchecked
 
 [Dirs]
 Name: "{app}\state"
@@ -64,17 +64,24 @@ Source: "{#PublishDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs
 Source: "{#DisplayWizardDir}\*"; DestDir: "{app}\tools\DisplayWizard"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#ViGEmBusDir}\*"; DestDir: "{app}\tools\ViGEmBus"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#SunshineDir}\*"; DestDir: "{app}\tools\Sunshine"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "..\README.md"; DestDir: "{app}"; DestName: "README.md"; Flags: ignoreversion
-Source: "..\END_TO_END_TEST.md"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\FINAL_RELEASE_CHECKLIST.md"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\COMPATIBILITY.md"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\..\docs\VITA_SETTINGS_GUIDE.md"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\..\tools\summarize-vita-log.py"; DestDir: "{app}\tools\SupportLog"; Flags: ignoreversion
+Source: "..\..\README.md"; DestDir: "{app}"; DestName: "README.md"; Flags: ignoreversion
+Source: "..\README.md"; DestDir: "{app}\host"; Flags: ignoreversion
+Source: "..\BETA_SMOKE_TEST.md"; DestDir: "{app}\host"; Flags: ignoreversion
+Source: "..\END_TO_END_TEST.md"; DestDir: "{app}\host"; Flags: ignoreversion
+Source: "..\FINAL_RELEASE_CHECKLIST.md"; DestDir: "{app}\host"; Flags: ignoreversion
+Source: "..\COMPATIBILITY.md"; DestDir: "{app}\host"; Flags: ignoreversion
+Source: "..\THIRD_PARTY_NOTICES.md"; DestDir: "{app}\host"; Flags: ignoreversion
+Source: "..\..\docs\BUILDING.md"; DestDir: "{app}\docs"; Flags: ignoreversion
+Source: "..\..\docs\COMMUNITY_TESTING.md"; DestDir: "{app}\docs"; Flags: ignoreversion
+Source: "..\..\docs\LOGGING_AND_SUPPORT.md"; DestDir: "{app}\docs"; Flags: ignoreversion
+Source: "..\..\docs\RELEASING.md"; DestDir: "{app}\docs"; Flags: ignoreversion
+Source: "..\..\docs\VITA_SETTINGS_GUIDE.md"; DestDir: "{app}\docs"; Flags: ignoreversion
 Source: "..\..\LICENSE"; DestDir: "{app}"; DestName: "LICENSE-VitaMoonlight.txt"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\Vita Moonlight Host Control Panel"; Filename: "{app}\VitaMoonlight.Host.exe"; WorkingDir: "{app}"
-Name: "{group}\Documentation"; Filename: "{app}\README.md"
+Name: "{group}\Quick start and help"; Filename: "{sys}\notepad.exe"; Parameters: """{app}\README.md"""
 Name: "{group}\Uninstall Vita Moonlight Host"; Filename: "{uninstallexe}"
 
 [Run]
@@ -93,6 +100,8 @@ var
   PreserveDiagnosticsOnUninstall: Boolean;
   RestartRequiredByUninstall: Boolean;
   PreservedRescueLogPath: String;
+  ExistingInstallDetected: Boolean;
+  PreviousInstalledVersion: String;
 
 function InitializeSetup: Boolean;
 var
@@ -114,6 +123,17 @@ begin
       mbError,
       MB_OK,
       IDOK);
+  end;
+  if Result then
+  begin
+    PreviousInstalledVersion := '';
+    ExistingInstallDetected :=
+      RegQueryStringValue(
+        HKLM64,
+        'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\' +
+        '{D88FE6B4-D767-4A27-B192-E1DB4F6E835C}_is1',
+        'DisplayVersion',
+        PreviousInstalledVersion);
   end;
 end;
 
@@ -148,7 +168,7 @@ begin
       'Setup has stopped before applying Sunshine display configuration or ' +
       'changing the active display. ' +
       'Restart Windows, then open Vita Moonlight Host as Administrator and ' +
-      'click "Apply recommended setup" to finish.',
+      'click "Set up or repair this PC" to finish.',
       mbInformation,
       MB_OK,
       IDOK);
@@ -314,13 +334,33 @@ end;
 
 procedure CurPageChanged(CurPageID: Integer);
 begin
-  if (CurPageID = wpFinished) and DriverNeedsAttention then
+  if CurPageID = wpWelcome then
+  begin
+    if ExistingInstallDetected then
+    begin
+      WizardForm.WelcomeLabel2.Caption :=
+        'Setup found Vita Moonlight Host ' + PreviousInstalledVersion + '.' + #13#10 + #13#10 +
+        'Continue to update or repair it in place. You do not need to uninstall first. ' +
+        'Vita Moonlight restores a safe physical display before changing the host, ' +
+        'and preserves Sunshine pairing, unrelated applications, and shared components.';
+    end
+    else
+    begin
+      WizardForm.WelcomeLabel2.Caption :=
+        'This all-in-one setup prepares Sunshine, controller support, a Vita-sized ' +
+        'virtual display, and automatic display recovery.' + #13#10 + #13#10 +
+        'Accept the recommended choices unless this PC already uses Apollo. Save open ' +
+        'work first because connected displays may briefly blink during verification.';
+    end;
+  end
+  else if (CurPageID = wpFinished) and DriverNeedsAttention then
   begin
     SuppressibleMsgBox(
       'Windows has not finished enumerating the Vita virtual display. ' +
       'Setup preserved your physical display and skipped Sunshine display configuration.' + #13#10 + #13#10 +
       'Restart Windows. Then open Vita Moonlight Host as Administrator, click ' +
-      '"Install/update display driver", and click "Apply recommended setup".',
+      '"Repair Vita display driver" under Display & recovery, and then click ' +
+      '"Set up or repair this PC" under Get started.',
       mbInformation,
       MB_OK,
       IDOK);
@@ -661,6 +701,15 @@ begin
   else if CurUninstallStep = usPostUninstall then
   begin
     RemoveHostState;
+    if (PreservedRescueLogPath <> '') and not IsSilentUninstall then
+    begin
+      SuppressibleMsgBox(
+        'Uninstall is complete. The requested stream-rescue log was kept at:' +
+        '' + #13#10 + #13#10 + PreservedRescueLogPath,
+        mbInformation,
+        MB_OK,
+        IDOK);
+    end;
   end;
 end;
 

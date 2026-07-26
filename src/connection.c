@@ -36,6 +36,40 @@ static int connection_status = LI_DISCONNECTED;
 
 int connection_stage = 0;
 
+static const char *connection_state_token(int state) {
+  switch (state) {
+    case LI_READY:
+      return "ready";
+    case LI_PAIRED:
+      return "paired";
+    case LI_CONNECTED:
+      return "connected";
+    case LI_MINIMIZED:
+      return "minimized";
+    default:
+      return "disconnected";
+  }
+}
+
+static void log_invalid_transition(const char *operation) {
+  vita_debug_event(
+      VITA_DEBUG_LEVEL_ERROR, "connection.state",
+      "previous=%s state=%s reason=invalid_%s code=-1",
+      connection_state_token(connection_status),
+      connection_state_token(connection_status), operation);
+}
+
+static void set_connection_state(int next, const char *reason,
+                                 VitaDebugLevel level, int code) {
+  int previous = connection_status;
+  connection_status = next;
+  vita_debug_event(
+      level, "connection.state",
+      "previous=%s state=%s reason=%s code=%d",
+      connection_state_token(previous), connection_state_token(next),
+      reason, code);
+}
+
 bool pause_overlay_is_open(void) {
     return stream_overlay_is_open();
 }
@@ -62,11 +96,11 @@ void start_output() {
 
 void connection_connection_started() {
   if (connection_status != LI_PAIRED) {
-    vita_debug_log("connection_connection_started error: %d\n", connection_status);
+    log_invalid_transition("stream_started");
     return;
   }
-  vita_debug_log("connection started\n");
-  connection_status = LI_CONNECTED;
+  set_connection_state(
+      LI_CONNECTED, "stream_started", VITA_DEBUG_LEVEL_INFO, 0);
   stream_overlay_reset();
   ui_diagnostics_reset_session();
   ui_diagnostics_set_network_state(UI_DIAGNOSTICS_NETWORK_GOOD);
@@ -74,108 +108,126 @@ void connection_connection_started() {
   vitavideo_hide_poor_net_indicator();
 }
 
-static void connection_connection_terminated(int error_code) {
+static void connection_connection_terminated_internal(int error_code,
+                                                       bool requested) {
   if (connection_status != LI_PAIRED && connection_status != LI_CONNECTED &&
       connection_status != LI_MINIMIZED) {
-    vita_debug_log("connection_connection_terminated error: %d\n", connection_status);
+    log_invalid_transition("terminate_callback");
   }
 
-  switch (error_code) {
-    case ML_ERROR_GRACEFUL_TERMINATION:
-      break;
-    case ML_ERROR_NO_VIDEO_TRAFFIC:
-      vita_debug_log("No video received from host. Check the host PC's firewall and port forwarding rules.\n");
-      break;
-    case ML_ERROR_NO_VIDEO_FRAME:
-      vita_debug_log("Your network connection isn't performing well. Reduce your video bitrate setting or try a faster connection.\n");
-      break;
-    case ML_ERROR_UNEXPECTED_EARLY_TERMINATION:
-      vita_debug_log("The connection was unexpectedly terminated by the host due to a video capture error. Make sure no DRM-protected content is playing on the host.\n");
-      break;
-    case ML_ERROR_PROTECTED_CONTENT:
-      vita_debug_log("The connection was terminated by the host due to DRM-protected content. Close any DRM-protected content on the host and try again.\n");
-      break;
-    default:
-      vita_debug_log("Connection terminated with error: %d\n", error_code);
-      break;    
+  const char *reason =
+      requested ? "requested" : (error_code == 0 ? "graceful" : "error");
+  VitaDebugLevel level =
+      error_code == 0 ? VITA_DEBUG_LEVEL_INFO : VITA_DEBUG_LEVEL_ERROR;
+  if (!requested) {
+    switch (error_code) {
+      case ML_ERROR_GRACEFUL_TERMINATION:
+        break;
+      case ML_ERROR_NO_VIDEO_TRAFFIC:
+        reason = "no_video_traffic";
+        break;
+      case ML_ERROR_NO_VIDEO_FRAME:
+        reason = "no_video_frame";
+        break;
+      case ML_ERROR_UNEXPECTED_EARLY_TERMINATION:
+        reason = "unexpected_early_termination";
+        break;
+      case ML_ERROR_PROTECTED_CONTENT:
+        reason = "protected_content";
+        break;
+      default:
+        break;
+    }
   }
 
   if (connection_status == LI_CONNECTED) {
     stop_output();
   }
   LiStopConnection();
-  vita_debug_log("connection terminated\n");
+  set_connection_state(LI_DISCONNECTED, reason, level, error_code);
   vita_debug_flush();
-  connection_status = LI_DISCONNECTED;
   stream_overlay_reset();
   ui_diagnostics_reset_session();
   ui_diagnostics_set_network_state(UI_DIAGNOSTICS_NETWORK_UNKNOWN);
 }
 
+static void connection_connection_terminated(int error_code) {
+  connection_connection_terminated_internal(error_code, false);
+}
+
 int connection_reset() {
   if (connection_status != LI_DISCONNECTED) {
-    vita_debug_log("connection_reset error: %d\n", connection_status);
+    log_invalid_transition("reset");
     return -1;
   }
-  connection_status = LI_READY;
+  set_connection_state(
+      LI_READY, "attempt_begin", VITA_DEBUG_LEVEL_INFO, 0);
   return 0;
 }
 
 int connection_paired() {
   if (connection_status != LI_READY && connection_status != LI_PAIRED &&
       connection_status != LI_CONNECTED) {
-    vita_debug_log("connection_paired error: %d\n", connection_status);
+    log_invalid_transition("paired");
     return -1;
   }
-  connection_status = LI_PAIRED;
+  if (connection_status != LI_PAIRED) {
+    set_connection_state(
+        LI_PAIRED, "pairing_ready", VITA_DEBUG_LEVEL_INFO, 0);
+  }
   return 0;
 }
 
 int connection_minimize() {
   if (connection_status != LI_CONNECTED) {
-    vita_debug_log("connection_minimize error: %d\n", connection_status);
+    log_invalid_transition("minimize");
     return -1;
   }
   pause_output();
-  connection_status = LI_MINIMIZED;
+  set_connection_state(
+      LI_MINIMIZED, "output_paused", VITA_DEBUG_LEVEL_INFO, 0);
   return 0;
 }
 
 int connection_resume() {
   if (connection_status != LI_MINIMIZED) {
-    vita_debug_log("connection_resume error: %d\n", connection_status);
+    log_invalid_transition("resume");
     return -1;
   }
   start_output();
-  connection_status = LI_CONNECTED;
+  set_connection_state(
+      LI_CONNECTED, "output_resumed", VITA_DEBUG_LEVEL_INFO, 0);
   return 0;
 }
 
 int connection_terminate() {
   if (connection_status != LI_PAIRED && connection_status != LI_CONNECTED &&
       connection_status != LI_MINIMIZED) {
-    vita_debug_log("connection_terminate error: %d\n", connection_status);
+    log_invalid_transition("terminate_request");
     return -1;
   }
-  connection_connection_terminated(0);
+  connection_connection_terminated_internal(0, true);
   return 0;
 }
 
 void connection_stage_starting(int stage) {
   connection_stage = stage;
-  const char* connection_stage_name = LiGetStageName(stage);
-  vita_debug_log("connection_stage_starting - stage: %s\n", connection_stage_name);
+  vita_debug_event(
+      VITA_DEBUG_LEVEL_INFO, "connection.stage",
+      "stage_id=%d state=starting", stage);
 }
 void connection_stage_complate(int stage) {
   connection_stage = stage;
-  const char* connection_stage_name = LiGetStageName(stage);
-  vita_debug_log("connection_stage_complete - stage: %s\n", connection_stage_name);
+  vita_debug_event(
+      VITA_DEBUG_LEVEL_INFO, "connection.stage",
+      "stage_id=%d state=complete", stage);
 }
 
 void connection_stage_failed(int stage, int code) {
   connection_stage = stage;
-  const char* connection_stage_name = LiGetStageName(stage);
-  vita_debug_log("connection_stage_failed - stage: %s, %d\n", connection_stage_name, code);
+  vita_debug_event(
+      VITA_DEBUG_LEVEL_ERROR, "connection.stage",
+      "stage_id=%d state=failed code=%d", stage, code);
 }
 
 bool connection_is_ready() {
@@ -204,18 +256,26 @@ void connection_status_update(int status) {
 }
 
 void connection_set_motion_state(uint16_t controller, uint8_t motion_type, uint16_t report_rate) {
-  vita_debug_log("Set motion state called, controller: %u, Type: %u, Report rate: %u", controller, motion_type, report_rate);
+  (void)controller;
 
   //TODO: Multicontroller support here someday? Can't afford pstv tho
   if (!config.enable_motion_controls || config.controller_type != 2) {
-    vita_debug_log("Ignored motion request: DS4 motion profile is not active");
+    vita_debug_event(
+        VITA_DEBUG_LEVEL_INFO, "motion.state",
+        "state=ignored reason=profile_disabled sensor_type=%u",
+        (unsigned int)motion_type);
     return;
   }
 
   vita_motion_set_state(motion_type, report_rate);
-  vita_debug_log("Motion sensor %u is now %s at %u Hz", motion_type,
-                 report_rate == 0 ? "off" : "on",
-                 report_rate == 0 ? 0 : vita_motion_clamp_report_rate(report_rate));
+  vita_debug_event(
+      VITA_DEBUG_LEVEL_INFO, "motion.state",
+      "state=%s sensor_type=%u report_hz=%u",
+      report_rate == 0 ? "disabled" : "enabled",
+      (unsigned int)motion_type,
+      (unsigned int)(report_rate == 0
+          ? 0
+          : vita_motion_clamp_report_rate(report_rate)));
 }
 
 CONNECTION_LISTENER_CALLBACKS connection_callbacks = {

@@ -27,7 +27,6 @@
 #include <getopt.h>
 #include <ini.h>
 #include "input/vita.h"
-#include "debug.h"
 
 extern char* strdup(const char*);
 
@@ -298,7 +297,8 @@ static int ini_handle(void *out, const char *section, const char *name,
     } else if (strcmp(name, "performance_overlay_mode") == 0) {
       config->performance_overlay_mode = INT(value);
     } else if (strcmp(name, "save_debug_log") == 0) {
-      config->save_debug_log = BOOL(value);
+      /* Legacy preference: support-log capture is now always opt-in per run. */
+      config->save_debug_log = false;
     } else if (strcmp(name, "mapping") == 0) {
       config->mapping = STR(value);
     } else if (strcmp(name, "mouse_acceleration") == 0) {
@@ -486,7 +486,6 @@ void config_save(const char* filename, PCONFIGURATION config) {
   write_config_bool(fd, "jp_layout", config->jp_layout);
   write_config_bool(fd, "show_fps", config->show_fps);
   write_config_int(fd, "performance_overlay_mode", config->performance_overlay_mode);
-  write_config_bool(fd, "save_debug_log", config->save_debug_log);
   write_config_bool(fd, "enable_front_touchzones", config->enable_front_touchzones);
 
   write_config_int(fd, "mouse_acceleration", config->mouse_acceleration);
@@ -598,7 +597,6 @@ void config_parse(int argc, char* argv[], PCONFIGURATION config) {
   char* config_file = config_path;
   if (config_file) {
     config_file_parse(config_file, config);
-    vita_debug_log("[DEBUG] Configuración cargada: key_dir = %s, touchscreen_mode = %d, show_fps = %d", config->key_dir, config->touchscreen_mode, config->show_fps);
   }
 
   // Preserve the old FPS-counter preference without drawing both overlays.

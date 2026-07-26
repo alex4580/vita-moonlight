@@ -7,6 +7,10 @@ on:
       - "host/**"
       - "CMakeLists.txt"
       - "CHANGELOG.md"
+      - "README.md"
+      - "LICENSE"
+      - "docs/COMMUNITY_TESTING.md"
+      - "docs/LOGGING_AND_SUPPORT.md"
       - "docs/VITA_SETTINGS_GUIDE.md"
       - "docs/BUILDING.md"
       - "docs/RELEASING.md"
@@ -15,6 +19,7 @@ on:
       - "resources/changeinfo.xml"
       - "sce_sys/livearea/contents/template.xml"
       - "tools/check-version-consistency.py"
+      - "tools/summarize-vita-log.py"
       - ".github/workflows/windows-host.yml"
   pull_request:
     branches: [vita]
@@ -22,6 +27,10 @@ on:
       - "host/**"
       - "CMakeLists.txt"
       - "CHANGELOG.md"
+      - "README.md"
+      - "LICENSE"
+      - "docs/COMMUNITY_TESTING.md"
+      - "docs/LOGGING_AND_SUPPORT.md"
       - "docs/VITA_SETTINGS_GUIDE.md"
       - "docs/BUILDING.md"
       - "docs/RELEASING.md"
@@ -30,6 +39,7 @@ on:
       - "resources/changeinfo.xml"
       - "sce_sys/livearea/contents/template.xml"
       - "tools/check-version-consistency.py"
+      - "tools/summarize-vita-log.py"
       - ".github/workflows/windows-host.yml"
   workflow_dispatch:
   workflow_call:
@@ -298,12 +308,16 @@ jobs:
       - name: Build portable archive
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Path artifacts/portable/tools -Force | Out-Null
+          New-Item -ItemType Directory -Path artifacts/portable/tools,artifacts/portable/host,artifacts/portable/docs -Force | Out-Null
           Copy-Item artifacts/host/* artifacts/portable -Recurse -Force
           Copy-Item artifacts/displaywizard artifacts/portable/tools/DisplayWizard -Recurse -Force
           Copy-Item artifacts/vigembus artifacts/portable/tools/ViGEmBus -Recurse -Force
           Copy-Item artifacts/sunshine artifacts/portable/tools/Sunshine -Recurse -Force
-          Copy-Item host/README.md,host/END_TO_END_TEST.md,host/FINAL_RELEASE_CHECKLIST.md,host/COMPATIBILITY.md,docs/VITA_SETTINGS_GUIDE.md,host/THIRD_PARTY_NOTICES.md,LICENSE artifacts/portable -Force
+          New-Item -ItemType Directory -Path artifacts/portable/tools/SupportLog -Force | Out-Null
+          Copy-Item tools/summarize-vita-log.py artifacts/portable/tools/SupportLog -Force
+          Copy-Item README.md,LICENSE artifacts/portable -Force
+          Copy-Item host/README.md,host/BETA_SMOKE_TEST.md,host/END_TO_END_TEST.md,host/FINAL_RELEASE_CHECKLIST.md,host/COMPATIBILITY.md,host/THIRD_PARTY_NOTICES.md artifacts/portable/host -Force
+          Copy-Item docs/BUILDING.md,docs/COMMUNITY_TESTING.md,docs/LOGGING_AND_SUPPORT.md,docs/RELEASING.md,docs/VITA_SETTINGS_GUIDE.md artifacts/portable/docs -Force
           Compress-Archive -Path artifacts/portable/* -DestinationPath artifacts/installer/Vita-Moonlight-Host-Portable-win-x64.zip -CompressionLevel Optimal
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

@@ -25,6 +25,14 @@ release notes.
 
 - [ ] Complete every step in `END_TO_END_TEST.md` on the primary Windows PC
       and a physical Vita.
+- [ ] Aggregate named results for a genuine clean install, in-place upgrade
+      from an older release, same-version reinstall/repair, uninstall while
+      keeping shared dependencies, and full dependency removal on a disposable
+      PC or snapshot. Do not infer one path from another.
+- [ ] Install the candidate VPK over itself, remove it from LiveArea, and
+      reinstall it. Confirm both preserved external settings and a fresh
+      configuration start safely; never delete a parent Vita storage directory
+      as cleanup.
 - [ ] Repeat install, Steam Big Picture launch, normal disconnect, and
       emergency display recovery on a second clean Windows 10 build 19041+ or
       Windows 11 PC.
@@ -71,12 +79,12 @@ release notes.
 - [ ] Use **End Sunshine app** in a separate run. The stream and Sunshine app
       session must end and the physical display must return.
 - [ ] Use **Recover host display** in a separate run. Within roughly ten
-      seconds LG/another physical monitor must be active, VDD inactive,
-      Sunshine running, and the rescue status successful.
+      seconds at least one connected physical monitor must be active, VDD
+      inactive, Sunshine running, and the rescue status successful.
 - [ ] Attach `%ProgramFiles%\Sunshine\config\sunshine.log`,
       `%ProgramFiles%\Vita Moonlight Host\state\Diagnostics\stream-rescue.log`,
-      the optional Vita
-      diagnostic log, and exact timestamps to any remaining black-frame issue.
+      the optional Vita support log, the Windows host support JSON, and exact
+      timestamps/time zones to any remaining black-frame issue.
 
 ## Input and usability gates
 
@@ -86,7 +94,10 @@ release notes.
 - [ ] Steam / DS4 + gyro reports one DS4 with DS4 Touchpad and Safe PC Guide,
       correct motion axes, sensible units, no drift at rest, and clean state
       after suspend/reconnect. Real-time diagnostics confirms host gyro request
-      and increasing sample events.
+      and increasing sample events. Vita-side horizontal and vertical
+      sensitivity each scale the corresponding axis across the documented
+      0.1x-5.0x range, while Steam Input remains available for per-game
+      refinement.
 - [ ] All four touch modes and the floating keyboard pass from both
       **START + Left** and **Open on-screen keyboard** on the in-stream menu.
 - [ ] Default Local double-tap sends no single-PS event, keeps paused PC media
@@ -104,21 +115,38 @@ release notes.
 - [ ] Real-time diagnostics is a dedicated screen with live stream, network,
       decoder, controller, and gyro state. No inline input-diagnostic line
       remains in the normal session menu.
-- [ ] Diagnostic file logging is Off on first run and does not append during a
-      normal Off-mode stream. Triangle and the Settings toggle both enable and
-      disable it; the in-stream menu shows and changes the same state; a
-      reproduction appends to the path shown on-screen and the closed file
-      copies successfully with VitaShell.
-- [ ] A non-technical tester completes install, health check, pairing, normal
-      play, game close, and recovery using only the GUI documentation.
+- [ ] Support log is Not capturing on first run and does not open, create, or
+      write a support-log file during normal play.
+      **Settings > System and support > Start support log**, the
+      in-stream **Start support log**, and Triangle on Real-time diagnostics
+      begin the same fresh capture. **Stop and save support log** and Triangle
+      close it. A second Start rotates the former `moonlight.log` to the single
+      `moonlight.previous.log` and creates a fresh current file.
+- [ ] A captured `vita-support-v1` log has ordered session/sequence fields,
+      initial system/configuration/connection/stream snapshots, structured
+      connection stages, stream actions, decoder state, network state and
+      10-second summaries, gyro state changes, rate-limited legacy error
+      categories, and a final session summary. It contains no per-touch,
+      per-button, typed-character, or per-gyro-sample flood.
+- [ ] Run `tools\summarize-vita-log.py --self-test`, normal summary, and
+      `--json` summary. The packaged copy under `tools\SupportLog` behaves the
+      same, groups capture sessions correctly, and never reproduces raw legacy
+      text, unknown values, arbitrary filenames, or local paths.
+- [ ] **Diagnostics & support > Save support report...** creates a readable
+      point-in-time JSON report with host version, platform, prerequisite,
+      display, lifecycle, recovery, and rescue state. It runs only on request,
+      works from installed and diagnostics-only portable packages, and does
+      not enable a continuous Windows host logger.
+- [ ] A non-technical tester completes install, **Check readiness**, pairing,
+      normal play, game close, and recovery using only the GUI documentation.
 - [ ] A first-run Vita shows Recommended 960x544/60/8 Mbps, H.264 Rec. 709
       limited-range SDR, 1024-byte packets, packet-loss recovery, frame pacing,
       fit scaling, vblank off, Maximum compatibility input, performance overlay
-      Off, and diagnostic logging Off.
+      Off, and support log Not capturing.
 - [ ] Reliable, Recommended, High quality, Remote / VPN, and Custom preset
       detection pass. Each named preset restores its complete documented
-      stream path, and Reset all to recommended also restores input, overlay,
-      and logging defaults.
+      stream path, and Restore recommended defaults also restores input,
+      overlay, and support-log defaults.
 
 ## Host safety and packaging gates
 
@@ -126,7 +154,8 @@ release notes.
       Microsoft Visual C++ runtime 14.44.35211.0 or newer, the pinned signed VDD,
       recovery task, and running stream-rescue agent without manual downloads.
 - [ ] Corrupt or stop each prerequisite in a disposable test image. Installer
-      and **Apply recommended setup** must repair Sunshine, ViGEmBus, the Visual
+      and **Get started > Set up or repair this PC** must repair Sunshine,
+      ViGEmBus, the Visual
       C++ runtime, and the VDD or stop with an actionable error. Simulate a
       3010/reboot-required result and verify no Sunshine display configuration
       or active-display change runs until after the reboot and the user resumes
@@ -199,9 +228,12 @@ release notes.
       package staged, then run explicit VDD removal. The orphaned MttVDD package
       must be removed without matching or deleting any unrelated display
       driver package.
-- [ ] Installer and portable ZIP contain the same companion build, current
-      guides (including compatibility and Vita tuning), licenses, and
-      `THIRD_PARTY_NOTICES.md`.
+- [ ] Installer and portable ZIP contain the same companion build, simple root
+      README, `host` and `docs` guide trees (including community testing,
+      logging/support, compatibility, Vita tuning, building, and releasing),
+      the packaged support-log summarizer, licenses, and
+      `THIRD_PARTY_NOTICES.md`. Every packaged relative documentation link
+      resolves.
 - [ ] Scan release assets with Microsoft Defender and VirusTotal or document
       why an external scan was not used.
 - [ ] Configure the mandatory `WINDOWS_CERTIFICATE_BASE64` and
