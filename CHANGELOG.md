@@ -8,8 +8,9 @@
   and released mouse, DS4-touchpad, and tablet contacts when changing modes,
   entering a mapped corner, or ending a stream.
 * Corrected the VPK build identity to 0.14.6 and added tag/version validation,
-  signed-release enforcement, exact release-asset checks, and SHA-256
-  manifests to the publishing workflow.
+  a one-time unsigned `v0.14.6-beta.1` bootstrap gate, signing enforcement for
+  every later tag, exact release-asset checks, SHA-256 manifests, and GitHub
+  provenance attestations to the publishing workflow.
 * Rebuilt Windows uninstall around verified physical-display recovery. Shared
   Sunshine, ViGEmBus, and VDD installations are retained by default, optional
   removal is explicit, Vita-managed host state is cleaned, and silent

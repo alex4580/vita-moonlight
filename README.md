@@ -28,10 +28,19 @@ Foundation: **Free code signing provided by SignPath.io, certificate by
 SignPath Foundation.** Unsigned previews, if any, are labeled explicitly and
 are not covered by that statement.
 
+The one-time `v0.14.6-beta.1` bootstrap is built and published by GitHub
+Actions without Authenticode. Windows will show **Unknown publisher** and may
+display a Microsoft Defender SmartScreen warning. Check the warning on the
+release page, verify `SHA256SUMS`, and confirm `unsigned-bootstrap` in
+`windows-signing-status.json` before running it. Later release tags remain
+signing-required.
+
 ## Install for the first time
 
 1. On the PC, run `Vita-Moonlight-Host-Setup-win-x64.exe` and accept the
-   recommended components.
+   recommended components. For the explicitly unsigned `v0.14.6-beta.1`
+   bootstrap, verify the checksum first; if SmartScreen appears, choose
+   **More info > Run anyway** only for the verified GitHub download.
 2. Restart Windows if setup asks you to. Open **Vita Moonlight Host** from the
    Start menu, choose **Restart as Administrator** if offered, and click
    **Set up or repair this PC**.

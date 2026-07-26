@@ -26,20 +26,27 @@ handling are defined in the linked policy.
 
 ## Release trust model
 
-A public Windows package has three separate trust layers:
+A public Windows package can be the explicitly unsigned one-time bootstrap or
+an Authenticode-signed release. It has these independent trust layers:
 
-1. **Authenticode** signs `VitaMoonlight.Host.exe`, the setup EXE, and the
-   Inno-generated uninstaller. Tagged builds fail closed if the configured
-   signing step cannot sign or verify them.
+1. **Authenticode**, when configured, signs `VitaMoonlight.Host.exe`, the
+   setup EXE, and the Inno-generated uninstaller. Stable tagged builds fail
+   closed if signing is unavailable or verification fails. The exact
+   `v0.14.6-beta.1` bootstrap is a one-time exception: it may publish without
+   Authenticode only when the workflow verifies that the project-owned
+   executables are actually unsigned and labels the release prominently.
 2. The bundled display driver and third-party installers retain their vendor
    signatures and are downloaded at pinned SHA-256 hashes.
 3. GitHub generates a signed build-provenance attestation for the VPK, setup
-   EXE, portable ZIP, and checksum manifest. This covers artifacts such as the
-   VPK and ZIP that do not carry Windows Authenticode signatures.
+   EXE, portable ZIP, dependency/signing manifests, and checksum manifest.
+   This covers artifacts that do not carry Windows Authenticode signatures.
 
 The Vita VPK is a homebrew package, not a Windows PE file, so Authenticode does
-not apply to it. Its release identity is established by the signed Git tag,
-published SHA-256 checksum, and GitHub provenance attestation.
+not apply to it. Its release identity is established by the release tag,
+published SHA-256 checksum, and GitHub provenance attestation. Stable releases
+also require GitHub to verify the cryptographic signature on the annotated
+tag. Only the exact `v0.14.6-beta.1` bootstrap may use an unsigned annotated
+tag, and its tag and Windows status are labeled as unsigned.
 
 ## Configure Windows code signing
 
@@ -48,10 +55,13 @@ secrets:
 
 - `WINDOWS_CERTIFICATE_BASE64`
 - `WINDOWS_CERTIFICATE_PASSWORD`
+- `WINDOWS_EXPECTED_SIGNER_SUBJECT`
 
 The certificate must contain a code-signing key and a chain suitable for the
-intended audience. A self-signed certificate is useful only for private
-testing; it does not make a public download trusted by Windows.
+intended audience. Set the expected signer subject to the exact
+`SignerCertificate.Subject` value that the verified release certificate must
+produce. A self-signed certificate is useful only for private testing; it
+does not make a public download trusted by Windows.
 
 Modern publicly trusted certificates are commonly held in hardware or a
 managed signing service and may not be exportable as a PFX. If that is how the
@@ -89,28 +99,34 @@ certificate, password, token, or generated signing wrapper.
    Record the exact commit and workflow URLs.
 4. For a final release, complete `host/END_TO_END_TEST.md` and
    `host/FINAL_RELEASE_CHECKLIST.md`.
-5. Confirm the publisher signing secrets or managed-provider integration is
-   ready.
-6. Create a signed annotated tag on the tested commit. A beta suffix causes
-   GitHub to publish a prerelease:
+5. Confirm the publisher signing secrets, expected signer subject, and
+   managed-provider integration are ready. The only exception is the
+   one-time `v0.14.6-beta.1` unsigned bootstrap.
+6. Ordinarily, create a signed annotated tag on the tested commit and confirm
+   GitHub shows it as **Verified**. For the one-time bootstrap only, create
+   this unsigned annotated tag:
 
    ```sh
-   git tag -s v0.14.6-beta.1 TESTED_COMMIT_SHA
-   git tag --verify v0.14.6-beta.1
+   git tag -a v0.14.6-beta.1 TESTED_COMMIT_SHA \
+     -m "Vita Moonlight 0.14.6 beta 1"
    git push fork v0.14.6-beta.1
    ```
 
-7. The tag workflow rebuilds both products, verifies Authenticode, creates
-   `SHA256SUMS`, attests the assets, and publishes the release. Preflight
-   rejects lightweight tags and any annotated tag whose signature GitHub does
-   not verify. It also refuses to overwrite an existing draft or published
-   release for the same tag.
+   Every other beta, release-candidate, and stable tag must instead use
+   `git tag -s`, and its signature must be registered and shown as
+   **Verified** by GitHub.
 
-Use the publisher's own signing key for the Git tag. If no GPG or SSH signing
-identity is configured, configure and verify one before tagging. Register the
-corresponding public key as a GitHub signing key so the tag is shown as
-**Verified**; do not create an unsigned public-release tag merely to make the
-workflow run.
+7. The tag workflow rebuilds both products, verifies the selected signing
+   state, creates `SHA256SUMS`, attests every release asset, and publishes the
+   release. Preflight rejects lightweight tags, every other unsigned tag,
+   incomplete signing configuration, and any existing draft or release for
+   the same tag.
+
+If final draft verification fails, inspect the retained draft and workflow
+logs. After correcting the cause, delete only that draft with
+`gh release delete TAG --yes` and rerun the workflow. Do not use
+`--cleanup-tag`; the annotated tag must remain attached to the reviewed
+commit.
 
 ## Verify a published release
 
@@ -133,10 +149,14 @@ gh attestation verify .\moonlight.vpk --repo OWNER/vita-moonlight
 
 Install the downloaded setup package, open
 `C:\Program Files\Vita Moonlight Host`, and verify the embedded host executable
-with `Get-AuthenticodeSignature` as well. The generated uninstaller is signed
-during the Inno build and verified before packaging.
+with `Get-AuthenticodeSignature` as well. For a signed release, the expected
+status is `Valid`, and the generated uninstaller is signed during the Inno
+build. For the explicitly unsigned `v0.14.6-beta.1` bootstrap, the expected
+status is `NotSigned`; the release page and `windows-signing-status.json` must
+say the same thing.
 
-Do not publish the release if the expected legal publisher name, a valid
-timestamp, the checksums, or either provenance verification is missing.
-For a SignPath-covered release, the expected Authenticode publisher is
-**SignPath Foundation**.
+Do not publish when the observed signing state differs from the declared
+state, checksums differ, or provenance verification is missing. A signed
+release must also have the expected legal publisher name and a valid
+timestamp. For a SignPath-covered release, the expected Authenticode
+publisher is **SignPath Foundation**.

@@ -14,6 +14,15 @@ Download these two files from the **same GitHub release**:
 - `Vita-Moonlight-Host-Setup-win-x64.exe`
 - `moonlight.vpk`
 
+Also download `SHA256SUMS` and read the warning at the top of the release
+notes. If the release is labeled unsigned, Windows will show **Unknown
+publisher** and may show a Microsoft Defender SmartScreen warning. That is
+expected for the one-time `v0.14.6-beta.1` release only when
+`windows-signing-status.json` says `unsigned-bootstrap`. Do not run a download
+whose checksum or stated signing status differs from the release.
+After those checks, choose **More info > Run anyway** if SmartScreen blocks
+that exact bootstrap installer.
+
 Do not combine a VPK from one release with a Windows installer from another.
 Record the release name and, if shown, its commit.
 
