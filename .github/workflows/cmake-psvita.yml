@@ -33,6 +33,9 @@ jobs:
       - name: Test privacy-safe support-log summarizer
         run: python3 tools/summarize-vita-log.py --self-test
 
+      - name: Test VitaSDK dependency resolver
+        run: python3 tools/fetch-vitasdk-packages.py --self-test
+
       - name: Set up dependencies
         run: |
           sudo apt-get update
@@ -63,32 +66,16 @@ jobs:
 
           package_dir="$RUNNER_TEMP/vitasdk-packages"
           mkdir -p "$package_dir"
-          packages=(
-            "490392817|zlib.tar.xz|cb4f0fe965c94882ef58e1dd3962abc57db3ec40ce8d171bd404e4d3b8c4eeda"
-            "490392593|bzip2.tar.xz|5f1372b4a0e3c693343006c4548168b726b76e0e5ca86aea9c567887b329a67d"
-            "490392819|zstd.tar.xz|ea5b79959b2a23ebb844cbc442d179028b9fc4e5e75abca52c404646fae5a9cf"
-            "490392686|libpng.tar.xz|8ab0621443cd0b5d6a922dc38e0f48aca4c885e42f27a4162b2dab1f5b61281d"
-            "490392667|libjpeg-turbo.tar.xz|f844cebe37967883aa965ba635597e21a5ee4c6fca69120231d4eb34463f5ab3"
-            "490392625|freetype.tar.xz|45b40a5766c6b49585985630e06f4543eafd0572f1658b12c3394e8203c3c49c"
-            "490392707|libvita2d.tar.xz|945eb1a85e80bc7fa41cadafb57e625b8282819ab69ab72ccb0dcbc957dcabd5"
-            "490392743|openssl.tar.xz|a16ec551aa2c468e4f060132dff3445a017ea4f03e03b9d10d8137b2a7bf3e8e"
-            "490392607|curl.tar.xz|d22eea861f4d362dbbaa611e9cf27b30726287f31b8b12286da226546e58e356"
-            "490392613|expat.tar.xz|d81425baafd29a976e5253ccaf628b697e874061bbddfd43509f10a053c589db"
-            "490392745|opus.tar.xz|d1e8b2d7584a8410329ca7c20a25a50c03c2d6efa5bc1ff2e478fc5661ffbb0c"
-          )
-          for package in "${packages[@]}"; do
-            IFS='|' read -r asset_id asset_name asset_sha256 <<< "$package"
-            archive="$package_dir/$asset_name"
-            curl \
-              --fail \
-              --location \
-              --retry 3 \
-              --header "Accept: application/octet-stream" \
-              --output "$archive" \
-              "https://api.github.com/repos/vitasdk/packages/releases/assets/$asset_id"
-            echo "$asset_sha256  $archive" | sha256sum --check --strict
-            "$RUNNER_TEMP/vdpm/vdpm" -f "$archive"
-          done
+          dependency_manifest="$GITHUB_WORKSPACE/vitasdk-dependencies.json"
+          python3 tools/fetch-vitasdk-packages.py \
+            --output-dir "$package_dir" \
+            --manifest "$dependency_manifest"
+          python3 -c \
+            'import json, sys; print("\n".join(a["name"] for a in json.load(open(sys.argv[1], encoding="utf-8"))["assets"]))' \
+            "$dependency_manifest" |
+            while IFS= read -r asset_name; do
+              "$RUNNER_TEMP/vdpm/vdpm" -f "$package_dir/$asset_name"
+            done
 
           test -f "$VITASDK/share/vita.toolchain.cmake"
           echo "$VITASDK/bin" >> $GITHUB_PATH
@@ -98,6 +85,7 @@ jobs:
           cmake -S . -B build -DCMAKE_TOOLCHAIN_FILE="${{ env.VITASDK }}/share/vita.toolchain.cmake"
           cd build
           make
+          cp ../vitasdk-dependencies.json .
 
       - name: List build outputs
         run: |
@@ -107,5 +95,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: moonlight-vpk
-          path: build/*.vpk
+          path: |
+            build/*.vpk
+            build/vitasdk-dependencies.json
           if-no-files-found: error
