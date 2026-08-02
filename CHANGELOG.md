@@ -12,6 +12,10 @@
   Setup preserves the original paused/enabled intent and exact recovery-task
   obligations across a killed installer, then restores them before clearing
   its protected maintenance fence.
+* Fixed in-place upgrades from older beta hosts that predate the
+  `uninstall prepare` command. The installer now relies on its embedded current
+  maintenance helper's already-completed physical-display safety check instead
+  of asking the legacy installed executable to run a command it does not have.
 * Hardened uninstall with exact Task Scheduler COM verification, a second
   physical-display safety gate, rollback of recovery safeguards on failure,
   and allowlisted cleanup of current and legacy Vita-owned state.

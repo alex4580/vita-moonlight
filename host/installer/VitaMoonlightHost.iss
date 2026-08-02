@@ -317,7 +317,6 @@ end;
 function BeginUpgradeMaintenance(var ErrorText: String): Boolean;
 var
   ResultCode: Integer;
-  Details: String;
 begin
   Result := False;
   ErrorText := '';
@@ -329,6 +328,9 @@ begin
   if not ExtractMaintenanceHelper(ErrorText) then
     exit;
 
+  WizardForm.StatusLabel.Caption :=
+    'Restoring and verifying the physical display before installation';
+  WizardForm.StatusLabel.Update;
   MaintenanceOwnerPid := GetCurrentProcessId;
   ResultCode := -1;
   if not Exec(
@@ -346,12 +348,9 @@ begin
   end;
   if ResultCode <> 0 then
   begin
-    Details := ReadSetupHostCommandError;
-    if Details <> '' then
-      Details := #13#10 + Details;
     ErrorText :=
       'Setup could not begin exclusive Vita Moonlight maintenance (exit code ' +
-      IntToStr(ResultCode) + ').' + Details + #13#10 + #13#10 +
+      IntToStr(ResultCode) + ').' + #13#10 + #13#10 +
       'Finish any other setup or host change, then run this installer again.';
     exit;
   end;
@@ -366,7 +365,6 @@ end;
 function EndUpgradeMaintenance: Boolean;
 var
   ResultCode: Integer;
-  Details: String;
 begin
   Result := True;
   if not MaintenanceFenceActive then
@@ -388,11 +386,10 @@ begin
   end;
   if ResultCode <> 0 then
   begin
-    Details := ReadSetupHostCommandError;
     Log(
       'ERROR: Setup could not end protected installer maintenance. Exit code: ' +
-      IntToStr(ResultCode) + '. ' + Details +
-      ' The fence was kept for a safe installer retry.');
+      IntToStr(ResultCode) +
+      '. The fence was kept for a safe installer retry.');
     Result := False;
     exit;
   end;
@@ -503,11 +500,21 @@ begin
     exit;
   end;
 
-  { A private pre-fence build may still have accepted Pause after setup's
-    initial snapshot. Re-read the durable intent immediately before rollback;
-    never recreate enabled-state tasks over a newer Paused preference. }
-  ResultCode := -1;
-  if not Exec(
+  { A legacy host with no lifecycle record has no Pause feature to re-read and
+    may not expose the current `backend` command. Keep its enabled snapshot
+    authoritative without sending it a command it cannot understand. A
+    private pre-fence build which did publish lifecycle state may still have
+    accepted Pause after setup's initial snapshot, so re-read that intent
+    immediately before rollback and never recreate enabled-state tasks over a
+    newer Paused preference. }
+  ResultCode := 0;
+  if not BackendLifecycleStateExists then
+  begin
+    Log(
+      'The installed host has no backend lifecycle record; using the protected ' +
+      'enabled-state maintenance snapshot for legacy safeguard rollback.');
+  end
+  else if not Exec(
     InstalledHostPath,
     WithMaintenanceBypass('backend status --intent-exit-code'),
     ExpandConstant('{app}'),
@@ -531,8 +538,7 @@ begin
       'the previously enabled recovery tasks during rollback.');
     exit;
   end;
-  if (ResultCode <> 0) and
-     not ((ResultCode = 2) and (not BackendLifecycleStateExists)) then
+  if ResultCode <> 0 then
   begin
     Log(
       'ERROR: Setup could not safely classify the current Vita host preference ' +
@@ -637,17 +643,18 @@ begin
     UpgradeRecoveryTaskWasRemoved := RecoveryTaskWasInstalled;
   end;
 
-  { Elevated maintenance commands deliberately trust only the protected,
-    currently installed executable. A package copy extracted to a temporary directory is a
-    portable executable and must never be granted this authority. }
+  { After the embedded helper's narrowly gated physical-recovery bootstrap,
+    later task mutations deliberately trust only the protected, currently
+    installed executable. The temporary helper receives no general installed-
+    host authority. }
   PreflightHostPath := ExpandConstant('{app}\VitaMoonlight.Host.exe');
   if not FileExists(PreflightHostPath) then
   begin
     if ExistingInstallDetected then
       Log(
         'The registered installation has no host executable. Setup will repair ' +
-        'the payload first and run physical-display recovery before any driver ' +
-        'or streaming-host configuration. No existing background process was stopped.')
+        'the payload after the embedded helper has already restored and verified ' +
+        'the physical display. No existing background process was stopped.')
     else
       Log(
         'Protected maintenance now covers this clean installation. The physical ' +
@@ -655,16 +662,14 @@ begin
     exit;
   end;
 
-  if not RunPreflightHostCommand(
-    'Restoring and verifying the physical display before upgrade or repair',
-    'uninstall prepare',
-    ResultCode,
-    ErrorText) then
-  begin
-    Result := ErrorText + #13#10 + #13#10 +
-      'Setup stopped before replacing files or stopping background functions.';
-    exit;
-  end;
+  { The embedded current maintenance helper already restored and verified a
+    physical-only topology before it published the maintenance snapshot in
+    BeginUpgradeMaintenance. Do not repeat that step through the installed
+    host: older supported builds do not expose `uninstall prepare` and return
+    exit code 2 for that current-only command. }
+  Log(
+    'Protected installer maintenance already restored and verified the ' +
+    'physical display before upgrade or repair.');
 
   if UpgradeBackendWasDisabled then
   begin

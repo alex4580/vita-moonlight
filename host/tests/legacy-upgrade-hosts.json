@@ -1,0 +1,24 @@
+{
+  "schema": "vita-moonlight/legacy-upgrade-hosts/v1",
+  "hosts": [
+    {
+      "productVersion": "0.14.6+dc21348a684b17f265bc7f5bb71be532dcd68755",
+      "sha256": "3bfdeb1fabca8290e9d69db8f9cb09ad93834e7d1376d756776a15cda5c693db",
+      "backendLifecycleRecord": false,
+      "preReplacementCommands": [
+        "agent uninstall",
+        "recovery uninstall"
+      ],
+      "rollbackCommands": [
+        "agent install",
+        "recovery install"
+      ],
+      "unsupportedCommands": [
+        "backend status --intent-exit-code",
+        "maintenance status",
+        "session recover-upgrade",
+        "uninstall prepare"
+      ]
+    }
+  ]
+}

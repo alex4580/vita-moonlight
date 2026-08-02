@@ -102,6 +102,16 @@ validate the privacy-safe support-log summarizer, and assemble the packages.
 It cannot prove Vita rendering, hardware decoding, controller timing, gyro,
 Wi-Fi behavior, or Windows display recovery on a real GPU and monitor.
 
+The source-only Windows upgrade check verifies that setup never sends a
+current-only command to a known older installed host before replacing it. It
+also verifies that the installer-embedded current helper restores and proves a
+physical-only topology before publishing the protected maintenance fence. It
+does not mutate the computer running the check:
+
+```powershell
+python tools\check-windows-upgrade-contract.py
+```
+
 The support-log summarizer has no third-party Python dependencies:
 
 ```powershell

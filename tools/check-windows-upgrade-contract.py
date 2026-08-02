@@ -1,0 +1,347 @@
+#!/usr/bin/env python3
+"""Statically verify the safe Windows in-place-upgrade compatibility contract.
+
+The installer must run against older installed host binaries before it can
+replace them.  Those binaries cannot be assumed to expose commands introduced
+by the candidate.  This check records the command surface of real legacy
+builds and verifies that pre-replacement setup uses only that common surface.
+
+This is deliberately a source-only check: it never queries or changes the live
+Windows display topology, services, scheduled tasks, registry, or installation.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import sys
+from pathlib import Path
+from typing import List
+
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+INSTALLER_PATH = REPOSITORY_ROOT / "host/installer/VitaMoonlightHost.iss"
+MAINTENANCE_PATH = (
+    REPOSITORY_ROOT / "host/VitaMoonlight.Host/InstallerMaintenanceFence.cs"
+)
+UNINSTALL_PATH = REPOSITORY_ROOT / "host/VitaMoonlight.Host/UninstallManager.cs"
+LEGACY_HOSTS_PATH = REPOSITORY_ROOT / "host/tests/legacy-upgrade-hosts.json"
+
+
+class ContractFailure(Exception):
+    """Raised when a release-critical upgrade invariant is absent."""
+
+
+def read(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8-sig")
+    except OSError as exc:
+        relative = path.relative_to(REPOSITORY_ROOT)
+        raise ContractFailure(f"could not read {relative}: {exc}") from exc
+
+
+def section(source: str, start: str, end: str, description: str) -> str:
+    start_index = source.find(start)
+    if start_index < 0:
+        raise ContractFailure(f"could not find the start of {description}")
+    end_index = source.find(end, start_index + len(start))
+    if end_index < 0:
+        raise ContractFailure(f"could not find the end of {description}")
+    return source[start_index:end_index]
+
+
+def require(condition: bool, message: str) -> None:
+    if not condition:
+        raise ContractFailure(message)
+
+
+def require_in_order(source: str, tokens: List[str], description: str) -> None:
+    position = -1
+    for token in tokens:
+        next_position = source.find(token, position + 1)
+        if next_position < 0:
+            raise ContractFailure(f"{description}: missing {token!r}")
+        position = next_position
+
+
+def load_legacy_hosts() -> list[dict[str, object]]:
+    try:
+        document = json.loads(read(LEGACY_HOSTS_PATH))
+    except json.JSONDecodeError as exc:
+        raise ContractFailure(f"legacy host fixture is invalid JSON: {exc}") from exc
+    require(
+        document.get("schema") == "vita-moonlight/legacy-upgrade-hosts/v1",
+        "legacy host fixture has an unsupported schema",
+    )
+    hosts = document.get("hosts")
+    require(isinstance(hosts, list) and bool(hosts), "legacy host fixture is empty")
+    return hosts
+
+
+def check_installer_legacy_surface(installer: str) -> None:
+    prepare = section(
+        installer,
+        "function PrepareToInstall(",
+        "procedure DeinitializeSetup;",
+        "PrepareToInstall",
+    )
+    runner = section(
+        installer,
+        "function RunPreflightHostCommand(",
+        "function BackendLifecycleStateExists:",
+        "RunPreflightHostCommand",
+    )
+    begin = section(
+        installer,
+        "function BeginUpgradeMaintenance(",
+        "function EndUpgradeMaintenance:",
+        "BeginUpgradeMaintenance",
+    )
+    rollback = section(
+        installer,
+        "procedure TryRestoreUpgradeSafeguards;",
+        "function PrepareToInstall(",
+        "TryRestoreUpgradeSafeguards",
+    )
+
+    require(
+        "PreflightHostPath" in runner,
+        "preflight runner no longer clearly targets the installed host",
+    )
+    require(
+        "WithMaintenanceBypass(Parameters)" in runner,
+        "installed-host preflight no longer carries the live maintenance owner",
+    )
+    commands = re.findall(
+        r"RunPreflightHostCommand\(\s*'[^']*',\s*'([^']+)'",
+        prepare,
+        flags=re.DOTALL,
+    )
+    require(bool(commands), "PrepareToInstall has no installed-host safeguard commands")
+    require(
+        len(commands) == prepare.count("RunPreflightHostCommand("),
+        "every installed-host preflight call must use a literal command "
+        "which the legacy compatibility fixture can audit",
+    )
+
+    rollback_commands = re.findall(
+        r"WithMaintenanceBypass\('([^']+)'\)",
+        rollback,
+    )
+    require(
+        len(rollback_commands) == rollback.count("WithMaintenanceBypass("),
+        "every installed-host rollback call must use a literal command "
+        "which the legacy compatibility fixture can audit",
+    )
+    require(
+        len(rollback_commands) == rollback.count("InstalledHostPath,"),
+        "every installed-host rollback Exec call must pass through the "
+        "audited maintenance-bypass command surface",
+    )
+    backend_probe = "backend status --intent-exit-code"
+    common_rollback_commands = [
+        command for command in rollback_commands if command != backend_probe
+    ]
+
+    legacy_hosts = load_legacy_hosts()
+    for host in legacy_hosts:
+        version = host.get("productVersion")
+        sha256 = host.get("sha256")
+        backend_lifecycle_record = host.get("backendLifecycleRecord")
+        supported = host.get("preReplacementCommands")
+        rollback_supported = host.get("rollbackCommands")
+        unsupported = host.get("unsupportedCommands")
+        require(
+            isinstance(version, str) and bool(version),
+            "legacy host fixture has no productVersion",
+        )
+        require(
+            isinstance(sha256, str) and re.fullmatch(r"[0-9a-f]{64}", sha256) is not None,
+            f"legacy host {version} has no valid observed SHA-256",
+        )
+        require(
+            isinstance(backend_lifecycle_record, bool),
+            f"legacy host {version} has no backendLifecycleRecord classification",
+        )
+        require(
+            isinstance(supported, list) and all(isinstance(item, str) for item in supported),
+            f"legacy host {version} has an invalid preReplacementCommands list",
+        )
+        require(
+            isinstance(rollback_supported, list)
+            and all(isinstance(item, str) for item in rollback_supported),
+            f"legacy host {version} has an invalid rollbackCommands list",
+        )
+        require(
+            isinstance(unsupported, list) and all(isinstance(item, str) for item in unsupported),
+            f"legacy host {version} has an invalid unsupportedCommands list",
+        )
+        unexpected = sorted(set(commands) - set(supported))
+        require(
+            not unexpected,
+            f"PrepareToInstall invokes commands unsupported by legacy host {version}: "
+            + ", ".join(unexpected),
+        )
+        forbidden = sorted(set(commands).intersection(unsupported))
+        require(
+            not forbidden,
+            f"PrepareToInstall invokes known current-only commands on legacy host {version}: "
+            + ", ".join(forbidden),
+        )
+        rollback_unexpected = sorted(
+            set(common_rollback_commands) - set(rollback_supported)
+        )
+        require(
+            not rollback_unexpected,
+            f"Rollback invokes commands unsupported by legacy host {version}: "
+            + ", ".join(rollback_unexpected),
+        )
+        rollback_forbidden = sorted(
+            set(common_rollback_commands).intersection(unsupported)
+        )
+        require(
+            not rollback_forbidden,
+            f"Rollback invokes known current-only commands on legacy host {version}: "
+            + ", ".join(rollback_forbidden),
+        )
+        if backend_lifecycle_record:
+            require(
+                backend_probe in rollback_supported,
+                f"legacy host {version} has lifecycle state but cannot report its intent",
+            )
+        else:
+            require(
+                backend_probe in unsupported,
+                f"legacy host {version} without lifecycle state must classify "
+                "the gated backend probe as unsupported",
+            )
+
+    require(
+        "'uninstall prepare'" not in prepare,
+        "PrepareToInstall must not send current-only `uninstall prepare` "
+        "to an older installed host",
+    )
+    require_in_order(
+        prepare,
+        [
+            "BeginUpgradeMaintenance(ErrorText)",
+            "QueryMaintenanceSnapshotState(",
+            "PreflightHostPath :=",
+            "RunPreflightHostCommand(",
+        ],
+        "upgrade safety gate ordering",
+    )
+    require_in_order(
+        begin,
+        [
+            "ExtractMaintenanceHelper(ErrorText)",
+            "VitaMoonlight.Host.Maintenance.exe",
+            "maintenance begin --owner-pid ",
+            "if ResultCode <> 0 then",
+            "MaintenanceFenceActive := True",
+        ],
+        "maintenance helper begin ordering",
+    )
+    require_in_order(
+        rollback,
+        [
+            "ResultCode := 0",
+            "if not BackendLifecycleStateExists then",
+            "else if not Exec(",
+            "WithMaintenanceBypass('backend status --intent-exit-code')",
+        ],
+        "legacy rollback capability gate",
+    )
+
+
+def check_helper_physical_proof(maintenance: str, uninstall: str) -> None:
+    begin = section(
+        maintenance,
+        "internal static InstallerMaintenanceState Begin(",
+        "internal static bool End(",
+        "InstallerMaintenanceFence.Begin",
+    )
+    recovery_call = (
+        ".RecoverPhysicalAndDiscardPendingTransactionForInstallerMaintenanceBootstrap("
+    )
+    require(
+        begin.count(recovery_call) == 2,
+        "maintenance begin must recover physically in both legacy-unprotected "
+        "and current-protected branches",
+    )
+    require_in_order(
+        begin,
+        [
+            "if (bootstrapFirst)",
+            recovery_call,
+            "using var backendOperation",
+            "if (!bootstrapFirst)",
+            recovery_call,
+            "var snapshot =",
+            "TrustedFileSystem.WriteAllText(BackupFile",
+            "TrustedFileSystem.WriteAllText(StateFile",
+        ],
+        "maintenance physical proof before durable fence publication",
+    )
+
+    locked_recovery = section(
+        uninstall,
+        "RecoverPhysicalAndDiscardPendingTransactionLocked(",
+        "internal static SunshineIntegrationCleanupResult CleanupIntegration()",
+        "installer maintenance physical recovery",
+    )
+    require(
+        locked_recovery.count("VerifyPhysicalOnlyTopology(topology)") >= 2,
+        "installer maintenance recovery must prove physical-only topology "
+        "before and after state cleanup",
+    )
+    require_in_order(
+        locked_recovery,
+        [
+            "topology.RecoverPhysicalDisplays()",
+            "topology.DisableManagedVirtualDisplays()",
+            "VerifyPhysicalOnlyTopology(topology)",
+            "SessionManager.DiscardPendingRecoveryLocked(transaction)",
+            "VerifyPhysicalOnlyTopology(topology)",
+        ],
+        "installer maintenance physical-only recovery",
+    )
+
+    physical_verification = section(
+        uninstall,
+        "internal static void VerifyPhysicalOnlyTopology(",
+        "private static T WithSunshineStopped<T>(",
+        "physical-only topology verification",
+    )
+    require_in_order(
+        physical_verification,
+        [
+            "activePhysical.Length == 0",
+            "throw new InvalidOperationException(",
+            "activeManagedVirtual.Length > 0",
+            "throw new InvalidOperationException(",
+        ],
+        "unsafe display topologies fail closed",
+    )
+
+
+def main() -> int:
+    try:
+        check_installer_legacy_surface(read(INSTALLER_PATH))
+        check_helper_physical_proof(
+            read(MAINTENANCE_PATH),
+            read(UNINSTALL_PATH),
+        )
+    except ContractFailure as exc:
+        print(f"Windows upgrade contract check failed: {exc}", file=sys.stderr)
+        return 1
+
+    print(
+        "Windows upgrade contract check passed: legacy installed-host commands "
+        "are compatible and the embedded helper proves physical-only safety."
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -21,6 +21,7 @@ on:
       - "resources/changeinfo.xml"
       - "sce_sys/livearea/contents/template.xml"
       - "tools/check-version-consistency.py"
+      - "tools/check-windows-upgrade-contract.py"
       - "tools/summarize-vita-log.py"
       - ".github/workflows/release.yml"
       - ".github/workflows/windows-host.yml"
@@ -44,6 +45,7 @@ on:
       - "resources/changeinfo.xml"
       - "sce_sys/livearea/contents/template.xml"
       - "tools/check-version-consistency.py"
+      - "tools/check-windows-upgrade-contract.py"
       - "tools/summarize-vita-log.py"
       - ".github/workflows/release.yml"
       - ".github/workflows/windows-host.yml"
@@ -77,6 +79,8 @@ jobs:
           python-version: "3.x"
       - name: Verify release version consistency
         run: python tools/check-version-consistency.py
+      - name: Verify safe in-place upgrade contract
+        run: python tools/check-windows-upgrade-contract.py
       - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           dotnet-version: "8.0.423"
@@ -107,6 +111,8 @@ jobs:
           python-version: "3.x"
       - name: Verify release version consistency
         run: python tools/check-version-consistency.py
+      - name: Verify safe in-place upgrade contract
+        run: python tools/check-windows-upgrade-contract.py
       - name: Select Windows release signing mode
         if: env.IS_TAGGED_RELEASE == 'true'
         shell: pwsh

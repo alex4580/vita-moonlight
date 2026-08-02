@@ -7,6 +7,7 @@ documentation.
 ## How it was checked
 
 - [ ] `python tools/check-version-consistency.py`
+- [ ] `python tools/check-windows-upgrade-contract.py`
 - [ ] `python tools/summarize-vita-log.py --self-test`
 - [ ] Windows host build and `self-test` (if host code changed)
 - [ ] Vita CI build (if Vita code changed)

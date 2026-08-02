@@ -132,6 +132,10 @@ release notes.
       `--json` summary. The packaged copy under `tools\SupportLog` behaves the
       same, groups capture sessions correctly, and never reproduces raw legacy
       text, unknown values, arbitrary filenames, or local paths.
+- [ ] Run `tools\check-windows-upgrade-contract.py`. It must accept every
+      recorded legacy host fixture, reject current-only pre-replacement
+      commands, and confirm that helper-owned physical recovery precedes the
+      protected installer-maintenance snapshot.
 - [ ] **Diagnostics & support > Save support report...** creates a readable
       point-in-time JSON report with host version, platform, prerequisite,
       display, lifecycle, recovery, and rescue state. It runs only on request,
