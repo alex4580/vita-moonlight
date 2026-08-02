@@ -197,12 +197,45 @@ release notes.
       duplicate, and removes obsolete Vita prep hooks.
 - [ ] Idle state is physical display active / VDD inactive. Normal disconnect
       and emergency recovery both return to that state.
+- [ ] With no stream active, confirm the physical desktop is at its normal
+      saved resolution/refresh, then sleep and resume Windows three times.
+      Within 20 seconds after each wake, the physical desktop must be active at
+      that saved mode, the managed VDD inactive, and the bounded resume record
+      successful or contain only a structured non-fatal mode warning.
+- [ ] With a disposable stream active, repeat sleep/resume three times after
+      allowing the Vita virtual display to become primary. Do not require a
+      physical-only topology before initiating sleep. After wake, verify the
+      `power-suspend-display-prepare` record and confirm within 20 seconds that
+      the physical desktop wins, the VDD is inactive, and no window remains at
+      a 960x544 or 800x600 fallback mode. Reconnect manually afterward.
+- [ ] Start **Test Vita display for 15 seconds** in one process and initiate
+      Windows sleep while that process owns the display transaction. Vary the
+      timing across three attempts. The durable suspend intent must prevent a
+      post-notification VDD commit; after wake the physical saved mode must win,
+      VDD must be inactive, and the intent must clear without permanently
+      blocking the next session.
+- [ ] Choose **Pause Vita host features** during an enabled installation, restart
+      Windows, and run an in-place upgrade/repair. The recovery tasks, rescue
+      agent, and managed VDD device must remain paused while pairing, settings,
+      ownership state, Sunshine state, and shared installations remain intact.
+      The UI must state that F11 is unavailable during a complete Pause and
+      that clients pinned to the Vita VDD may require a physical host output.
+      Choose **Enable Vita host features** and verify Sunshine remains unchanged and only the previously present Vita
+      safeguards and managed VDD are restored. Repeat both actions to prove
+      they are idempotent.
 - [ ] The close-game agent refuses Steam, Sunshine, Explorer, the companion,
       and critical Windows processes; a disposable uncooperative app is
       force-terminated successfully.
 - [ ] Uninstall removes both scheduled tasks and the background agent and does
       not leave the physical display disabled. Default and silent uninstall
       keep shared Sunshine, ViGEmBus, and VDD installations.
+- [ ] Run uninstall once from an enabled backend and once from an intentionally
+      paused backend. Cover default shared-dependency retention and explicit
+      removal in disposable snapshots. A forced late finalization failure must
+      restore the exact pre-uninstall paused device state and any
+      safeguard removed earlier; a retry must complete idempotently. Unknown
+      files placed in the state directory must be retained and reported, never
+      followed or recursively deleted.
 - [ ] Uninstall removes Vita-managed Sunshine integration and all host state.
       Its optional diagnostic choice preserves only the stream-rescue log.
 - [ ] Exercise the protected Sunshine ownership journal on an in-place upgrade:
@@ -216,9 +249,39 @@ release notes.
       other reparse point. Elevated uninstall must ignore the override, refuse
       the reparse path, and retain the host and safeguards without deleting an
       attacker-selected target.
-- [ ] A forced nonzero `uninstall prepare` result aborts uninstall before the
-      companion, rescue agent, recovery task, or shared dependency is removed;
-      uninstall succeeds after recovery is restored.
+- [ ] A forced nonzero `uninstall prepare --begin` result aborts uninstall
+      before the companion, rescue agent, recovery task, or shared dependency
+      is removed and deliberately retains the durable guard. Confirm that guard
+      blocks new streams/lifecycle changes and that a later uninstall retry
+      safely takes it over. Interrupt a later optional-removal step and confirm
+      the same retry behavior. A successful retry removes the exact guard only
+      after the host process exits.
+- [ ] On a disposable VM, interrupt uninstall at both final commit boundaries.
+      Before the finalized marker, the primary host and safeguards remain and
+      retry repeats finalization. After the exact finalized marker and host
+      deletion, retry completes file-only cleanup and removes the guard. A torn
+      marker with the host present is repaired and re-finalized; a torn marker
+      with the host missing fails closed until the same-version host is restored.
+- [ ] Interrupt upgrade/repair after its protected maintenance records are
+      published. A repair retry may take over only after the exact recorded
+      owner is dead. Repeat and uninstall directly: uninstall must atomically
+      bridge the dead maintenance fence into its durable uninstall guard. A
+      live or unverifiable owner must never be displaced.
+- [ ] Interrupt a clean install after its protected maintenance records are
+      published and retry once with host configuration selected and once with
+      it cleared. Only the selected recovery tasks may remain, the physical
+      desktop must be active, and the exact maintenance records must clear.
+- [ ] Interrupt upgrade once after each pre-existing recovery task is removed,
+      then retry with host configuration deselected. The durable pre-mutation
+      snapshot—not current task absence—must restore exactly the safeguards
+      that belonged to the enabled installation before the maintenance fence
+      can clear. A persisted Paused intent must never recreate them.
+- [ ] Hold `VitaMoonlight.Host.exe` open without delete sharing during an
+      otherwise successful keep-dependencies uninstall. Host deletion failure
+      must retain the exact finalized guard. Release the handle, rename the
+      host to simulate post-finalize deletion, and retry: exact Finalized plus
+      missing host resumes file-only cleanup. Missing host plus torn/InProgress
+      must fail closed. Unknown fixture files must be retained.
 - [ ] In a disposable VM, explicitly selected Sunshine, ViGEmBus, and VDD
       removals succeed or accurately request a reboot. A pending reboot keeps
       the host and safeguards until uninstall is rerun and verifies cleanup.
@@ -252,7 +315,7 @@ release notes.
 - [ ] Vita and Windows workflows pass on the frozen commit.
 - [ ] PR is merged into the `vita` release branch with the tested commit
       ancestry intact.
-- [ ] Create and push `v0.14.6` only after the hardware and safety gates pass.
+- [ ] Create and push `v0.14.7` only after the hardware and safety gates pass.
       The release workflow builds both platforms and publishes their artifacts.
 - [ ] Download the published release, verify hashes/signatures again, and run a
       short install/pair/stream/disconnect smoke test from those public assets.

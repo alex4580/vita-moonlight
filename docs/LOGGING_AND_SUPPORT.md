@@ -170,9 +170,80 @@ controller state, display inventory, SDR/display-lifecycle configuration,
 recovery status, rescue shortcuts, and the current recommendation. It is
 designed to be machine-readable across reports from many testers.
 
+For a Pause/Enable comparison, save one report before Pause, one after the
+paused PC restarts, and one after Enable. Compare these exact schema-version 2
+fields:
+
+| What to compare | JSON fields | Expected result |
+|---|---|---|
+| Requested lifecycle | `backendStatus`, `backendDesiredState`, `backendPreferencePersisted` | `Enabled` before, `Disabled` while paused, then `Enabled`; the preference is persisted after the first lifecycle choice. |
+| Recovery safeguards | `recoveryTaskStatus`, `rescueAgentTaskStatus`, `rescueAgentRunning` | Healthy Enabled reports use `Present`, `Present`, `true`; a complete Pause uses `Missing`, `Missing`, `false`; Enable restores the baseline. `Unknown` is a failed inspection, not the same as missing. |
+| Managed Vita display | `backendManagedVddDeviceCount`, `backendManagedVddEnabledCount`, `backendManagedVddActive` | Pause keeps the device count, changes the enabled count to `0`, and keeps it inactive. Enable restores the baseline enabled count while the idle display remains inactive. |
+| Physical safety | `backendActivePhysicalDisplayCount`, `recoveryPending` | At least one active physical display and no pending transaction are expected while idle or paused. |
+| Shared host identity | `hostMode`, `sunshineInstalled`, `sunshineVersion` | These values must not change across Pause/Enable. |
+
+The support report deliberately does not claim whether a shared Sunshine or
+Apollo service is currently running or how it starts with Windows. For a
+community Pause test, also note whether the already-open Sunshine web page was
+reachable before Pause and remains reachable afterward. Pause controls only
+Vita-owned host features; it is not a network-access control.
+
 When the control panel is still open, **Copy technical details** copies the
 most recent health or support output. Use that for a short issue description;
 prefer the saved JSON report when comparing multiple PCs.
+
+## Read the sparse Windows rescue records
+
+The Windows companion keeps a small action record for display rescue,
+emergency hotkeys, and sleep/resume decisions. This is separate from the
+optional Vita support log. It does not sample input or continuously record a
+stream.
+
+Open it without a terminal:
+
+1. Open **Vita Moonlight Host**.
+2. Choose **Diagnostics & support > Open diagnostics folder**.
+3. Open `stream-rescue.log` in Notepad. Use the timestamp of the test to find
+   the relevant lines.
+
+The installed folder is normally:
+
+```text
+C:\Program Files\Vita Moonlight Host\state\Diagnostics
+```
+
+Each `stream-rescue.log` line has four tab-separated fields:
+
+```text
+UTC timestamp    action    True/False    summary
+```
+
+For a sleep/resume test, expect a successful
+`power-suspend-display-prepare` line followed after wake by either a successful
+`resume-display-check:` decision or a successful `recover-display-host` action
+whose summary says it was triggered by resume. A `resume-display-check:`
+summary includes:
+
+- `physical=`: active physical display count;
+- `managed Vita VDD=`: active managed virtual-display count;
+- `restored physical modes=`: how many persisted physical modes were applied;
+- `mode-repair warnings=`: warning count and, when nonzero, bracketed warning
+  codes; and
+- `session pending=`: whether a display transaction still exists.
+
+A `recover-display-host` summary instead lists the recovery steps that ran,
+including the resume trigger, physical-display activation, VDD reload when
+needed, and shared-host restart when it was already running.
+
+`stream-rescue-status.json` is an overwrite-in-place snapshot of only the
+latest rescue result. Use `stream-rescue.log` when event order matters. The
+sparse log is capped at roughly 512 KiB and resets with a rotation record when
+that cap is reached.
+
+These files can contain display names and Windows error details. Review and
+redact them before sharing, just as you would a support report. Do not confuse
+their existence with Vita support logging: the Vita `moonlight.log` remains
+off unless the user explicitly starts a capture.
 
 ## Capture only what the issue needs
 

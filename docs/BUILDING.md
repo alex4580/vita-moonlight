@@ -59,7 +59,8 @@ Windows workflow is the canonical, reproducible packaging recipe and produces
 both the setup EXE and portable ZIP.
 
 Branch and pull-request packages are deliberately unsigned developer builds.
-Tagged public releases fail unless release-signing credentials are configured;
+Tagged public releases fail unless release-signing credentials are configured,
+except for the exact, explicitly labeled `v0.14.7-beta.1` unsigned preview;
 see [RELEASING.md](RELEASING.md).
 
 ## Vita client

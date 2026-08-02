@@ -34,9 +34,11 @@ internal static class DriverConfigurationDirectoryTrust
             "display-driver-directory-identity.json");
 
     internal static DriverConfigurationDirectoryPreparation
-        PrepareForInstallOrRepair(string directoryPath)
+        PrepareForInstallOrRepair(
+            string directoryPath,
+            DisplayTransactionLease transaction)
     {
-        MachineStateSecurity.Secure();
+        MachineStateSecurity.SecureWhileDisplayTransactionHeld(transaction);
 
         if (TryReadRecord(out var record, out _) &&
             TryAcquireMatchingLease(

@@ -1,6 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <changeinfo>
 <changes app_ver="00.14"><![CDATA[
+## 0.14.7<br>
+* Add host sleep/resume repair for physical monitors stuck at fallback resolution or refresh rate.<br>
+* Add reversible Vita host-feature pause/enable and safer upgrade/uninstall lifecycle handling.<br>
+* Expand privacy-safe Windows support reports with exact task, display-mode, and managed-VDD state.<br>
+<br>
 ## 0.14.6<br>
 * Remove obsolete Circle/O transition counters from real-time diagnostics without changing normal Circle input or release safety.<br>
 * Fix clipped or overlapping menu text and make long help pages scrollable with UP/DOWN.<br>

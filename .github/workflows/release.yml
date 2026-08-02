@@ -61,8 +61,8 @@ jobs:
           if [[ "$tag_verified" == "true" ]]; then
             echo "GitHub verified the signed annotated tag $GITHUB_REF_NAME."
           elif [[ "$GITHUB_REPOSITORY" == "alex4580/vita-moonlight" &&
-                  "$GITHUB_REF_NAME" == "v0.14.6-beta.1" ]]; then
-            echo "::warning::The one-time bootstrap tag is annotated but not cryptographically signed (reason: $tag_reason)."
+                  "$GITHUB_REF_NAME" == "v0.14.7-beta.1" ]]; then
+            echo "::warning::The exact unsigned beta-preview tag is annotated but not cryptographically signed (reason: $tag_reason)."
           else
             echo "GitHub did not verify the signature on $GITHUB_REF_NAME (reason: $tag_reason)." >&2
             exit 1
@@ -197,9 +197,9 @@ jobs:
           fi
 
           if [[ "$GITHUB_REPOSITORY" == "alex4580/vita-moonlight" &&
-                "$GITHUB_REF_NAME" == "v0.14.6-beta.1" ]]; then
-            if [[ "$signing_mode" != "unsigned-bootstrap" ]]; then
-              echo "v0.14.6-beta.1 must use unsigned-bootstrap mode." >&2
+                "$GITHUB_REF_NAME" == "v0.14.7-beta.1" ]]; then
+            if [[ "$signing_mode" != "unsigned-beta-preview" ]]; then
+              echo "v0.14.7-beta.1 must use unsigned-beta-preview mode." >&2
               exit 1
             fi
             if ! jq --exit-status '
@@ -210,12 +210,12 @@ jobs:
                 .signer_thumbprint == null and
                 .timestamp_subject == null)
             ' "$signing_manifest" > /dev/null; then
-              echo "Unsigned-bootstrap manifest contains signed or inconsistent Windows artifacts." >&2
+              echo "Unsigned beta-preview manifest contains signed or inconsistent Windows artifacts." >&2
               exit 1
             fi
           else
             if [[ "$signing_mode" != "signed-release" ]]; then
-              echo "Every release except v0.14.6-beta.1 requires signed-release mode." >&2
+              echo "Every release except v0.14.7-beta.1 requires signed-release mode." >&2
               exit 1
             fi
             if ! jq --exit-status '
@@ -301,17 +301,17 @@ jobs:
             echo "CHANGELOG.md has no release notes for $release_version." >&2
             exit 1
           fi
-          if [[ "$signing_mode" == "unsigned-bootstrap" ]]; then
+          if [[ "$signing_mode" == "unsigned-beta-preview" ]]; then
             {
-              printf '%s\n\n' "UNSIGNED-WINDOWS-BOOTSTRAP: $GITHUB_REF_NAME"
+              printf '%s\n\n' "UNSIGNED-WINDOWS-BETA-PREVIEW: $GITHUB_REF_NAME"
               printf '%s\n' '> [!WARNING]'
               printf '%s\n' '> **The Windows host packages in this beta are intentionally not Authenticode-signed.**'
               printf '%s\n' '> Windows will show **Unknown publisher** and may display a Microsoft'
               printf '%s\n' '> Defender SmartScreen warning. Download only from this GitHub release,'
               printf '%s\n' '> verify `SHA256SUMS` and the GitHub attestations, and do not continue if'
               printf '%s\n\n' '> the hashes differ.'
-              printf '%s\n' 'This one-time exception applies only to `v0.14.6-beta.1`; later beta,'
-              printf '%s\n\n' 'release-candidate, and stable tags remain signing-required.'
+              printf '%s\n' 'This exception applies only to `v0.14.7-beta.1`; every other beta,'
+              printf '%s\n\n' 'release-candidate, and stable tag remains signing-required.'
               printf '%s\n' 'The Vita VPK is not a Windows executable and does not use Authenticode.'
               printf '%s\n' "See the [Code signing policy](https://github.com/alex4580/vita-moonlight/blob/$GITHUB_REF_NAME/docs/CODE_SIGNING_POLICY.md),"
               printf '%s\n\n' "the [Privacy policy](https://github.com/alex4580/vita-moonlight/blob/$GITHUB_REF_NAME/PRIVACY.md), and \`windows-signing-status.json\`."
@@ -419,22 +419,22 @@ jobs:
           release_body="$RUNNER_TEMP/draft-release-body.md"
           jq --raw-output '.body' "$release_json" > "$release_body"
           if [[ "$GITHUB_REPOSITORY" == "alex4580/vita-moonlight" &&
-                "$GITHUB_REF_NAME" == "v0.14.6-beta.1" ]]; then
-            if [[ "$(head -n 1 "$release_body")" != "UNSIGNED-WINDOWS-BOOTSTRAP: v0.14.6-beta.1" ]] ||
+                "$GITHUB_REF_NAME" == "v0.14.7-beta.1" ]]; then
+            if [[ "$(head -n 1 "$release_body")" != "UNSIGNED-WINDOWS-BETA-PREVIEW: v0.14.7-beta.1" ]] ||
                ! grep --fixed-strings --quiet "Unknown publisher" "$release_body" ||
                ! grep --fixed-strings --quiet "SmartScreen" "$release_body" ||
                ! grep --fixed-strings --quiet \
-                 "/blob/v0.14.6-beta.1/docs/CODE_SIGNING_POLICY.md" \
+                  "/blob/v0.14.7-beta.1/docs/CODE_SIGNING_POLICY.md" \
                  "$release_body" ||
                ! grep --fixed-strings --quiet \
-                 "/blob/v0.14.6-beta.1/PRIVACY.md" \
+                  "/blob/v0.14.7-beta.1/PRIVACY.md" \
                  "$release_body"; then
-              echo "Unsigned-bootstrap release warning or pinned policy links are missing." >&2
+              echo "Unsigned beta-preview warning or pinned policy links are missing." >&2
               exit 1
             fi
           elif grep --fixed-strings --quiet \
-            "UNSIGNED-WINDOWS-BOOTSTRAP:" "$release_body"; then
-            echo "Unsigned-bootstrap marker is forbidden on every other release." >&2
+            "UNSIGNED-WINDOWS-BETA-PREVIEW:" "$release_body"; then
+            echo "Unsigned beta-preview marker is forbidden on every other release." >&2
             exit 1
           fi
 
@@ -489,7 +489,7 @@ jobs:
           tag_verified="$(jq --raw-output '.verification.verified' <<<"$tag_object")"
           if [[ "$tag_verified" != "true" &&
                 ! ( "$GITHUB_REPOSITORY" == "alex4580/vita-moonlight" &&
-                    "$GITHUB_REF_NAME" == "v0.14.6-beta.1" ) ]]; then
+                    "$GITHUB_REF_NAME" == "v0.14.7-beta.1" ) ]]; then
             echo "The release tag no longer has a GitHub-verified signature." >&2
             exit 1
           fi

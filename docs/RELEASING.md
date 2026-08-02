@@ -26,13 +26,13 @@ handling are defined in the linked policy.
 
 ## Release trust model
 
-A public Windows package can be the explicitly unsigned one-time bootstrap or
+A public Windows package can be the exact explicitly unsigned beta preview or
 an Authenticode-signed release. It has these independent trust layers:
 
 1. **Authenticode**, when configured, signs `VitaMoonlight.Host.exe`, the
    setup EXE, and the Inno-generated uninstaller. Stable tagged builds fail
    closed if signing is unavailable or verification fails. The exact
-   `v0.14.6-beta.1` bootstrap is a one-time exception: it may publish without
+   `v0.14.7-beta.1` preview is the only exception: it may publish without
    Authenticode only when the workflow verifies that the project-owned
    executables are actually unsigned and labels the release prominently.
 2. The bundled display driver and third-party installers retain their vendor
@@ -45,8 +45,8 @@ The Vita VPK is a homebrew package, not a Windows PE file, so Authenticode does
 not apply to it. Its release identity is established by the release tag,
 published SHA-256 checksum, and GitHub provenance attestation. Stable releases
 also require GitHub to verify the cryptographic signature on the annotated
-tag. Only the exact `v0.14.6-beta.1` bootstrap may use an unsigned annotated
-tag, and its tag and Windows status are labeled as unsigned.
+tag. Only the exact `v0.14.7-beta.1` preview may use an unsigned annotated tag,
+and its tag and Windows status are labeled as unsigned.
 
 ## Configure Windows code signing
 
@@ -100,16 +100,16 @@ certificate, password, token, or generated signing wrapper.
 4. For a final release, complete `host/END_TO_END_TEST.md` and
    `host/FINAL_RELEASE_CHECKLIST.md`.
 5. Confirm the publisher signing secrets, expected signer subject, and
-   managed-provider integration are ready. The only exception is the
-   one-time `v0.14.6-beta.1` unsigned bootstrap.
+   managed-provider integration are ready. The only exception is the exact
+   `v0.14.7-beta.1` unsigned preview.
 6. Ordinarily, create a signed annotated tag on the tested commit and confirm
-   GitHub shows it as **Verified**. For the one-time bootstrap only, create
+   GitHub shows it as **Verified**. For that exact preview only, create
    this unsigned annotated tag:
 
    ```sh
-   git tag -a v0.14.6-beta.1 TESTED_COMMIT_SHA \
-     -m "Vita Moonlight 0.14.6 beta 1"
-   git push fork v0.14.6-beta.1
+   git tag -a v0.14.7-beta.1 TESTED_COMMIT_SHA \
+     -m "Vita Moonlight 0.14.7 beta 1"
+   git push fork v0.14.7-beta.1
    ```
 
    Every other beta, release-candidate, and stable tag must instead use
@@ -151,9 +151,9 @@ Install the downloaded setup package, open
 `C:\Program Files\Vita Moonlight Host`, and verify the embedded host executable
 with `Get-AuthenticodeSignature` as well. For a signed release, the expected
 status is `Valid`, and the generated uninstaller is signed during the Inno
-build. For the explicitly unsigned `v0.14.6-beta.1` bootstrap, the expected
+build. For the explicitly unsigned `v0.14.7-beta.1` preview, the expected
 status is `NotSigned`; the release page and `windows-signing-status.json` must
-say the same thing.
+say `unsigned-beta-preview` and identify the same tag and commit.
 
 Do not publish when the observed signing state differs from the declared
 state, checksums differ, or provenance verification is missing. A signed

@@ -17,11 +17,11 @@ Download these two files from the **same GitHub release**:
 Also download `SHA256SUMS` and read the warning at the top of the release
 notes. If the release is labeled unsigned, Windows will show **Unknown
 publisher** and may show a Microsoft Defender SmartScreen warning. That is
-expected for the one-time `v0.14.6-beta.1` release only when
-`windows-signing-status.json` says `unsigned-bootstrap`. Do not run a download
+expected for the exact `v0.14.7-beta.1` release only when
+`windows-signing-status.json` says `unsigned-beta-preview`. Do not run a download
 whose checksum or stated signing status differs from the release.
 After those checks, choose **More info > Run anyway** if SmartScreen blocks
-that exact bootstrap installer.
+that exact beta-preview installer.
 
 Do not combine a VPK from one release with a Windows installer from another.
 Record the release name and, if shown, its commit.
@@ -39,6 +39,8 @@ Do not assume the PC already has Vita Moonlight Host. Record exactly one:
 - **Upgrade:** an older Vita Moonlight Host release is installed and working.
   Record its version before running the candidate.
 - **Same-version reinstall/repair:** this exact candidate is already installed.
+- **Paused repair or uninstall variant:** this exact candidate is installed and
+  **Pause Vita host features** was chosen before rerunning setup or uninstall.
 
 The community beta needs results from every starting state. One tester does
 not need to erase a personal PC to manufacture a clean result; use another PC
@@ -61,6 +63,39 @@ or a reversible test-machine snapshot.
 5. Press **Ctrl + Alt + Shift + F11** on the PC keyboard. A short display blink
    is acceptable. The physical display must remain or return, and Sunshine
    must be available again.
+6. Disconnect the Vita. Open **Diagnostics & support > Save support
+   report...** and save `before-pause.json`. In a text editor, confirm
+   `backendStatus` is `Enabled`, `recoveryTaskStatus` and
+   `rescueAgentTaskStatus` are `Present`, `rescueAgentRunning` is `true`, and
+   `backendManagedVddActive` is `false`.
+   Also note `hostMode`, `sunshineInstalled`, `sunshineVersion`, and whether
+   Sunshine's web page is reachable.
+7. Choose **Pause Vita host features**. Confirm the physical monitor remains
+   visible and the page reports that Vita host features are paused. Restart
+   Windows, reopen **Vita Moonlight Host** as Administrator, and confirm the
+   paused state remains. The persistent control-panel text must say that the
+   rescue agent and **Ctrl + Alt + Shift + F11** are unavailable until Enable;
+   do not count that intentional state as a shortcut failure.
+8. Save `paused-after-restart.json`. Confirm `backendStatus` and
+   `backendDesiredState` are `Disabled`, `backendManagedVddEnabledCount` is
+   `0`, `backendManagedVddActive` is `false`, `recoveryTaskStatus` and
+   `rescueAgentTaskStatus` are `Missing`, and `rescueAgentRunning` is `false`.
+   `hostMode`, `sunshineInstalled`, and `sunshineVersion` must match the
+   baseline, and a Sunshine web page that was reachable before Pause must
+   remain reachable. Pause is not a network-access control.
+9. Choose **Enable Vita host features**, then **Check readiness**, and save
+   `enabled-again.json`. The lifecycle, task, rescue-agent, and managed-VDD
+   fields must match `before-pause.json`; the VDD must remain inactive while
+   idle. Sunshine, pairing, and settings must remain unchanged. The
+   [support-report comparison table](../docs/LOGGING_AND_SUPPORT.md#create-a-windows-host-support-report)
+    explains every field and the meaning of `Unknown`.
+
+For the assigned **paused repair** variant, pause and restart before step 1,
+then run the same installer over the paused candidate. Setup must leave the
+physical desktop visible and the saved state Paused; it must not recreate the
+two tasks or enable the VDD. Open the control panel and choose **Enable Vita
+host features**. Any setup work deferred while paused must complete once,
+readiness must pass, and Sunshine pairing/settings must remain unchanged.
 
 Result: **Pass / Fail / Not tested**, plus the clean, upgrade, or repair
 starting state.
@@ -98,6 +133,21 @@ display-recovery behavior.
 3. Confirm the physical PC display returns. If it does not, press
    **Ctrl + Alt + Shift + F11** on the PC keyboard and allow about 15 seconds.
 4. Start one more stream and disconnect normally.
+5. With no stream running, put Windows to sleep and wake it. Within about
+   20 seconds the physical display must be active, the Vita VDD must not remain
+   active, the physical monitor must return to its normal saved resolution and
+   refresh rate, and desktop responsiveness must be normal. Open
+   **Diagnostics & support > Open diagnostics folder**, then open
+   `stream-rescue.log`. After the timestamp of this test, find a successful
+   `power-suspend-display-prepare` line and then either a successful
+   `resume-display-check:` decision or a successful `recover-display-host`
+   action whose message says it was triggered by resume. A resume-decision
+   message reports `restored physical modes` and `mode-repair warnings`;
+   record any nonzero warning count/code and any window left at a Vita-sized
+   resolution.
+   `stream-rescue-status.json` contains only the latest rescue result. See the
+   [host rescue-record guide](../docs/LOGGING_AND_SUPPORT.md#read-the-sparse-windows-rescue-records)
+   for the fields and privacy warning.
 
 Long-pressing PS can expose a Vita system Wi-Fi toggle. Some firmware/plugin
 combinations do not restore the radio to the running app after it is disabled;
@@ -161,6 +211,11 @@ software. This is the normal uninstall path.
 5. Confirm Vita Moonlight Host and its Start-menu entry are gone, the physical
    display still works, and Sunshine, ViGEmBus, and the virtual-display driver
    remain installed.
+6. The public beta needs one enabled-host result and one deliberately paused-host
+   result; different testers may contribute them. For the paused case, choose
+   **Pause Vita host features**, restart, and then uninstall without enabling
+   again. Kept Sunshine must remain unchanged, and the kept VDD must be usable
+   but inactive.
 
 Result: **Pass / Fail**.
 
@@ -188,7 +243,7 @@ Copy this into a GitHub issue or community report:
 ```text
 Release:
 VPK and installer from the same release: Yes / No
-Starting state: Clean / Older-version upgrade / Same-version repair
+Starting state: Clean / Older-version upgrade / Same-version repair / Paused repair / Paused uninstall
 Older version, if upgraded:
 
 PC or laptop:
@@ -205,6 +260,9 @@ Menu, keyboard, and basic input: Pass / Fail
 Vita same-version reinstall and app removal: Pass / Fail
 Normal disconnect recovery: Pass / Fail
 Interrupted recovery: Automatic / F11 hotkey / Fail
+Sleep/resume physical-layout recovery: Pass / Fail
+Pause/restart/enable lifecycle: Pass / Fail
+Paused repair or paused uninstall: Pass / Fail / Not tested
 Laptop on battery: Pass / Fail / Not tested
 Multiple monitors: Pass / Fail / Not tested
 Uninstall, keep shared components: Pass / Fail

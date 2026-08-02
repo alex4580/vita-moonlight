@@ -39,6 +39,7 @@ needs all of these paths; they may be split among testers:
 | Clean install | Vita Moonlight Host has never been installed on this Windows installation. |
 | Older-version upgrade | A named older Vita Moonlight Host release is installed and paired before the candidate is run over it. |
 | Same-version reinstall/repair | The exact candidate is installed, then the same installer and recommended setup are run again. |
+| Paused reinstall/repair | The exact candidate is deliberately paused before the same installer is run over it; Enable later completes deferred work. |
 | Vita package lifecycle | Candidate VPK is installed over itself, removed from LiveArea, and installed again. |
 | Keep-dependencies uninstall | Host is uninstalled while Sunshine, ViGEmBus, and VDD are retained. |
 | Remove-dependencies uninstall | Disposable PC/snapshot where all three shared components can safely be removed. |
@@ -110,6 +111,52 @@ line should be required.
    devices, duplicate Sunshine installs, or lose pairing/settings.
 4. Run **Check readiness** and complete another stream.
 
+### Reinstall or repair while deliberately paused
+
+1. With the candidate healthy and no stream active, choose **Pause Vita host
+   features**, restart Windows, and verify the control panel still says Paused.
+2. Run the exact same candidate installer with the recommended components.
+   The physical desktop must remain visible throughout. Setup must preserve the
+   Paused preference, leave both Vita recovery tasks absent, and leave the
+   managed VDD disabled; shared Sunshine/Apollo must remain unchanged.
+3. Restart if requested. Reopen the Administrator control panel and confirm it
+   still says Paused rather than silently enabling host features.
+4. Choose **Enable Vita host features**. Setup work saved while paused must run
+   exactly once, **Check readiness** must pass, the VDD must be inactive while
+   idle, and existing pairing/settings must remain intact.
+
+### Interrupted setup takeover (disposable VM or snapshot only)
+
+This deliberately terminates setup. Do not run it on a PC you cannot restore.
+
+1. Start once from a clean disposable snapshot. End setup after the protected
+   maintenance records appear but before host configuration completes. Run the
+   installer again with host configuration selected, then repeat with it
+   cleared. The retry must take over the dead owner, create only the selected
+   safeguards, clear both maintenance records, and leave a physical display
+   active.
+2. Start from a healthy candidate install with a visible physical display.
+   Run the same installer again. Once installation progress has begun and
+   `%ProgramFiles%\Vita Moonlight Host\state\installer-maintenance.json`
+   exists, end the **Vita Moonlight Host Setup** process from Task Manager.
+   Do not delete or edit either maintenance record.
+3. Run the same installer again. It must recognize that the recorded owner is
+   no longer running, safely take over, finish repair, clear the maintenance
+   records, and pass **Check readiness**.
+4. Repeat step 2 from the repaired snapshot. This time choose **Uninstall** in
+   Windows Settings without first repair-installing. The uninstaller must prove
+   the old setup owner is gone, hand off to its durable uninstall transaction,
+   restore a physical-only display, and complete the keep-dependencies path.
+5. While a setup process that owns a live maintenance record is still running,
+   a second setup/uninstall or control-panel change must refuse to compete. A
+   read-only health/support view may remain available.
+6. From a healthy enabled snapshot, repeat the interruption once immediately
+   after **Stopping the stream-rescue agent** and once after **Suspending
+   automatic display recovery** appears in setup. On each retry, clear
+   **Configure this PC for Vita streaming now**. Setup must still restore every
+   safeguard recorded before the interruption before it clears the maintenance
+   fence. It must not infer that a now-missing task was absent originally.
+
 If setup requests a restart at any point, it must stop safely before applying
 stream-display configuration. Restart once and resume with
 **Set up or repair this PC**; it must not enter an unexplained restart loop.
@@ -139,12 +186,38 @@ stream-display configuration. Restart once and resume with
 8. Run **Ctrl + Alt + Shift + F11** while idle. A short blink is acceptable;
    physical displays must remain usable and Sunshine must restart.
 9. Open **Diagnostics & support**, run **Run full health check**, and choose
-   **Save support report...**. Confirm the saved JSON identifies the host
+   **Save support report...**. Save it as `enabled-before-pause.json` and
+   confirm the JSON identifies the host
    version and current component/display/recovery state. Review it in a text
    editor. Creating it must be an explicit one-time action; the control panel
-   must not continuously write a host log.
+   must not continuously write a host log. Record `backendStatus`,
+   `backendDesiredState`, `recoveryTaskStatus`, `rescueAgentTaskStatus`,
+   `rescueAgentRunning`, `backendActivePhysicalDisplayCount`,
+   `backendManagedVddDeviceCount`, `backendManagedVddEnabledCount`,
+   `backendManagedVddActive`, `hostMode`, `sunshineInstalled`, and
+   `sunshineVersion`.
 10. Test **Copy technical details** and **Open diagnostics folder**. Neither
     action may change the display or streaming configuration.
+11. Disconnect the Vita, note whether Sunshine's web page is reachable, choose
+    **Pause Vita host features**, and restart Windows. Confirm the physical
+    desktop remains usable. Reopen **Vita Moonlight Host** as Administrator;
+    the persistent text must report Paused and say the rescue agent and F11
+    shortcut are unavailable until Enable. Save `paused-after-restart.json`
+    and confirm `backendStatus` and
+    `backendDesiredState` are `Disabled`, `backendManagedVddEnabledCount` is
+    `0`, `backendManagedVddActive` is `false`, `recoveryTaskStatus` and
+    `rescueAgentTaskStatus` are `Missing`, and `rescueAgentRunning` is `false`.
+    `hostMode`, `sunshineInstalled`, and `sunshineVersion` must match the
+    baseline; a Sunshine web page that was reachable before Pause must remain
+    reachable. Pause is not a network-access control.
+12. Choose **Enable Vita host features**, run **Check readiness**, and save
+    `enabled-again.json`. Confirm the lifecycle, task, rescue-agent, and
+    managed-VDD fields match `enabled-before-pause.json`; the VDD must remain
+    inactive while idle. Sunshine, pairing, and settings must remain
+    unchanged. Use the
+    [support-report comparison table](../docs/LOGGING_AND_SUPPORT.md#create-a-windows-host-support-report)
+    when a field is unclear. Repeat Pause and Enable once to confirm both are
+    idempotent.
 
 Record every unclear, overlapping, clipped, or incorrectly rendered control
 panel label.
@@ -223,6 +296,38 @@ panel label.
 7. Test **Recover host display**. The stream should disconnect; within roughly
    15 seconds the physical display should be active, VDD inactive, and
    Sunshine available for a new stream.
+8. With no stream running, put Windows to sleep and wake it. The rescue agent
+   should record a successful `power-suspend-display-prepare` action and then
+   either a successful `resume-display-check:` decision or a successful
+   `recover-display-host` action triggered by resume. Within about 20 seconds,
+   at least one physical display must be active, the managed VDD inactive,
+   and Windows responsive at the physical monitor's normal saved resolution
+   and refresh rate. Record any structured mode-repair warning; it is
+   non-fatal only when the physical topology remains usable at the intended
+   mode.
+9. Repeat sleep while a disposable/test stream is active. Treat the stream as
+   interrupted. Do not require the physical display to become visible before
+   initiating sleep; instead, verify the suspend-preparation diagnostic after
+   wake. The physical desktop must then win over a stale VDD-only or
+   physical-plus-VDD topology; reconnect manually afterward.
+10. Exercise the cross-process switch/suspend race on a disposable PC: choose
+    **Test Vita display for 15 seconds** and immediately put Windows to sleep
+    while the display is switching. Repeat three times with slightly different
+    timing. After every wake, the physical desktop must be active at its saved
+    mode, VDD inactive, and no later test process may recommit a Vita-only
+    topology. A failed/aborted test command is acceptable; a stale Vita display
+    is not.
+
+For all sleep tests, open **Diagnostics & support > Open diagnostics folder**
+after wake and inspect `stream-rescue.log` at the test timestamp. A line is
+successful when its third tab-separated field is `True`. A
+`resume-display-check:` message reports `restored physical modes` and
+`mode-repair warnings`; record any nonzero warning count and the bracketed
+warning code. A `recover-display-host` message instead lists the recovery
+steps it performed. The separate
+`stream-rescue-status.json` contains only the latest result. See
+[Read the sparse Windows rescue records](../docs/LOGGING_AND_SUPPORT.md#read-the-sparse-windows-rescue-records)
+before sharing either file.
 
 For a Doom Eternal result, state whether the game used borderless or exclusive
 fullscreen and whether in-game HDR was enabled. Record whether the black frame
@@ -382,9 +487,57 @@ This is the recommended path on a normal PC.
    - Sunshine, ViGEmBus, and VDD remain installed;
    - Vita-owned recovery tasks and Sunshine integration are removed; and
    - unrelated Sunshine applications and later user changes remain.
+6. Reinstall the candidate, choose **Pause Vita host features**, restart, and
+   repeat this keep-dependencies uninstall without enabling again. The
+   uninstaller must restore a physical-only topology, remove the saved paused
+   lifecycle/tasks, preserve Sunshine/ViGEmBus/VDD, and leave the VDD inactive.
 
-Reinstall once after this test and repeat the install, health-check, and stream
+### Interrupted-finalization retry (disposable VM/snapshot)
+
+Exercise each boundary with the exact release candidate and restore the
+snapshot between cases:
+
+1. Interrupt uninstall before the finalized marker is committed. The primary
+   `VitaMoonlight.Host.exe`, durable guard, and required safeguards must remain;
+   rerunning uninstall must safely repeat finalization.
+2. Interrupt after the finalized marker is committed and the primary host is
+   deleted, but before the guard is deleted. Rerunning uninstall must recognize
+   the exact finalized marker, finish file-only cleanup, and remove the guard.
+3. With the primary host still present, truncate or replace the marker with an
+   invalid value. Rerunning uninstall must repair the marker to an in-progress
+   transaction and repeat safe finalization. With the marker invalid and the
+   host missing, uninstall must fail closed without removing recovery state;
+   restore the same-version host from quarantine or the portable release and
+   retry.
+
+Reinstall once after these tests and repeat the install, health-check, and stream
 steps. This checks installation over retained shared dependencies.
+
+### Advanced finalized-uninstall retry (disposable VM only)
+
+This is a maintainer/community-specialist crash fixture. Take a snapshot first.
+
+1. Open an Administrator PowerShell window and hold the installed host file
+   open without delete sharing:
+
+   ```powershell
+   $hostPath = "$env:ProgramFiles\Vita Moonlight Host\VitaMoonlight.Host.exe"
+   $heldHost = [IO.File]::Open($hostPath, 'Open', 'Read', 'Read')
+   ```
+
+2. From a second Administrator PowerShell window, run
+   `& "$env:ProgramFiles\Vita Moonlight Host\unins000.exe" /NOCLOSEAPPLICATIONS`
+   and keep shared dependencies. Uninstall must safely finalize, fail visibly
+   when it cannot delete the held host, and retain the exact finalized guard.
+3. Run `$heldHost.Dispose()` in the first window. Rename the host to
+   `VitaMoonlight.Host.exe.retry-test` to model a crash after host deletion but
+   before guard deletion, then run `unins000.exe` again. It must accept only the
+   exact finalized guard, resume file-only cleanup, and remove that guard.
+   The deliberately unknown `.retry-test` file must be retained rather than
+   recursively deleted; reset the VM snapshot after recording the result.
+4. Repeat from the snapshot with a missing host and a deliberately torn or
+   in-progress guard. The uninstaller must fail closed and must not claim that
+   finalization committed. Do not perform this mutation on a real installation.
 
 ## 13. Uninstall the Windows host while removing shared components
 

@@ -89,7 +89,7 @@ jobs:
     runs-on: windows-2025
     env:
       IS_TAGGED_RELEASE: ${{ startsWith(github.ref, 'refs/tags/v') }}
-      IS_UNSIGNED_BOOTSTRAP: ${{ github.repository == 'alex4580/vita-moonlight' && github.ref == 'refs/tags/v0.14.6-beta.1' }}
+      IS_UNSIGNED_BETA_PREVIEW: ${{ github.repository == 'alex4580/vita-moonlight' && github.ref == 'refs/tags/v0.14.7-beta.1' }}
       HAS_WINDOWS_CERTIFICATE_DATA: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 != '' }}
       HAS_WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD != '' }}
       HAS_WINDOWS_EXPECTED_SIGNER_SUBJECT: ${{ secrets.WINDOWS_EXPECTED_SIGNER_SUBJECT != '' }}
@@ -114,32 +114,32 @@ jobs:
           if ($env:HAS_WINDOWS_CERTIFICATE_DATA -ne $env:HAS_WINDOWS_CERTIFICATE_PASSWORD) {
             throw 'Windows signing configuration is incomplete: configure both certificate secrets or neither.'
           }
-          if ($env:IS_UNSIGNED_BOOTSTRAP -eq 'true') {
+          if ($env:IS_UNSIGNED_BETA_PREVIEW -eq 'true') {
             if ($env:GITHUB_REPOSITORY -ne 'alex4580/vita-moonlight' -or
-                $env:GITHUB_REF -ne 'refs/tags/v0.14.6-beta.1') {
-              throw 'Unsigned-bootstrap context validation failed.'
+                $env:GITHUB_REF -ne 'refs/tags/v0.14.7-beta.1') {
+              throw 'Unsigned beta-preview context validation failed.'
             }
             if ($env:HAS_WINDOWS_CERTIFICATE_DATA -eq 'true' -or
                 $env:HAS_WINDOWS_CERTIFICATE_PASSWORD -eq 'true' -or
                 $env:HAS_WINDOWS_EXPECTED_SIGNER_SUBJECT -eq 'true') {
-              throw 'The one-time unsigned bootstrap must not receive Windows signing secrets.'
+              throw 'The explicitly unsigned beta preview must not receive Windows signing secrets.'
             }
             $projectText = Get-Content -LiteralPath host/VitaMoonlight.Host/VitaMoonlight.Host.csproj -Raw
             $versionMatch = [regex]::Match($projectText, '<Version>([^<]+)</Version>')
-            if (-not $versionMatch.Success -or $versionMatch.Groups[1].Value -ne '0.14.6') {
-              throw 'The unsigned bootstrap is restricted to project version 0.14.6.'
+            if (-not $versionMatch.Success -or $versionMatch.Groups[1].Value -ne '0.14.7') {
+              throw 'The unsigned beta preview is restricted to project version 0.14.7.'
             }
-            Write-Warning 'v0.14.6-beta.1 will be published unsigned. Windows will identify it as an unknown publisher.'
+            Write-Warning 'v0.14.7-beta.1 will be published unsigned. Windows will identify it as an unknown publisher.'
             @(
               '## Windows signing mode'
               ''
-              'This one-time bootstrap beta is intentionally **unsigned**. The release'
+              'This exact beta preview is intentionally **unsigned**. The release'
               'workflow must add an Unknown publisher / SmartScreen warning and publish'
               'the signing-status manifest, checksums, and GitHub provenance attestations.'
             ) | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
           }
           elseif ($env:HAS_WINDOWS_SIGNING_CERTIFICATE -ne 'true') {
-            throw 'Every tagged release except v0.14.6-beta.1 requires both Windows signing certificate secrets.'
+            throw 'Every tagged release except v0.14.7-beta.1 requires both Windows signing certificate secrets.'
           }
           elseif ($env:HAS_WINDOWS_EXPECTED_SIGNER_SUBJECT -ne 'true') {
             throw 'Signed releases require WINDOWS_EXPECTED_SIGNER_SUBJECT.'
@@ -417,8 +417,8 @@ jobs:
             }
             mode = if ($isSigned) {
               'signed-release'
-            } elseif ($env:IS_UNSIGNED_BOOTSTRAP -eq 'true') {
-              'unsigned-bootstrap'
+            } elseif ($env:IS_UNSIGNED_BETA_PREVIEW -eq 'true') {
+              'unsigned-beta-preview'
             } else {
               'development-build'
             }

@@ -48,9 +48,9 @@ detached applications such as Steam Big Picture alive for resume.
 The companion's `session start` transaction remains available for Apollo,
 legacy single-app mode, and the timed manual preview. It:
 
-1. acquires a single-instance session lock;
+1. acquires the machine-wide display transaction lock;
 2. captures the active Windows paths and modes;
-3. atomically writes a recovery record beneath the protected
+3. writes and flushes a recovery record beneath the protected
    `%ProgramFiles%\Vita Moonlight Host\state` directory;
 4. finds the configured or known managed virtual target;
 5. validates and applies a topology containing only that target;
@@ -68,6 +68,32 @@ The driver is installed or updated explicitly by the installer/control panel;
 stream start never installs a driver. Apollo mode delegates virtual-display
 creation to Apollo but retains the same client and controller profile.
 
+Every companion path that can mutate topology, a managed display device, or
+the pending recovery record uses that same typed transaction lease: session
+start/stop/mode, timed tests, explicit driver install/reload/removal,
+Pause/Enable, suspend/resume recovery, emergency recovery, and uninstall. A
+session rechecks the fully enabled backend state only after acquiring the
+lease. Wake recovery likewise rechecks the recovery marker while holding it,
+so a session which legitimately starts after resume cannot be mistaken for a
+stale pre-sleep transaction.
+
+## Host-feature lifecycle
+
+**Pause Vita host features** is a durable lifecycle for Vita-owned background
+work, not a network or Sunshine power switch. Before pausing, the companion
+restores and verifies a physical-only topology. It then disables only the
+exact managed MTT VDD instance IDs captured on entry and removes the exact two
+Vita scheduled tasks. Sunshine and Apollo remain shared dependencies and are
+never started, stopped, disabled, or executed by this lifecycle. A client
+pinned to the disabled Vita VDD may therefore need a different host output.
+
+The saved state uses redundant checksummed JSON records plus a small Disabled
+intent marker. Disable publishes intent before changing Windows; Enable keeps
+that marker until the saved VDD instances and previously present safeguards
+are restored and verified. A partial or corrupt transition fails closed and
+does not authorize a stream. Upgrades read the existing intent and preserve an
+intentional Pause.
+
 ## Stream rescue agent
 
 Setup installs a highest-privilege per-user logon task that runs a hidden,
@@ -83,11 +109,56 @@ channel.
 The close-game action captures the foreground window, refuses Windows shell,
 Steam, Sunshine, companion, and critical-system process names, requests a
 normal window close, then terminates only that process tree if it remains alive
-after 1.5 seconds. The display-recovery action stops Sunshine, restores any
-saved manual transaction, enables every connected physical display when none
-is active, reloads the signed VDD, reapplies the physical-only topology after driver enumeration, and
-starts Sunshine. Results are written beneath the protected installed `state`
-directory for the control panel and diagnostics.
+after 1.5 seconds. The display-recovery action first restores any saved manual
+transaction and a physical-only topology, then stops Sunshine, reloads the
+signed VDD, reapplies the physical-only topology after driver enumeration, and
+starts Sunshine. If a suspend notification arrives during that action,
+physical recovery is kept and the slower service/driver phase is skipped.
+Results are written beneath the protected installed `state` directory for the
+control panel and diagnostics.
+
+The agent also handles Windows suspend/resume broadcasts. Suspend preparation
+publishes a protected cross-process intent before acknowledging sleep, then
+serializes a physical-only recovery. Every session/driver path that can commit
+a managed-VDD topology checks that intent before and after activation; an
+in-flight process must abort to physical-only rather than commit after the
+suspend notification. A stale intent at agent startup is recovered and cleared
+only after physical safety is re-established. Resume uses a bounded,
+generation-scoped observation window whose routine samples are read-only; any
+repair runs only after reacquiring the display transaction. It repairs only
+unmistakable 800x600,
+Vita-sized, or 30 Hz physical fallback drift when Windows advertises the
+persisted user mode. Per-monitor mode-repair failures are sparse structured
+warnings and never invalidate an already visible physical topology.
+
+## Installer maintenance transaction
+
+An in-place upgrade or repair first uses the installer-embedded current host to
+recover and verify a physical-only topology. It then publishes redundant,
+protected maintenance records containing the exact live setup PID/start time,
+the saved backend intent, and pre-mutation recovery-task obligations. A command
+gate serializes all later installed-host children; only the matching live owner
+may mutate state, while exact physical recovery remains available without an
+owner. Dead-owner takeover carries the original obligations forward, and a
+live or unverifiable owner is never displaced. Uninstall bridges a dead setup
+record into its own durable guard before removing either maintenance copy.
+
+## Uninstall transaction
+
+The uninstaller creates a durable InProgress transaction guard before optional shared
+dependency removals. While it exists, new sessions and user lifecycle changes
+are rejected and a surviving rescue agent is limited to physical-display
+safety. Finalization holds the display lease through physical recovery,
+paused-backend handoff, exact task removal, and the last topology proof.
+Failures restore any removed safeguards and the prior paused state before the
+guard is cleared. After irreversible owned cleanup succeeds, the guard advances
+to Finalized. Inno deliberately retains the primary host until that stage,
+verifies its deletion, and removes the exact guard last. A retry with an exact
+Finalized stage but a missing host may finish file-only cleanup; a missing host
+with any earlier, torn, or absent stage fails closed. Successful uninstall
+removes only allowlisted Vita-owned state; unknown entries are retained.
+Sunshine, ViGEmBus, and the MTT driver are kept unless the user explicitly
+selects their removal.
 
 ## Vita client
 

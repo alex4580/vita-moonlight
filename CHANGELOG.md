@@ -1,3 +1,27 @@
+## 0.14.7
+
+* Added a durable, reversible **Pause Vita host features** lifecycle that restores
+  the physical desktop, disables Vita background tasks and the managed VDD,
+  while leaving shared Sunshine/Apollo installed and reachable. Clients pinned
+  to the paused Vita VDD may need a physical host output. Enable restores only
+  the previously present Vita safeguards, and upgrades preserve pause.
+* Added pre-sleep physical-display preparation and bounded post-resume
+  topology/mode recovery so interrupted streams cannot strand Windows on a
+  Vita-only, physical-plus-VDD, 800x600, or Vita-sized layout after wake.
+* Made clean installs, upgrades, and repairs exclusive and crash-resumable.
+  Setup preserves the original paused/enabled intent and exact recovery-task
+  obligations across a killed installer, then restores them before clearing
+  its protected maintenance fence.
+* Hardened uninstall with exact Task Scheduler COM verification, a second
+  physical-display safety gate, rollback of recovery safeguards on failure,
+  and allowlisted cleanup of current and legacy Vita-owned state.
+* Expanded privacy-safe support reports with backend issue categories, exact
+  task states, managed-VDD state, and active display resolution/refresh data.
+* Restricted the deliberately unsigned Windows preview policy to the exact
+  `v0.14.7-beta.1` tag, with explicit SmartScreen guidance, SHA-256 manifests,
+  signing-state metadata, and GitHub provenance attestations. Every other
+  public tag remains signing-required.
+
 ## 0.14.6
 
 * Removed obsolete Circle/O transition counters from real-time diagnostics.

@@ -22,6 +22,7 @@ internal static class WindowsDisplayNative
     private const int GetSourceName = 1;
     private const int SetAdvancedColorState = 10;
     private const int EnumCurrentSettings = -1;
+    private const int EnumRegistrySettings = -2;
     private const uint DevModePelsWidth = 0x00080000;
     private const uint DevModePelsHeight = 0x00100000;
     private const uint DevModeDisplayFrequency = 0x00400000;
@@ -104,7 +105,10 @@ internal static class WindowsDisplayNative
                 $"Closest advertised modes: {FormatClosestModes(advertisedModes, width, height, fps)}.");
         }
 
-        var mode = ReadSourceMode(gdiDeviceName);
+        var mode = ReadSourceDeviceMode(
+            gdiDeviceName,
+            EnumCurrentSettings,
+            "current");
         if (mode.PelsWidth == width &&
             mode.PelsHeight == height &&
             mode.DisplayFrequency == fps)
@@ -131,7 +135,10 @@ internal static class WindowsDisplayNative
                 $"Closest advertised modes: {FormatClosestModes(advertisedModes, width, height, fps)}.");
         }
 
-        var applied = ReadSourceMode(gdiDeviceName);
+        var applied = ReadSourceDeviceMode(
+            gdiDeviceName,
+            EnumCurrentSettings,
+            "current");
         if (applied.PelsWidth != width || applied.PelsHeight != height || applied.DisplayFrequency != fps)
         {
             throw new InvalidOperationException(
@@ -140,15 +147,40 @@ internal static class WindowsDisplayNative
         }
     }
 
-    private static DeviceMode ReadSourceMode(string gdiDeviceName)
+    internal static AdvertisedDisplayMode ReadCurrentSourceMode(
+        string gdiDeviceName) =>
+        ToAdvertisedMode(ReadSourceDeviceMode(
+            gdiDeviceName,
+            EnumCurrentSettings,
+            "current"));
+
+    internal static AdvertisedDisplayMode ReadPersistedSourceMode(
+        string gdiDeviceName) =>
+        ToAdvertisedMode(ReadSourceDeviceMode(
+            gdiDeviceName,
+            EnumRegistrySettings,
+            "persisted"));
+
+    private static DeviceMode ReadSourceDeviceMode(
+        string gdiDeviceName,
+        int settingsMode,
+        string description)
     {
         var mode = CreateDeviceMode();
-        if (!EnumDisplaySettings(gdiDeviceName, EnumCurrentSettings, ref mode))
+        if (!EnumDisplaySettings(gdiDeviceName, settingsMode, ref mode))
         {
-            throw new Win32Exception(Marshal.GetLastWin32Error(), $"Could not read display mode for {gdiDeviceName}.");
+            throw new Win32Exception(
+                Marshal.GetLastWin32Error(),
+                $"Could not read the {description} display mode for {gdiDeviceName}.");
         }
         return mode;
     }
+
+    private static AdvertisedDisplayMode ToAdvertisedMode(DeviceMode mode) =>
+        new(
+            checked((int)mode.PelsWidth),
+            checked((int)mode.PelsHeight),
+            checked((int)mode.DisplayFrequency));
 
     internal static IReadOnlyList<AdvertisedDisplayMode> EnumerateSourceModes(string gdiDeviceName)
     {

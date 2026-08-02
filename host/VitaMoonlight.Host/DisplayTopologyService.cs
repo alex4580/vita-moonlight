@@ -10,7 +10,27 @@ internal sealed record DisplayDescriptor(
     string DevicePath,
     bool IsActive,
     bool IsAvailable,
-    int OutputTechnology = -1);
+    int OutputTechnology = -1,
+    int? Width = null,
+    int? Height = null,
+    int? RefreshRate = null);
+
+internal sealed record PhysicalDisplayModeRepairWarning(
+    string Code,
+    string Display,
+    string Detail)
+{
+    public override string ToString() =>
+        $"{Code} ({Display}): {Detail}";
+}
+
+internal sealed record PhysicalDisplayModeRepairResult(
+    IReadOnlyList<string> RestoredModes,
+    IReadOnlyList<PhysicalDisplayModeRepairWarning> Warnings)
+{
+    internal static PhysicalDisplayModeRepairResult Empty { get; } =
+        new([], []);
+}
 
 internal sealed record DisplayRecoveryRecord(
     int FormatVersion,
@@ -95,13 +115,33 @@ internal sealed class DisplayTopologyService
                 continue;
             }
 
+            AdvertisedDisplayMode? activeMode = null;
+            if ((path.Flags & WindowsDisplayNative.PathActive) != 0)
+            {
+                try
+                {
+                    var source = WindowsDisplayNative.GetSourceNameFor(path);
+                    activeMode = WindowsDisplayNative.ReadCurrentSourceMode(
+                        source.ViewGdiDeviceName);
+                }
+                catch (Exception error) when (
+                    error is InvalidOperationException or Win32Exception)
+                {
+                    // Keep topology inventory available while Windows finishes
+                    // enumerating a source mode. Resume recovery will retry.
+                }
+            }
+
             var descriptor = new DisplayDescriptor(
                 index,
                 name.MonitorFriendlyDeviceName ?? string.Empty,
                 name.MonitorDevicePath ?? string.Empty,
                 (path.Flags & WindowsDisplayNative.PathActive) != 0,
                 path.TargetInfo.TargetAvailable != 0,
-                path.TargetInfo.OutputTechnology);
+                path.TargetInfo.OutputTechnology,
+                activeMode?.Width,
+                activeMode?.Height,
+                activeMode?.Fps);
             var key = string.IsNullOrWhiteSpace(descriptor.DevicePath)
                 ? $"{path.TargetInfo.AdapterId.HighPart}:{path.TargetInfo.AdapterId.LowPart}:{path.TargetInfo.Id}"
                 : descriptor.DevicePath;
@@ -156,7 +196,11 @@ internal sealed class DisplayTopologyService
         return true;
     }
 
-    internal IReadOnlyList<string> RecoverPhysicalDisplays()
+    internal IReadOnlyList<string> RecoverPhysicalDisplays() =>
+        RecoverPhysicalDisplays(out _);
+
+    internal IReadOnlyList<string> RecoverPhysicalDisplays(
+        out PhysicalDisplayModeRepairResult modeRepair)
     {
         var configuration = WindowsDisplayNative.Query(WindowsDisplayNative.QueryAllPaths);
         var displays = Describe(configuration);
@@ -170,10 +214,179 @@ internal sealed class DisplayTopologyService
         WindowsDisplayNative.ApplyPaths(configuration.Paths
             .Where((_, index) => indexes.Contains(index))
             .ToArray());
+        // Mode repair is deliberately advisory. Activating a visible physical
+        // path is the safety invariant; a monitor with an unusual registry or
+        // mode-enumeration implementation must not turn that success into a
+        // failed Pause, uninstall, or emergency recovery.
+        try
+        {
+            modeRepair = RestorePersistedPhysicalDisplayModes();
+        }
+        catch (Exception error)
+        {
+            // Keep a successfully activated physical topology successful even
+            // if a future/native mode-repair implementation introduces an
+            // exception that the best-effort routine did not anticipate.
+            modeRepair = new PhysicalDisplayModeRepairResult(
+                [],
+                [new PhysicalDisplayModeRepairWarning(
+                    "mode-repair-unexpected",
+                    "physical displays",
+                    FormatModeRepairError(error))]);
+        }
         return selected
             .Select(display => string.IsNullOrWhiteSpace(display.FriendlyName) ? display.DevicePath : display.FriendlyName)
             .ToArray();
     }
+
+    /// <summary>
+    /// Repairs the sleep/resume failure where Windows activates the physical
+    /// monitor at a temporary Vita/800x600 fallback mode. The persisted user
+    /// mode is read from Windows for the same active physical source and is
+    /// applied only when the current mode is an unambiguous Vita/800x600
+    /// fallback (or a 30 Hz form of the persisted resolution) and that exact
+    /// source advertises the persisted resolution. Per-display failures are
+    /// returned as structured warnings and never invalidate a visible physical
+    /// topology. No virtual display or disconnected/docked-away target is
+    /// changed.
+    /// </summary>
+    internal PhysicalDisplayModeRepairResult
+        RestorePersistedPhysicalDisplayModes()
+    {
+        DisplayConfiguration configuration;
+        IReadOnlyList<DisplayDescriptor> displays;
+        try
+        {
+            configuration = WindowsDisplayNative.Query(
+                WindowsDisplayNative.QueryOnlyActivePaths);
+            displays = Describe(configuration);
+        }
+        catch (Exception error)
+        {
+            return new PhysicalDisplayModeRepairResult(
+                [],
+                [new PhysicalDisplayModeRepairWarning(
+                    "mode-inventory-unavailable",
+                    "physical displays",
+                    FormatModeRepairError(error))]);
+        }
+
+        var restored = new List<string>();
+        var warnings = new List<PhysicalDisplayModeRepairWarning>();
+        foreach (var display in displays.Where(display =>
+                     display.IsActive &&
+                     display.IsAvailable &&
+                     !IsLikelyVirtualDisplay(display)))
+        {
+            var displayLabel = DisplayLabel(display);
+            try
+            {
+                var path = configuration.Paths[display.PathIndex];
+                var source = WindowsDisplayNative.GetSourceNameFor(path);
+                var current = WindowsDisplayNative.ReadCurrentSourceMode(
+                    source.ViewGdiDeviceName);
+                var persisted = WindowsDisplayNative.ReadPersistedSourceMode(
+                    source.ViewGdiDeviceName);
+                if (!IsClearPhysicalModeDrift(current, persisted))
+                {
+                    continue;
+                }
+
+                var advertised = WindowsDisplayNative.EnumerateSourceModes(
+                    source.ViewGdiDeviceName);
+                var matchingResolution = advertised.Where(mode =>
+                    mode.Width == persisted.Width &&
+                    mode.Height == persisted.Height).ToArray();
+                if (matchingResolution.Length == 0)
+                {
+                    warnings.Add(new PhysicalDisplayModeRepairWarning(
+                        "persisted-mode-not-advertised",
+                        displayLabel,
+                        $"current={current}; persisted={persisted}"));
+                    continue;
+                }
+
+                var resolutionChanged =
+                    current.Width != persisted.Width ||
+                    current.Height != persisted.Height;
+                var target = matchingResolution
+                        .Where(mode =>
+                            persisted.Fps > 1 && mode.Fps == persisted.Fps)
+                        .Select(mode => (AdvertisedDisplayMode?)mode)
+                        .FirstOrDefault()
+                    ?? (resolutionChanged
+                        ? matchingResolution
+                            .Where(mode => mode.Fps == current.Fps)
+                            .Select(mode => (AdvertisedDisplayMode?)mode)
+                            .FirstOrDefault()
+                        : null)
+                    ?? matchingResolution
+                        .OrderBy(mode => persisted.Fps > 1
+                            ? Math.Abs(mode.Fps - persisted.Fps)
+                            : 0)
+                        .ThenByDescending(mode => mode.Fps)
+                        .First();
+                if (current == target)
+                {
+                    continue;
+                }
+
+                WindowsDisplayNative.ChangeSourceMode(
+                    source.ViewGdiDeviceName,
+                    target.Width,
+                    target.Height,
+                    target.Fps);
+                restored.Add($"{displayLabel} {current} -> {target}");
+            }
+            catch (Exception error)
+            {
+                warnings.Add(new PhysicalDisplayModeRepairWarning(
+                    "mode-repair-failed",
+                    displayLabel,
+                    FormatModeRepairError(error)));
+            }
+        }
+        return new PhysicalDisplayModeRepairResult(restored, warnings);
+    }
+
+    internal static bool IsClearPhysicalModeDrift(
+        AdvertisedDisplayMode current,
+        AdvertisedDisplayMode persisted)
+    {
+        if (current == persisted ||
+            persisted.Width < 640 ||
+            persisted.Height < 480)
+        {
+            return false;
+        }
+
+        var resolutionDrift =
+            IsKnownFallbackResolution(current) &&
+            !IsKnownFallbackResolution(persisted) &&
+            (long)persisted.Width * persisted.Height >
+            (long)current.Width * current.Height;
+        var refreshDrift =
+            current.Width == persisted.Width &&
+            current.Height == persisted.Height &&
+            current.Fps is > 1 and <= 30 &&
+            persisted.Fps >= 50;
+        return resolutionDrift || refreshDrift;
+    }
+
+    private static bool IsKnownFallbackResolution(
+        AdvertisedDisplayMode mode) =>
+        (mode.Width, mode.Height) is
+            (800, 600) or
+            (960, 540) or
+            (960, 544);
+
+    private static string DisplayLabel(DisplayDescriptor display) =>
+        string.IsNullOrWhiteSpace(display.FriendlyName)
+            ? $"physical display {display.PathIndex + 1}"
+            : display.FriendlyName;
+
+    private static string FormatModeRepairError(Exception error) =>
+        $"{error.GetType().Name}:0x{error.HResult:X8}";
 
     internal static DisplayDescriptor[] SelectPhysicalDisplaysForRecovery(IEnumerable<DisplayDescriptor> displays)
     {
@@ -184,9 +397,11 @@ internal sealed class DisplayTopologyService
         return activePhysical.Length > 0 ? activePhysical : availablePhysical;
     }
 
-    internal void SaveRecovery(DisplayRecoveryRecord recovery)
+    internal void SaveRecovery(
+        DisplayTransactionLease transaction,
+        DisplayRecoveryRecord recovery)
     {
-        MachineStateSecurity.Secure();
+        transaction.RequireActive();
         TrustedFileSystem.WriteAllText(
             HostStatePaths.RecoveryFile,
             JsonSerializer.Serialize(recovery, JsonOptions));
@@ -489,9 +704,11 @@ internal sealed class DisplayTopologyService
         WindowsDisplayNative.Restore(new DisplayConfiguration(paths, modes));
     }
 
-    internal static void ClearRecovery()
+    internal static bool ClearRecovery(
+        DisplayTransactionLease transaction)
     {
-        TrustedFileSystem.DeleteFile(HostStatePaths.RecoveryFile);
+        transaction.RequireActive();
+        return TrustedFileSystem.DeleteFile(HostStatePaths.RecoveryFile);
     }
 
     internal static void AtomicWrite(string path, string content)

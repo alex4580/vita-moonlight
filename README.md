@@ -28,18 +28,18 @@ Foundation: **Free code signing provided by SignPath.io, certificate by
 SignPath Foundation.** Unsigned previews, if any, are labeled explicitly and
 are not covered by that statement.
 
-The one-time `v0.14.6-beta.1` bootstrap is built and published by GitHub
-Actions without Authenticode. Windows will show **Unknown publisher** and may
-display a Microsoft Defender SmartScreen warning. Check the warning on the
-release page, verify `SHA256SUMS`, and confirm `unsigned-bootstrap` in
-`windows-signing-status.json` before running it. Later release tags remain
-signing-required.
+The exact `v0.14.7-beta.1` preview is built and published by GitHub Actions
+without Authenticode. Windows will show **Unknown publisher** and may display a
+Microsoft Defender SmartScreen warning. Check the warning on the release page,
+verify `SHA256SUMS` and the GitHub provenance attestations, and confirm
+`unsigned-beta-preview` in `windows-signing-status.json` before running it.
+Every other beta, release-candidate, and stable tag remains signing-required.
 
 ## Install for the first time
 
 1. On the PC, run `Vita-Moonlight-Host-Setup-win-x64.exe` and accept the
-   recommended components. For the explicitly unsigned `v0.14.6-beta.1`
-   bootstrap, verify the checksum first; if SmartScreen appears, choose
+   recommended components. For the explicitly unsigned `v0.14.7-beta.1`
+   preview, verify its checksum and provenance first; if SmartScreen appears, choose
    **More info > Run anyway** only for the verified GitHub download.
 2. Restart Windows if setup asks you to. Open **Vita Moonlight Host** from the
    Start menu, choose **Restart as Administrator** if offered, and click
@@ -68,6 +68,19 @@ Vita-sized display. It should return automatically after disconnecting.
 - Return to LiveArea if the stream is stuck: double-press **PS**.
 - Recover the PC display without the control panel: press
   **Ctrl + Alt + Shift + F11** on a keyboard connected to the PC.
+- When you will not use Vita streaming for a while, open the Windows control
+  panel as Administrator and choose **Pause Vita host features**. Disconnect
+  the Vita first. This restores
+  the physical desktop and turns off Vita Moonlight's background safeguards
+  and managed virtual-display device. Shared Sunshine/Apollo remains installed
+  and reachable, but a client pinned to the disabled Vita virtual display may
+  need Vita host features enabled again or its host output changed to a
+  physical display. Pairing, settings, and installed shared components are
+  kept. Choose
+  **Enable Vita host features** before the next Vita session. Sunshine/Apollo
+  remain reachable while paused, so Pause is not a network-access block.
+  A complete Pause removes the rescue agent, so **Ctrl + Alt + Shift + F11** is
+  not registered again until Vita host features are enabled.
 
 Start with the **Recommended** preset. See the
 [Vita settings guide](docs/VITA_SETTINGS_GUIDE.md) before changing bitrate,
@@ -85,6 +98,14 @@ Sunshine credentials and unrelated Sunshine applications should be preserved.
 If Windows requests a restart, restart and run **Set up or repair this PC**
 again.
 
+An upgrade or same-version reinstall preserves an intentional paused state;
+it does not silently turn Vita host features back on. Open the updated control
+panel and choose **Enable Vita host features** when you are ready to use them.
+Setup applies controller/runtime repairs which are safe while paused and saves
+any selected host or virtual-display repair as a protected plan. That plan runs
+automatically during Enable; if it needs a restart or fails, host features
+return to Paused and the plan remains available for a safe retry.
+
 Installing the same VPK over the current Vita app is also safe. Saved hosts and
 settings should remain.
 
@@ -100,9 +121,11 @@ settings should remain.
 4. To remove the Vita app, highlight it in LiveArea, press **Triangle**, and
    choose **Delete**.
 
-The Windows uninstaller restores a physical display before removing recovery
-safeguards. If it asks for a restart, restart Windows and run the uninstaller
-again.
+The Windows uninstaller works from either the enabled or paused state. It
+restores and verifies a physical display before removing recovery safeguards,
+removes Vita-owned settings and legacy state, and leaves shared components
+that you keep in place. If it asks for a restart,
+restart Windows and run the uninstaller again.
 
 Deleting the Vita app may leave its external settings and support-log files so
 they can survive a reinstall. Use VitaShell to review or back up those files;
@@ -112,7 +135,7 @@ do not delete a parent storage directory merely to remove a log.
 
 | Problem | What to do |
 |---|---|
-| Physical display did not return | Press **Ctrl + Alt + Shift + F11** on the PC keyboard. If Windows is visible, use **Display & recovery > Restore physical display now** in the Administrator control panel. |
+| Physical display did not return | While Vita host features are enabled, press **Ctrl + Alt + Shift + F11** on the PC keyboard. During a complete Pause the shortcut is intentionally unavailable; if Windows is visible, reopen the control panel as Administrator and use **Display & recovery > Restore physical display now**. |
 | Vita shows the physical monitor, 800x600, or a washed-out image | Open the control panel as Administrator, run **Set up or repair this PC**, then **Check readiness**. Confirm every-application switching and Force SDR are enabled. |
 | Sunshine says ViGEmBus is missing | Run **Diagnostics & support > Run full health check**, use **Repair controller support**, and restart Sunshine. |
 | A Windows game is black but the Vita menu still opens | Use **Close Windows game** from the in-stream menu. Use **End Sunshine app** or **Recover host display** only if needed. |

@@ -61,6 +61,15 @@ The upgrade is designed to preserve Sunshine credentials, pairing, unrelated
 Sunshine applications, and compatible user configuration. It restores a
 physical display before changing installed host components.
 
+If you previously chose **Pause Vita host features**, setup updates the
+installed files but preserves that paused state. It does not re-enable the
+virtual display or recovery tasks. Shared Sunshine/Apollo is never stopped by
+Pause. Safe controller/runtime repairs run immediately; selected streaming-host
+and virtual-display work is saved in protected state and completes only when
+you later choose **Enable Vita host features**. If completion fails or requires
+a restart, Vita host features return to Paused and the saved work can be
+retried by choosing Enable again.
+
 ## Reinstall or repair the current version
 
 Rerunning the same installer is safe and is the normal repair path:
@@ -89,6 +98,30 @@ Use this page first.
 
 The recommended Vita starting profile is 960x544, 60 FPS, 8 Mbps, H.264, and
 SDR.
+
+### Pause the host for extended idle periods
+
+Use **Pause Vita host features** when this PC will not use Vita-owned display
+switching and recovery for a
+while. The action:
+
+- restores and verifies a physical-only Windows display layout;
+- stops and removes the two Vita Moonlight background safeguards;
+- persistently disables the managed VDD device without uninstalling it; and
+- leaves shared Sunshine/Apollo installed and reachable. A client pinned to
+  the disabled Vita VDD may need Vita host features enabled again or a physical
+  output selected in its streaming-host configuration.
+
+The pause survives sign-out, restart, sleep, and an in-place upgrade. It keeps
+the app, pairing, settings, drivers, and shared programs installed. Choose
+**Enable Vita host features** to restore only the Vita safeguards and exact
+managed VDD instances that were active before the pause. Both actions are
+safe to run again and require Administrator approval.
+
+Do not use Windows Device Manager or Task Scheduler to reproduce this state by
+hand. The control panel journals the exact Vita task and managed-device state.
+Sunshine and Apollo remain reachable while paused, so disconnect the Vita first
+and do not treat this control as a network-access block.
 
 ### Streaming
 
@@ -130,8 +163,16 @@ Sunshine captures only the Vita virtual display. A normal disconnect restores
 the physical layout.
 
 If it does not return, press **Ctrl + Alt + Shift + F11** on the PC keyboard.
-This shortcut works without opening the control panel. Allow roughly 15
-seconds for the physical displays, driver, and Sunshine to recover.
+While Vita host features are enabled, this shortcut works without opening the
+control panel. Allow roughly 15 seconds for the physical displays, driver, and
+Sunshine to recover. A complete **Pause Vita host features** removes the rescue
+agent and therefore unregisters F11 until **Enable Vita host features** is run.
+
+The rescue agent also prepares a physical-only layout when Windows announces
+sleep and performs a bounded topology check after resume. A stream that
+crosses system sleep is treated as interrupted: the host prioritizes the
+physical desktop and leaves the Vita VDD inactive instead of preserving a
+stale Vita-sized layout.
 
 ### Diagnostics & support
 
@@ -141,7 +182,9 @@ Technical output and individual repairs are kept away from everyday setup:
 - **Save support report...** creates a point-in-time JSON report only when
   requested.
 - **Copy technical details** copies the latest health/support output.
-- **Open diagnostics folder** opens the host's protected diagnostics location.
+- **Open diagnostics folder** opens the host's protected sparse rescue records.
+  See [Read the sparse Windows rescue records](../docs/LOGGING_AND_SUPPORT.md#read-the-sparse-windows-rescue-records)
+  before interpreting or sharing them.
 - **Repair sign-in display recovery** repairs the interrupted-session
   safeguard.
 - **Repair stream rescue shortcuts** repairs the background Vita and keyboard
@@ -193,7 +236,8 @@ If the Vita menu still draws over a black game:
 
 If the Vita menu cannot be used:
 
-1. Press **Ctrl + Alt + Shift + F11** on the PC keyboard.
+1. If Vita host features are enabled, press **Ctrl + Alt + Shift + F11** on the
+   PC keyboard. A complete Pause intentionally unregisters this shortcut.
 2. If the Windows desktop is visible, open
    **Display & recovery > Restore physical display now**.
 3. If recovery cannot run, sign out and back in. The sign-in safeguard checks
@@ -221,7 +265,8 @@ Use the Windows installer for setup, repair, driver changes, and safeguards.
 3. Find **Vita Moonlight Host** and choose **Uninstall**.
 4. Leave all shared-component choices cleared for a normal uninstall.
 
-The uninstaller restores and verifies a physical display before removing the
+The uninstaller works whether Vita host features are enabled, paused, or
+partially recovered. It restores and verifies a physical display before removing the
 host or its recovery safeguards. By default it keeps:
 
 - Sunshine;
@@ -232,9 +277,21 @@ These components may be used by other software. Select their removal only when
 you are certain they are no longer needed. Removing the VDD also removes its
 managed Vita display configuration.
 
+When shared components are kept, uninstall leaves Sunshine unchanged and the
+VDD device usable but inactive. It
+then removes both exact scheduled tasks, the running rescue agent, current
+host state, and exact legacy Vita Moonlight state. Unknown files in a legacy
+folder are retained rather than deleted recursively.
+
 If Windows requests a restart or a selected dependency cannot yet be removed,
 the host and recovery safeguards remain. Restart Windows and run uninstall
 again.
+
+If security software removes `VitaMoonlight.Host.exe` during an interrupted
+uninstall, restore that file from quarantine or copy the same-version file from
+the portable release into the install folder, then rerun uninstall. The
+uninstaller deliberately keeps its protected recovery state instead of
+guessing that an incomplete transaction is safe.
 
 **Keep the stream-rescue log for troubleshooting** preserves one timestamped
 rescue log but still removes settings and recovery records.

@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Globalization;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Xml.Linq;
 using Microsoft.Win32;
@@ -14,6 +15,13 @@ internal enum PnPUtilExitDisposition
     Failure,
 }
 
+internal sealed record ManagedVddDeviceStatus(
+    string InstanceId,
+    bool Present,
+    bool Enabled,
+    uint DeviceStatus,
+    uint ProblemCode);
+
 internal sealed class HostRestartRequiredException(string message) : Exception(message);
 
 internal sealed class DisplayWizardAdapter
@@ -21,6 +29,11 @@ internal sealed class DisplayWizardAdapter
     private const string DriverHardwareId = @"ROOT\MttVDD";
     private const string DriverClassGuid = "4D36E968-E325-11CE-BFC1-08002BE10318";
     private const string DriverConfigurationDirectory = @"C:\VirtualDisplayDriver";
+    private const uint CrSuccess = 0;
+    private const uint CrNoSuchDevNode = 0x0000000d;
+    private const uint CmDisableUiNotOk = 0x00000004;
+    private const uint CmDisablePersist = 0x00000008;
+    private const uint CmProblemDisabled = 22;
     private static readonly IReadOnlyDictionary<string, string> DriverFileHashes =
         new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
@@ -75,8 +88,13 @@ internal sealed class DisplayWizardAdapter
         return new DisplayWizardAdapter(Path.GetFullPath(selected));
     }
 
-    internal void PrepareMode(int width, int height, int fps)
+    internal void PrepareMode(
+        DisplayTransactionLease transaction,
+        int width,
+        int height,
+        int fps)
     {
+        transaction.RequireActive();
         RequireProtectedBundle();
         ValidateDimension(width, nameof(width), 64, 7680);
         ValidateDimension(height, nameof(height), 64, 4320);
@@ -84,14 +102,15 @@ internal sealed class DisplayWizardAdapter
         ValidateDriverBundle();
         var configurationPath = EnsureDriverConfiguration();
         AddMode(configurationPath, width, height, fps);
-        ReloadDriver();
+        ReloadDriver(transaction);
     }
 
-    internal void InstallDriver()
+    internal void InstallDriver(DisplayTransactionLease transaction)
     {
+        transaction.RequireActive();
         RequireProtectedBundle();
         ValidateDriverBundle();
-        PrepareDriverConfigurationDirectoryForInstall();
+        PrepareDriverConfigurationDirectoryForInstall(transaction);
         EnsureDriverConfiguration();
         DriverNativeModeVerification.Invalidate();
         var workingDirectory = Path.GetDirectoryName(executablePath)!;
@@ -121,19 +140,20 @@ internal sealed class DisplayWizardAdapter
         // directory we pinned before invoking it. Explicit install/repair may
         // safely detach such a replacement and create a fresh protected
         // directory; normal reload and runtime operations only verify.
-        PrepareDriverConfigurationDirectoryForInstall();
+        PrepareDriverConfigurationDirectoryForInstall(transaction);
 
         // Apply the managed modes after staging/installing the package. A real
         // upgrade can replace C:\VirtualDisplayDriver\vdd_settings.xml with
         // the driver's stock copy, while a repair of an equal/newer package
         // leaves the existing file in place. Normalizing at this point handles
         // both cases without assuming a clean installation.
-        EnsureVitaCompatibilityModes();
-        ReloadDriver();
+        EnsureVitaCompatibilityModes(transaction);
+        ReloadDriver(transaction);
     }
 
-    internal bool UninstallDriver()
+    internal bool UninstallDriver(DisplayTransactionLease transaction)
     {
+        transaction.RequireActive();
         RequireProtectedBundle();
         var topology = new DisplayTopologyService();
         topology.RecoverPhysicalDisplays();
@@ -330,8 +350,10 @@ internal sealed class DisplayWizardAdapter
         }
     }
 
-    internal bool EnsureVitaCompatibilityModes()
+    internal bool EnsureVitaCompatibilityModes(
+        DisplayTransactionLease transaction)
     {
+        transaction.RequireActive();
         RequireProtectedBundle();
         ValidateDriverBundle();
         using var directoryLease = AcquireDriverConfigurationDirectory();
@@ -372,10 +394,11 @@ internal sealed class DisplayWizardAdapter
             }
     }
 
-    internal void ReloadDriver()
+    internal void ReloadDriver(DisplayTransactionLease transaction)
     {
+        transaction.RequireActive();
         RequireProtectedBundle();
-        EnsureVitaCompatibilityModes();
+        EnsureVitaCompatibilityModes(transaction);
         // Hold a read-only directory lease that denies write/delete sharing
         // for the entire device restart. The fixed name must still map to the
         // file identity born with our protected DACL before SYSTEM consumes
@@ -405,6 +428,145 @@ internal sealed class DisplayWizardAdapter
                 45000,
                 "/restart-device", instanceId));
         }
+    }
+
+    internal static IReadOnlyList<ManagedVddDeviceStatus>
+        InspectManagedDriverDevices()
+    {
+        var devices = new List<ManagedVddDeviceStatus>();
+        foreach (var installation in FindDriverInstallations())
+        {
+            var deviceNode = 0u;
+            var locateResult = CM_Locate_DevNodeW(
+                ref deviceNode,
+                installation.InstanceId,
+                0);
+            if (locateResult == CrNoSuchDevNode)
+            {
+                devices.Add(new ManagedVddDeviceStatus(
+                    installation.InstanceId,
+                    false,
+                    false,
+                    0,
+                    0));
+                continue;
+            }
+            EnsureConfigurationManagerSucceeded(
+                locateResult,
+                $"locate managed virtual display {installation.InstanceId}");
+            var statusResult = CM_Get_DevNode_Status(
+                out var deviceStatus,
+                out var problemCode,
+                deviceNode,
+                0);
+            EnsureConfigurationManagerSucceeded(
+                statusResult,
+                $"inspect managed virtual display {installation.InstanceId}");
+            devices.Add(new ManagedVddDeviceStatus(
+                installation.InstanceId,
+                true,
+                IsManagedDeviceEnabled(deviceStatus, problemCode),
+                deviceStatus,
+                problemCode));
+        }
+        return devices;
+    }
+
+    internal static void SetManagedDriverEnabled(
+        DisplayTransactionLease transaction,
+        IEnumerable<string> instanceIds,
+        bool enabled)
+    {
+        transaction.RequireActive();
+        if (!OperatingSystem.IsWindows())
+        {
+            throw new PlatformNotSupportedException(
+                "Virtual display device control is available only on Windows.");
+        }
+        if (!enabled)
+        {
+            // Device disable is permitted only after a separately queried
+            // topology proves that at least one physical path is active and
+            // the managed virtual path is already inactive.
+            UninstallManager.VerifyPhysicalOnlyTopology(
+                new DisplayTopologyService());
+        }
+
+        var requested = instanceIds
+            .Where(instanceId => !string.IsNullOrWhiteSpace(instanceId))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (requested.Count == 0) return;
+
+        var devices = InspectManagedDriverDevices();
+        var knownInstanceIds = devices
+            .Select(device => device.InstanceId)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var unknown = requested
+            .Where(instanceId => !knownInstanceIds.Contains(instanceId))
+            .ToArray();
+        if (enabled && unknown.Length > 0)
+        {
+            throw new InvalidOperationException(
+                "One or more previously enabled managed virtual display instances no longer exist. " +
+                "Vita Moonlight did not enable a different/shared instance: " +
+                string.Join(", ", unknown));
+        }
+
+        foreach (var device in devices.Where(device =>
+                     requested.Contains(device.InstanceId) &&
+                     device.Present &&
+                     device.Enabled != enabled))
+        {
+            var deviceNode = 0u;
+            EnsureConfigurationManagerSucceeded(
+                CM_Locate_DevNodeW(
+                    ref deviceNode,
+                    device.InstanceId,
+                    0),
+                $"locate managed virtual display {device.InstanceId}");
+            var result = enabled
+                ? CM_Enable_DevNode(deviceNode, 0)
+                : CM_Disable_DevNode(
+                    deviceNode,
+                    CmDisableUiNotOk | CmDisablePersist);
+            EnsureConfigurationManagerSucceeded(
+                result,
+                $"{(enabled ? "enable" : "disable")} managed virtual display {device.InstanceId}");
+        }
+
+        for (var attempt = 0; attempt < 40; attempt++)
+        {
+            var current = InspectManagedDriverDevices();
+            var currentById = current.ToDictionary(
+                device => device.InstanceId,
+                StringComparer.OrdinalIgnoreCase);
+            if (requested.All(instanceId =>
+                    currentById.TryGetValue(instanceId, out var device)
+                        ? enabled
+                            ? device.Present && device.Enabled
+                            : !device.Present || !device.Enabled
+                        : !enabled))
+            {
+                return;
+            }
+            Thread.Sleep(250);
+        }
+        throw new InvalidOperationException(
+            $"Windows did not confirm that every managed virtual display device became {(enabled ? "enabled" : "disabled")} within 10 seconds.");
+    }
+
+    internal static bool IsManagedDeviceEnabled(
+        uint deviceStatus,
+        uint problemCode) =>
+        problemCode != CmProblemDisabled;
+
+    private static void EnsureConfigurationManagerSucceeded(
+        uint result,
+        string operation)
+    {
+        if (result == CrSuccess) return;
+        throw new InvalidOperationException(
+            $"Windows Configuration Manager could not {operation} (CONFIGRET 0x{result:X8}).");
     }
 
     internal static bool IsDriverInstalled()
@@ -571,13 +733,15 @@ internal sealed class DisplayWizardAdapter
             "Virtual display driver operation");
     }
 
-    private static void PrepareDriverConfigurationDirectoryForInstall()
+    private static void PrepareDriverConfigurationDirectoryForInstall(
+        DisplayTransactionLease transaction)
     {
         InstallationTrust.RequireInstalledPayload(
             "Virtual display driver configuration");
         var preparation =
             DriverConfigurationDirectoryTrust.PrepareForInstallOrRepair(
-                DriverConfigurationDirectory);
+                DriverConfigurationDirectory,
+                transaction);
         using (preparation.Lease)
         {
             if (!preparation.Recreated) return;
@@ -882,6 +1046,29 @@ internal sealed class DisplayWizardAdapter
     private sealed record DriverInstallation(
         string InstanceId,
         string? InfPath);
+
+    [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
+    private static extern uint CM_Locate_DevNodeW(
+        ref uint deviceInstance,
+        string deviceInstanceId,
+        uint flags);
+
+    [DllImport("cfgmgr32.dll")]
+    private static extern uint CM_Get_DevNode_Status(
+        out uint status,
+        out uint problemNumber,
+        uint deviceInstance,
+        uint flags);
+
+    [DllImport("cfgmgr32.dll")]
+    private static extern uint CM_Enable_DevNode(
+        uint deviceInstance,
+        uint flags);
+
+    [DllImport("cfgmgr32.dll")]
+    private static extern uint CM_Disable_DevNode(
+        uint deviceInstance,
+        uint flags);
 
     private static void ValidateDimension(int value, string name, int minimum, int maximum)
     {

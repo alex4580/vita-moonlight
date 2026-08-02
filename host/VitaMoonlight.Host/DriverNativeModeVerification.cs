@@ -28,11 +28,13 @@ internal static class DriverNativeModeVerification
         TrustedFileSystem.DeleteFile(VerificationFile);
     }
 
-    internal static void RecordCurrent()
+    internal static void RecordCurrentLocked(
+        DisplayTransactionLease transaction)
     {
+        transaction.RequireActive();
         var configurationSha256 = ReadCurrentConfigurationSha256();
         var record = CreateRecord(configurationSha256, DateTimeOffset.UtcNow);
-        MachineStateSecurity.Secure();
+        MachineStateSecurity.SecureWhileDisplayTransactionHeld(transaction);
         TrustedFileSystem.WriteAllText(
             VerificationFile,
             JsonSerializer.Serialize(record, JsonOptions));

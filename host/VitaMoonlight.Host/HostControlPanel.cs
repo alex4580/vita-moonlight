@@ -27,7 +27,25 @@ internal sealed class HostControlPanel : Form
         MaximumSize = new Size(850, 0),
         ForeColor = Color.FromArgb(64, 76, 98),
         UseMnemonic = false,
-        Text = "Checking this PC…",
+        Text = "Checking this PC...",
+        Padding = new Padding(0, 4, 0, 0),
+    };
+    private readonly Label backendSummary = new()
+    {
+        AutoSize = true,
+        MaximumSize = new Size(850, 0),
+        ForeColor = Color.FromArgb(64, 76, 98),
+        UseMnemonic = false,
+        Text = "Checking Vita host features...",
+        Padding = new Padding(0, 4, 0, 4),
+    };
+    private readonly Label recoveryHotkeySummary = new()
+    {
+        AutoSize = true,
+        MaximumSize = new Size(850, 0),
+        ForeColor = Color.FromArgb(64, 76, 98),
+        UseMnemonic = false,
+        Text = "Checking whether the F11 rescue shortcut is available...",
         Padding = new Padding(0, 4, 0, 0),
     };
     private readonly ToolStripStatusLabel status = new("Ready");
@@ -88,7 +106,11 @@ internal sealed class HostControlPanel : Form
         Controls.Add(root);
 
         LoadSettings();
-        Shown += async (_, _) => await RunHealthCheckAsync();
+        Shown += async (_, _) =>
+        {
+            await RefreshBackendStatusAsync();
+            await RunHealthCheckAsync();
+        };
     }
 
     internal static void Run()
@@ -196,6 +218,7 @@ internal sealed class HostControlPanel : Form
         AddPageControl(page, actions);
 
         AddPageControl(page, CreateReadinessCard());
+        AddPageControl(page, CreateBackendLifecycleCard());
         AddPageControl(page, CreateInfoCard(
             "What happens next",
             "1. Install and open the Vita VPK.\n" +
@@ -270,9 +293,7 @@ internal sealed class HostControlPanel : Form
             async () => { await RunCommandAsync(new[] { "display", "disable-virtual" }); }, 210,
             "Turn off only the idle Vita virtual monitor while keeping a physical monitor active?");
         AddPageControl(page, actions);
-        AddPageControl(page, CreateInfoCard(
-            "Recovery without this window",
-            "Press Ctrl + Alt + Shift + F11 on the PC keyboard. The background rescue agent performs the same physical-display and driver recovery even when this control panel is closed."));
+        AddPageControl(page, CreateRecoveryHotkeyCard());
 
         var testing = CreateActionRow();
         AddCommandButton(testing, "Test Vita display for 15 seconds", ButtonKind.Primary,
@@ -497,6 +518,32 @@ internal sealed class HostControlPanel : Form
         return card;
     }
 
+    private Control CreateRecoveryHotkeyCard()
+    {
+        var card = new TableLayoutPanel
+        {
+            AutoSize = true,
+            ColumnCount = 1,
+            RowCount = 2,
+            BackColor = Color.FromArgb(241, 246, 255),
+            Padding = new Padding(14, 12, 14, 12),
+            Margin = new Padding(0, 8, 0, 0),
+        };
+        card.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        card.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        card.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        card.Controls.Add(new Label
+        {
+            AutoSize = true,
+            Font = new Font("Segoe UI Semibold", 10.5f),
+            ForeColor = Ink,
+            UseMnemonic = false,
+            Text = "Recovery without this window",
+        }, 0, 0);
+        card.Controls.Add(recoveryHotkeySummary, 0, 1);
+        return card;
+    }
+
     private Control CreateReadinessCard()
     {
         var card = new TableLayoutPanel
@@ -521,6 +568,39 @@ internal sealed class HostControlPanel : Form
         }, 0, 0);
         card.Controls.Add(readinessSummary, 0, 1);
         return card;
+    }
+
+    private Control CreateBackendLifecycleCard()
+    {
+        var actions = CreateActionRow();
+        AddCommandButton(
+            actions,
+            "Enable Vita host features",
+            ButtonKind.Primary,
+            EnableBackendAsync,
+            210);
+        AddCommandButton(
+            actions,
+            "Pause Vita host features",
+            ButtonKind.Warning,
+            DisableBackendAsync,
+            210,
+            "Pause Vita host features now? Disconnect the Vita first. Windows will restore the physical desktop, stop Vita Moonlight safeguards, and disable only the exact managed Vita display instances that are currently enabled. Shared Sunshine and Apollo remain installed and reachable, but clients pinned to the Vita virtual display may need these features enabled again or a physical host output. This does not block network access. Pairing, settings, and installed components are kept. The F11 rescue shortcut is unavailable during a complete Pause.");
+
+        var content = new TableLayoutPanel
+        {
+            AutoSize = true,
+            ColumnCount = 1,
+            RowCount = 2,
+            Dock = DockStyle.Top,
+        };
+        content.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        content.Controls.Add(backendSummary, 0, 0);
+        content.Controls.Add(actions, 0, 1);
+        return CreateSection(
+            "Vita host features",
+            "Pause Vita-owned display switching and recovery safeguards when you will not use them for a while. Shared streaming servers remain installed and reachable, although clients pinned to the Vita display may need a physical output. The choice survives restart and upgrades; enabling it again preserves pairing and settings.",
+            content);
     }
 
     private static Control CreateSection(
@@ -606,17 +686,152 @@ internal sealed class HostControlPanel : Form
 
     private async Task RunHealthCheckAsync()
     {
-        readinessSummary.Text = "Checking Windows, streaming, display, controller, and recovery components…";
+        readinessSummary.Text = "Checking Windows, streaming, display, controller, and recovery components...";
         readinessSummary.ForeColor = Color.FromArgb(64, 76, 98);
         var ready = await RunCommandAsync(
             new[] { "doctor" },
             allowNonZeroExit: true);
+        var preference = BackendLifecycleManager.ReadPreference();
+        if (preference.State == BackendPreferenceState.Disabled &&
+            !isAdministrator)
+        {
+            readinessSummary.Text =
+                "Vita host features are paused by you. The installed components are kept; choose Enable Vita host features before the next Vita session.";
+            readinessSummary.ForeColor = Color.FromArgb(44, 82, 130);
+            return;
+        }
+        if (preference.State == BackendPreferenceState.Error)
+        {
+            readinessSummary.Text =
+                "The protected Vita host-feature preference could not be read. Restart as Administrator and open Diagnostics & support.";
+            readinessSummary.ForeColor = Color.FromArgb(145, 91, 0);
+            return;
+        }
+        if (!isAdministrator)
+        {
+            readinessSummary.Text = ready
+                ? "Basic readiness checks passed. Restart as Administrator to verify protected tasks, device state, and recovery safeguards."
+                : "Restart as Administrator to complete protected task, device, and recovery verification.";
+            readinessSummary.ForeColor = Color.FromArgb(44, 82, 130);
+            return;
+        }
+        var backend = await Task.Run(BackendLifecycleManager.Inspect);
+        if (backend.Status == BackendLifecycleStatus.Disabled)
+        {
+            readinessSummary.Text =
+                "Vita host features are paused by you. The installed components are kept; choose Enable Vita host features before the next Vita session.";
+            readinessSummary.ForeColor = Color.FromArgb(44, 82, 130);
+            return;
+        }
+        if (backend.Status is BackendLifecycleStatus.Error or
+            BackendLifecycleStatus.Partial)
+        {
+            readinessSummary.Text =
+                $"The requested {backend.DesiredState.ToString().ToLowerInvariant()} state is only partly applied or could not be verified. Open Diagnostics & support, then repeat the matching Overview action.";
+            readinessSummary.ForeColor = Color.FromArgb(145, 91, 0);
+            return;
+        }
         readinessSummary.Text = ready
             ? "Ready to stream. Required host, display, controller, and recovery checks passed."
             : "This PC needs attention. Open Diagnostics & support for the full recommendations, then use Set up or repair this PC.";
         readinessSummary.ForeColor = ready
             ? Color.FromArgb(22, 101, 52)
             : Color.FromArgb(145, 91, 0);
+    }
+
+    private async Task RefreshBackendStatusAsync()
+    {
+        if (!isAdministrator)
+        {
+            var preference = BackendLifecycleManager.ReadPreference();
+            backendSummary.Text = preference.State switch
+            {
+                BackendPreferenceState.Disabled =>
+                    "Paused by you. The rescue agent and Ctrl + Alt + Shift + F11 shortcut are unavailable until you choose Enable Vita host features. Restart as Administrator to verify that every Vita-owned task and managed display instance is off.",
+                BackendPreferenceState.Enabled =>
+                    "Vita host features are enabled. Restart as Administrator to verify protected tasks and the managed display device.",
+                _ =>
+                    "The protected Vita host-feature preference could not be read. Restart as Administrator for recovery details.",
+            };
+            recoveryHotkeySummary.Text = preference.State switch
+            {
+                BackendPreferenceState.Disabled =>
+                    "Unavailable while Vita host features are paused. Choose Enable Vita host features as Administrator to restore the rescue agent and Ctrl + Alt + Shift + F11 shortcut.",
+                BackendPreferenceState.Enabled =>
+                    "Vita host features are enabled, but protected task state cannot be verified without Administrator access. Run Check readiness as Administrator before relying on Ctrl + Alt + Shift + F11.",
+                _ =>
+                    "Shortcut availability could not be verified. Restart as Administrator and review Diagnostics & support before relying on Ctrl + Alt + Shift + F11.",
+            };
+            backendSummary.ForeColor = preference.State switch
+            {
+                BackendPreferenceState.Disabled => Color.FromArgb(44, 82, 130),
+                BackendPreferenceState.Enabled => Color.FromArgb(22, 101, 52),
+                _ => Color.FromArgb(145, 91, 0),
+            };
+            return;
+        }
+
+        BackendLifecycleReport report;
+        try
+        {
+            report = await Task.Run(BackendLifecycleManager.Inspect);
+        }
+        catch (Exception error)
+        {
+            backendSummary.Text =
+                $"Windows could not read the Vita host-feature state: {error.Message}";
+            recoveryHotkeySummary.Text =
+                "Shortcut availability could not be verified. Review Diagnostics & support before relying on Ctrl + Alt + Shift + F11.";
+            backendSummary.ForeColor = Color.FromArgb(145, 91, 0);
+            return;
+        }
+
+        backendSummary.Text = report.Status switch
+        {
+            BackendLifecycleStatus.Enabled =>
+                "Enabled. Vita background functions are allowed to run. Check PC readiness below to verify that every installed component is ready.",
+            BackendLifecycleStatus.Disabled =>
+                "Paused. The physical desktop is active and Vita background functions are off; pairing, settings, and installed components are kept. The rescue agent and Ctrl + Alt + Shift + F11 shortcut are unavailable until you choose Enable Vita host features.",
+            BackendLifecycleStatus.Partial =>
+                $"The requested {report.DesiredState.ToString().ToLowerInvariant()} state is only partly applied. Choose the same action again. " +
+                string.Join(" ", report.Issues.Take(2)),
+            _ =>
+                "Windows could not safely verify the Vita host-feature state. No state is assumed; review Diagnostics & support before streaming. " +
+                string.Join(" ", report.Issues.Take(2)),
+        };
+        recoveryHotkeySummary.Text = report.Status switch
+        {
+            BackendLifecycleStatus.Disabled =>
+                "Unavailable while Vita host features are paused. Choose Enable Vita host features to restore the rescue agent and Ctrl + Alt + Shift + F11 shortcut.",
+            BackendLifecycleStatus.Enabled when
+                report.Components?.RescueAgentTaskInstalled == true &&
+                report.Components.RescueAgentRunning =>
+                "Press Ctrl + Alt + Shift + F11 on the PC keyboard. The background rescue agent performs physical-display and driver recovery even when this control panel is closed.",
+            BackendLifecycleStatus.Enabled =>
+                "Vita host features are enabled, but the rescue agent is not fully ready. Run Check readiness and repair the named safeguard before relying on Ctrl + Alt + Shift + F11.",
+            _ =>
+                "Shortcut availability could not be verified. Repeat the matching Enable or Pause action, then run Check readiness before relying on Ctrl + Alt + Shift + F11.",
+        };
+        backendSummary.ForeColor = report.Status switch
+        {
+            BackendLifecycleStatus.Enabled => Color.FromArgb(22, 101, 52),
+            BackendLifecycleStatus.Disabled => Color.FromArgb(44, 82, 130),
+            _ => Color.FromArgb(145, 91, 0),
+        };
+    }
+
+    private async Task EnableBackendAsync()
+    {
+        await RunCommandAsync(new[] { "backend", "enable" });
+        await RefreshBackendStatusAsync();
+        await RunHealthCheckAsync();
+    }
+
+    private async Task DisableBackendAsync()
+    {
+        await RunCommandAsync(new[] { "backend", "disable" });
+        await RefreshBackendStatusAsync();
+        await RunHealthCheckAsync();
     }
 
     private async Task SaveSupportReportAsync()
@@ -734,6 +949,23 @@ internal sealed class HostControlPanel : Form
         bool restartSunshine,
         bool repairPrerequisites = false)
     {
+        if (!BackendLifecycleManager.IsEnabled)
+        {
+            var enable = MessageBox.Show(
+                this,
+                "Vita host features are paused. Enable them now so setup can continue? Pairing and saved settings will be preserved.",
+                "Enable Vita host features",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Question);
+            if (enable != DialogResult.Yes ||
+                !await RunCommandAsync(new[] { "backend", "enable" }))
+            {
+                await RefreshBackendStatusAsync();
+                return;
+            }
+            await RefreshBackendStatusAsync();
+        }
+
         var selectedHost = hostMode.SelectedItem?.ToString()?.ToLowerInvariant() ?? "sunshine";
         var arguments = new List<string>
         {
@@ -767,6 +999,7 @@ internal sealed class HostControlPanel : Form
         {
             if (!await RunCommandAsync(new[] { "host", "restart", "--host", "sunshine" })) return;
         }
+        await RefreshBackendStatusAsync();
         await RunHealthCheckAsync();
     }
 
@@ -991,6 +1224,9 @@ internal sealed class HostControlPanel : Form
             "runtime ensure-compatible" => "Checking the display runtime…",
             "driver install" => "Repairing the Vita display driver…",
             "driver reload" => "Restarting the Vita display driver…",
+            "backend enable" => "Enabling Vita host features...",
+            "backend disable" => "Pausing Vita host features safely...",
+            "backend status" => "Checking Vita host-feature state...",
             "display list" => "Detecting Windows displays…",
             "display disable-virtual" => "Turning off the idle Vita display…",
             "session test" => "Testing the Vita display safely…",
