@@ -26,6 +26,17 @@ internal static class Program
         {
             ClearOperationalPathOverrides();
         }
+        if (TryDescribeUnrelatedSunshineHook(
+                command,
+                remaining,
+                out var ignoredHookMessage))
+        {
+            // This path is deliberately before the installer-maintenance gate
+            // and all machine-state access. It is a proven no-op for a
+            // non-Vita Sunshine client and must never block that stream.
+            Console.WriteLine(ignoredHookMessage);
+            return ExitSuccess;
+        }
         TryClearLastCommandError();
         try
         {
@@ -774,7 +785,8 @@ internal static class Program
             var mode = new SessionManager()
                 .PrimeNativeModeForDriverMaintenanceOnly();
             Console.WriteLine(
-                $"Virtual display driver {action} and verified at {mode.Width}x{mode.Height}@{mode.Fps}. " +
+                $"Virtual display driver {action} and verified at " +
+                $"{mode.Width}x{mode.Height}@{mode.DesktopRefreshRate}. " +
                 "The idle virtual display is disabled.");
             return ExitSuccess;
         }
@@ -831,24 +843,59 @@ internal static class Program
     {
         EnsureWindows();
         var action = args.FirstOrDefault()?.ToLowerInvariant() ?? "status";
+        VitaStreamMode? hookStreamMode = null;
+        if (action == "hook-start")
+        {
+            var width = GetRequiredInt(args, "--width");
+            var height = GetRequiredInt(args, "--height");
+            var streamFps = GetRequiredInt(args, "--fps");
+            if (!VitaDisplayModes.TryGetSupportedStreamMode(
+                    width,
+                    height,
+                    streamFps,
+                    out var recognizedMode))
+            {
+                // Sunshine applications can be launched by non-Vita clients.
+                // A prep hook must not block those sessions or change their
+                // display merely because their mode is outside our contract.
+                Console.WriteLine(
+                    $"Sunshine client mode {width}x{height} at {streamFps} FPS " +
+                    "is not a Vita mode; the host display was left unchanged.");
+                return ExitSuccess;
+            }
+            hookStreamMode = recognizedMode;
+        }
         if (action != "status")
         {
             EnsureAdministrator(
                 "Managing the Vita streaming display session");
         }
         var manager = new SessionManager();
-        if (action is "start" or "test" or "mode")
+        if (action is "start" or "test" or "mode" || hookStreamMode is not null)
         {
             EnsureBackendReadyForStreaming();
         }
         switch (action)
         {
+            case "hook-start":
+                var hookResult = manager.Start(
+                    hookStreamMode!.Value.DesktopMode.Width,
+                    hookStreamMode.Value.DesktopMode.Height,
+                    hookStreamMode.Value.StreamFps);
+                Console.WriteLine(
+                    $"Vita hook display active: {hookResult.DisplayName} at " +
+                    $"{hookResult.Width}x{hookResult.Height}@{hookResult.DesktopRefreshRate} Hz " +
+                    $"(stream {hookResult.StreamFps} FPS)");
+                return ExitSuccess;
             case "start":
                 var result = manager.Start(
                     GetRequiredInt(args, "--width"),
                     GetRequiredInt(args, "--height"),
                     GetRequiredInt(args, "--fps"));
-                Console.WriteLine($"Streaming display active: {result.DisplayName} at {result.Width}x{result.Height}@{result.Fps}");
+                Console.WriteLine(
+                    $"Streaming display active: {result.DisplayName} at " +
+                    $"{result.Width}x{result.Height}@{result.DesktopRefreshRate} Hz " +
+                    $"(stream {result.StreamFps} FPS)");
                 return ExitSuccess;
             case "test":
                 var seconds = GetOptionalInt(args, "--seconds", 15, 5, 120);
@@ -860,7 +907,10 @@ internal static class Program
                         GetRequiredInt(args, "--width"),
                         GetRequiredInt(args, "--height"),
                         GetRequiredInt(args, "--fps"));
-                    Console.WriteLine($"Test display active: {testResult.DisplayName} at {testResult.Width}x{testResult.Height}@{testResult.Fps}");
+                    Console.WriteLine(
+                        $"Test display active: {testResult.DisplayName} at " +
+                        $"{testResult.Width}x{testResult.Height}@{testResult.DesktopRefreshRate} Hz " +
+                        $"(stream {testResult.StreamFps} FPS)");
                     Console.WriteLine($"Restoring the original display layout in {seconds} seconds...");
                     Thread.Sleep(TimeSpan.FromSeconds(seconds));
                 }
@@ -1735,7 +1785,23 @@ internal static class Program
         var roundTrip = WindowsDisplayNative.BytesToStructures<DisplayPathInfo>(WindowsDisplayNative.StructuresToBytes(sample), 1);
         Require(roundTrip[0].Flags == 123 && roundTrip[0].SourceInfo.Id == 7, "Display topology serialization failed.");
         var command = SunshineConfigurator.BuildStartCommand(@"C:\Program Files\Vita Moonlight\VitaMoonlight.Host.exe");
-        Require(command.Contains("%SUNSHINE_CLIENT_WIDTH%", StringComparison.Ordinal), "Sunshine hook generation failed.");
+        Require(
+            command.Contains("session hook-start", StringComparison.Ordinal) &&
+            command.Contains("%SUNSHINE_CLIENT_WIDTH%", StringComparison.Ordinal) &&
+            !command.Contains(" session start ", StringComparison.Ordinal),
+            "Sunshine tolerant hook generation failed.");
+        Require(
+            TryDescribeUnrelatedSunshineHook(
+                "session",
+                ["hook-start", "--width", "1920", "--height", "1080", "--fps", "120"],
+                out var ignoredHook) &&
+            ignoredHook.Contains("left unchanged", StringComparison.OrdinalIgnoreCase),
+            "An unrelated Sunshine client would not bypass host display state safely.");
+        Require(!TryDescribeUnrelatedSunshineHook(
+                "session",
+                ["hook-start", "--width", "960", "--height", "544", "--fps", "60"],
+                out _),
+            "A recognized Vita client was incorrectly classified as an unrelated no-op.");
 
         var sunshineTestDirectory = Path.Combine(Path.GetTempPath(), $"vita-moonlight-self-test-{Guid.NewGuid():N}");
         try
@@ -1791,18 +1857,78 @@ internal static class Program
                 "Sunshine fixed virtual-display refresh configuration failed.");
             Require(nativeConfiguration.Contains("dd_manual_refresh_rate = 60"),
                 "Sunshine virtual-display refresh rate failed.");
-            Require(nativeConfiguration.Any(line => line.Contains(
+            foreach (var mode in VitaDisplayModes.Supported)
+            {
+                Require(nativeConfiguration.Any(line => line.Contains(
+                        $"{{\"requested_resolution\":\"{mode.Width}x{mode.Height}\"," +
+                        $"\"final_resolution\":\"{mode.Width}x{mode.Height}\"}}",
+                        StringComparison.Ordinal)),
+                    $"Sunshine explicit {mode.Width}x{mode.Height} mapping failed.");
+            }
+            Require(!nativeConfiguration.Any(line => line.Contains(
                     "{\"final_resolution\":\"960x544\"}", StringComparison.Ordinal)),
-                "Sunshine native-resolution fallback failed.");
+                "Sunshine retained a catch-all mapping that would force non-Vita clients to 960x544.");
             Require(nativeConfiguration.Contains("dd_config_revert_on_disconnect = enabled"),
                 "Sunshine disconnect recovery configuration failed.");
-            Require(SunshineConfigurator.IsNativeDisplayManagementReady(sunshineTestDirectory),
+            Require(SunshineConfigurator.IsNativeDisplayManagementReady(
+                    sunshineTestDirectory,
+                    integrationSettings.ForceSdr),
                 "Sunshine native display lifecycle readiness check failed.");
             File.WriteAllLines(
                 Path.Combine(sunshineTestDirectory, "sunshine.conf"),
                 nativeConfiguration.Where(line => !line.StartsWith("dd_mode_remapping =", StringComparison.OrdinalIgnoreCase)));
-            Require(!SunshineConfigurator.IsNativeDisplayManagementReady(sunshineTestDirectory),
+            Require(!SunshineConfigurator.IsNativeDisplayManagementReady(
+                    sunshineTestDirectory,
+                    integrationSettings.ForceSdr),
                 "Sunshine readiness accepted a missing safe-resolution mapping.");
+            File.WriteAllLines(Path.Combine(sunshineTestDirectory, "sunshine.conf"), nativeConfiguration);
+
+            var readinessKeys = new[]
+            {
+                "dd_hdr_option = auto",
+                "dd_config_revert_delay = 500",
+                "dd_config_revert_on_disconnect = enabled",
+                "controller = enabled",
+                "gamepad = auto",
+                "motion_as_ds4 = enabled",
+                "touchpad_as_ds4 = enabled",
+                "keyboard = enabled",
+                "mouse = enabled",
+                "native_pen_touch = enabled",
+            };
+            foreach (var readinessKey in readinessKeys)
+            {
+                File.WriteAllLines(
+                    Path.Combine(sunshineTestDirectory, "sunshine.conf"),
+                    nativeConfiguration.Where(line => !string.Equals(
+                        line,
+                        readinessKey,
+                        StringComparison.OrdinalIgnoreCase)));
+                Require(!SunshineConfigurator.IsNativeDisplayManagementReady(
+                        sunshineTestDirectory,
+                        integrationSettings.ForceSdr),
+                    $"Sunshine readiness accepted missing owned key '{readinessKey}'.");
+            }
+            File.WriteAllLines(Path.Combine(sunshineTestDirectory, "sunshine.conf"), nativeConfiguration);
+            var leaveColorUnchangedConfiguration = nativeConfiguration
+                .Select(line => string.Equals(
+                        line,
+                        "dd_hdr_option = auto",
+                        StringComparison.OrdinalIgnoreCase)
+                    ? "dd_hdr_option = disabled"
+                    : line)
+                .ToArray();
+            File.WriteAllLines(
+                Path.Combine(sunshineTestDirectory, "sunshine.conf"),
+                leaveColorUnchangedConfiguration);
+            Require(SunshineConfigurator.IsNativeDisplayManagementReady(
+                    sunshineTestDirectory,
+                    forceSdr: false),
+                "Sunshine readiness rejected the configured leave-color-unchanged policy.");
+            Require(!SunshineConfigurator.IsNativeDisplayManagementReady(
+                    sunshineTestDirectory,
+                    forceSdr: true),
+                "Sunshine readiness accepted an HDR policy that did not match host settings.");
             File.WriteAllLines(Path.Combine(sunshineTestDirectory, "sunshine.conf"), nativeConfiguration);
             File.WriteAllText(Path.Combine(sunshineTestDirectory, "sunshine-reversed.log"), """
                 [test]: Info: Currently available display devices:
@@ -1947,8 +2073,11 @@ internal static class Program
                         new JsonObject
                         {
                             ["do"] =
-                                SunshineConfigurator.BuildStartCommand(
-                                    @"C:\Program Files\Vita Moonlight Host\VitaMoonlight.Host.exe"),
+                                "cmd.exe /D /S /C \"\"C:\\Program Files\\Vita Moonlight Host\\" +
+                                "VitaMoonlight.Host.exe\" session start " +
+                                "--width %SUNSHINE_CLIENT_WIDTH% " +
+                                "--height %SUNSHINE_CLIENT_HEIGHT% " +
+                                "--fps %SUNSHINE_CLIENT_FPS%\"",
                             ["undo"] =
                                 SunshineConfigurator.BuildStopCommand(
                                     @"C:\Program Files\Vita Moonlight Host\VitaMoonlight.Host.exe"),
@@ -1963,6 +2092,20 @@ internal static class Program
             SunshineConfigurator.Configure(
                 legacySettings,
                 @"C:\Program Files\Vita Moonlight Host\VitaMoonlight.Host.exe");
+            var upgradedLegacyRoot = JsonNode.Parse(
+                File.ReadAllText(Path.Combine(sunshineTestDirectory, "apps.json")))!.AsObject();
+            var upgradedLegacyHooks = upgradedLegacyRoot["apps"]!.AsArray()
+                .OfType<JsonObject>()
+                .Single(app => app["name"]?.GetValue<string>() == "Vita Moonlight")
+                ["prep-cmd"]!.AsArray()
+                .OfType<JsonObject>()
+                .ToArray();
+            Require(
+                upgradedLegacyHooks.Length == 1 &&
+                upgradedLegacyHooks[0]["do"]?.GetValue<string>()?.Contains(
+                    "session hook-start",
+                    StringComparison.Ordinal) == true,
+                "Legacy strict Sunshine hook was not replaced by the tolerant boundary.");
             var legacyCleanup = SunshineConfigurator.RemoveManagedIntegration();
             Require(
                 legacyCleanup.RemovedHooks == 1 &&
@@ -2145,6 +2288,61 @@ internal static class Program
             "A replaced display-driver directory or stale identity record was accepted.");
         Require(VitaDisplayModes.RequireSupported(960, 544, 60) == VitaDisplayModes.Native,
             "Vita native runtime mode validation failed.");
+        var testedStreamModeCount = 0;
+        foreach (var desktopMode in VitaDisplayModes.Supported)
+        {
+            foreach (var streamFps in VitaDisplayModes.SupportedStreamFrameRates)
+            {
+                var streamMode = VitaDisplayModes.RequireSupportedStreamMode(
+                    desktopMode.Width,
+                    desktopMode.Height,
+                    streamFps);
+                Require(
+                    streamMode.DesktopMode == desktopMode &&
+                    streamMode.DesktopMode.Fps == VitaDisplayModes.DesktopRefreshRate &&
+                    streamMode.StreamFps == streamFps,
+                    $"Vita stream mode contract failed for {desktopMode.Width}x{desktopMode.Height} at {streamFps} FPS.");
+                Require(VitaDisplayModes.TryGetSupportedStreamMode(
+                        desktopMode.Width,
+                        desktopMode.Height,
+                        streamFps,
+                        out var hookMode) &&
+                    hookMode == streamMode,
+                    $"Tolerant hook classification missed {streamMode}.");
+                testedStreamModeCount++;
+            }
+        }
+        Require(testedStreamModeCount == 15,
+            "The exhaustive Vita resolution/frame-rate contract matrix was incomplete.");
+        foreach (var invalidStreamMode in new[]
+        {
+            (Width: 800, Height: 600, Fps: 60),
+            (Width: 1920, Height: 1080, Fps: 60),
+            (Width: 960, Height: 544, Fps: 23),
+            (Width: 960, Height: 544, Fps: 25),
+            (Width: 960, Height: 544, Fps: 61),
+        })
+        {
+            Require(!VitaDisplayModes.TryGetSupportedStreamMode(
+                    invalidStreamMode.Width,
+                    invalidStreamMode.Height,
+                    invalidStreamMode.Fps,
+                    out _),
+                $"Tolerant hook would mutate the display for unrelated mode {invalidStreamMode}.");
+            try
+            {
+                VitaDisplayModes.RequireSupportedStreamMode(
+                    invalidStreamMode.Width,
+                    invalidStreamMode.Height,
+                    invalidStreamMode.Fps);
+                throw new InvalidOperationException(
+                    $"Unsupported stream mode {invalidStreamMode} was accepted.");
+            }
+            catch (ArgumentOutOfRangeException)
+            {
+                // Expected: stream hooks accept only the public Vita contract.
+            }
+        }
         try
         {
             VitaDisplayModes.RequireSupported(800, 600, 60);
@@ -2449,8 +2647,9 @@ internal static class Program
         Console.WriteLine("VitaMoonlight.Host driver install|reload|uninstall|status");
         Console.WriteLine("VitaMoonlight.Host display list");
         Console.WriteLine("VitaMoonlight.Host display disable-virtual");
-        Console.WriteLine("VitaMoonlight.Host session test --width N --height N --fps N [--seconds 5..120]");
-        Console.WriteLine("VitaMoonlight.Host session start --width N --height N --fps N");
+        Console.WriteLine("VitaMoonlight.Host session test --width 960|1280 --height 540|544|720 --fps 24|30|40|50|60 [--seconds 5..120]");
+        Console.WriteLine("VitaMoonlight.Host session start --width 960|1280 --height 540|544|720 --fps 24|30|40|50|60");
+        Console.WriteLine("VitaMoonlight.Host session hook-start --width N --height N --fps N (Sunshine prep hook)");
         Console.WriteLine("VitaMoonlight.Host session mode --width 960|1280 --height 540|544|720 [--fps 60]");
         Console.WriteLine("VitaMoonlight.Host session stop|recover|recover-upgrade|status");
         Console.WriteLine("VitaMoonlight.Host recovery install|uninstall|status|task-status");
@@ -2476,6 +2675,52 @@ internal static class Program
             }
         }
         return null;
+    }
+
+    private static bool TryDescribeUnrelatedSunshineHook(
+        string command,
+        string[] args,
+        out string message)
+    {
+        message = string.Empty;
+        if (!command.Equals("session", StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(
+                args.FirstOrDefault(),
+                "hook-start",
+                StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        int width;
+        int height;
+        int streamFps;
+        try
+        {
+            width = GetRequiredInt(args, "--width");
+            height = GetRequiredInt(args, "--height");
+            streamFps = GetRequiredInt(args, "--fps");
+        }
+        catch (ArgumentException)
+        {
+            // A malformed generated command is a packaging/configuration bug,
+            // not an unrelated client. Let normal validation report it.
+            return false;
+        }
+
+        if (VitaDisplayModes.TryGetSupportedStreamMode(
+                width,
+                height,
+                streamFps,
+                out _))
+        {
+            return false;
+        }
+
+        message =
+            $"Sunshine client mode {width}x{height} at {streamFps} FPS " +
+            "is not a Vita mode; the host display was left unchanged.";
+        return true;
     }
 
     private static int GetRequiredInt(string[] args, string name)
@@ -2779,7 +3024,8 @@ internal static class HostDiagnostics
             modeHotkeys.All(status => status.Ready);
         var nativeDisplayLifecycleReady = settings.HostMode != "sunshine" || !settings.IntegrateAllSunshineApps ||
             SunshineConfigurator.IsNativeDisplayManagementReady(
-                SunshineConfigurator.ResolveConfigurationDirectory(settings.SunshineConfigDirectory, "sunshine"));
+                SunshineConfigurator.ResolveConfigurationDirectory(settings.SunshineConfigDirectory, "sunshine"),
+                settings.ForceSdr);
 
         var recommendation = !isWindows
             ? "Run this companion on a Windows 10 version 2004 or newer / Windows 11 x64 streaming host."

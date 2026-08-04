@@ -617,8 +617,13 @@ static int settings_loop(int id, void *context, const input_data *input) {
       if ((input->buttons & config.btn_confirm) == 0 || input->buttons & SCE_CTRL_HOLD) {
         break;
       }
-      did_change = 1;
-      config.enable_ref_frame_invalidation = !config.enable_ref_frame_invalidation;
+      config.enable_ref_frame_invalidation = false;
+      display_alert(
+          "The Vita hardware decoder requires a one-reference-frame H.264 "
+          "stream, so reference-frame invalidation is unavailable.\n\n"
+          "Moonlight still requests a clean keyframe automatically when "
+          "decoding must recover from packet loss.",
+          NULL, 1, NULL, NULL);
       break;
     case SETTINGS_ENABLE_STREAM_OPTIMIZE:
       if (!left && !right) {
@@ -883,7 +888,7 @@ static int settings_loop(int id, void *context, const input_data *input) {
 
   MENU_REPLACE(
       SETTINGS_VIEW_ENABLE_FRAME_INVAL,
-      on_off(config.enable_ref_frame_invalidation));
+      "Automatic IDR");
 
   sprintf(current, "%s", network_mode_names[config.stream.streamingRemotely]);
   MENU_REPLACE(SETTINGS_VIEW_ENABLE_STREAM_OPTIMIZE, current);

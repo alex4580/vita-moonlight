@@ -30,6 +30,21 @@ jobs:
       - name: Verify release version consistency
         run: python3 tools/check-version-consistency.py
 
+      - name: Verify Vita/host compatibility contract
+        run: python3 tools/check-host-client-contract.py
+
+      - name: Verify Vita media callback contract
+        run: python3 tools/check-vita-media-contract.py
+
+      - name: Verify Vita pairing and lifecycle security
+        run: python3 tools/check-vita-security-contract.py
+
+      - name: Verify Sunshine XML response hardening
+        run: python3 tools/check-xml-hardening.py
+
+      - name: Verify pinned Moonlight RTSP hardening backport
+        run: python3 tools/check-moonlight-common-backport.py
+
       - name: Test privacy-safe support-log summarizer
         run: python3 tools/summarize-vita-log.py --self-test
 

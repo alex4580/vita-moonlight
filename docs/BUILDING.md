@@ -80,6 +80,22 @@ wrapper for local VitaSDK builds.
 For reproducibility, `.github/workflows/cmake-psvita.yml` pins the VitaSDK
 archive, package assets, and their SHA-256 hashes. Use that workflow as the
 source of truth if a rolling local VitaSDK behaves differently.
+The parent repository also pins `moonlight-common-c` to
+`07c32c80f98bb0d7214c577bd080eea3ce64a856`; initialize submodules recursively
+and do not replace that revision without a Vita hardware regression pass. The
+build applies the hash-locked RTSP hardening backport documented in
+`patches/moonlight-common-c/README.md` to a generated build copy; it does not
+dirty the submodule.
+
+Before building, the Vita workflow runs the same source-contract checks that
+fork maintainers can run locally:
+
+```sh
+python tools/check-host-client-contract.py
+python tools/check-vita-media-contract.py
+python tools/check-vita-security-contract.py
+python tools/check-moonlight-common-backport.py
+```
 
 ## Version and generated metadata
 

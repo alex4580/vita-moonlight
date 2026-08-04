@@ -237,9 +237,8 @@ static void adjust_stream_item(int direction) {
       save_settings();
       break;
     case STREAM_PACKET_RECOVERY:
-      config.enable_ref_frame_invalidation =
-          !config.enable_ref_frame_invalidation;
-      save_settings();
+      /* Informational row: Vita's SPS fixup requires IDR-based recovery. */
+      config.enable_ref_frame_invalidation = false;
       break;
     case STREAM_SCALING:
       config.center_region_only = !config.center_region_only;
@@ -637,7 +636,7 @@ static void draw_stream_page(void) {
       config.enable_frame_pacer ? "On" : "Off");
   draw_row(
       STREAM_PACKET_RECOVERY, first_y, row_height, "Packet-loss recovery",
-      config.enable_ref_frame_invalidation ? "On" : "Off");
+      "Automatic IDR");
   draw_row(
       STREAM_SCALING, first_y, row_height, "Aspect scaling",
       config.center_region_only ? "Crop / fill" : "Fit entire frame");

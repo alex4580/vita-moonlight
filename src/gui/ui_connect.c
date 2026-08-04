@@ -51,6 +51,92 @@ SERVER_DATA server;
 PAPP_LIST server_applist;
 int pos[2];
 
+#define HOST_KEY_DIRECTORY_CAPACITY 1024u
+#define HOST_KEY_FILE_SUFFIX_RESERVE 32u
+#define HOST_KEY_COMPONENT_MAX 255u
+
+static const char *connection_error_message(void) {
+  if (gs_error != NULL &&
+      (strstr(gs_error, "identity changed") != NULL ||
+       strstr(gs_error, "saved Sunshine identity") != NULL)) {
+    return "This PC's Sunshine identity no longer matches the saved PC.\n"
+           "Delete the saved PC in Vita Moonlight, add it again, then choose "
+           "Pair securely.";
+  }
+  return gs_error == NULL ? "No additional details" : gs_error;
+}
+
+static bool build_host_key_directory(char *output, size_t output_size,
+                                     const char *host_name) {
+  size_t base_length;
+  size_t name_length;
+  const char *separator;
+  int written;
+
+  if (output == NULL || output_size == 0 || host_name == NULL) {
+    gs_error = "The saved PC name is invalid. Delete it and add the PC again.";
+    return false;
+  }
+
+  for (name_length = 0;
+       name_length <= HOST_KEY_COMPONENT_MAX && host_name[name_length] != '\0';
+       name_length++) {
+    unsigned char character = (unsigned char) host_name[name_length];
+    if (character < 0x20 || character == 0x7f || character == '/' ||
+        character == '\\' || character == ':') {
+      gs_error = "The saved PC name contains a path character. Delete it, add "
+                 "the PC again, and use a simple name without /, \\, or :.";
+      return false;
+    }
+  }
+  if (name_length == 0 || name_length > HOST_KEY_COMPONENT_MAX ||
+      strcmp(host_name, ".") == 0 || strcmp(host_name, "..") == 0) {
+    gs_error = "The saved PC name cannot be used safely. Delete it, add the PC "
+               "again, and use a name from 1 to 255 characters.";
+    return false;
+  }
+
+  base_length = strlen(config.key_dir);
+  if (base_length == 0) {
+    gs_error = "The Vita pairing-data directory is not configured.";
+    return false;
+  }
+  separator = config.key_dir[base_length - 1] == '/' ? "" : "/";
+  written = snprintf(output, output_size, "%s%s%s",
+                     config.key_dir, separator, host_name);
+  if (written < 0 || (size_t) written >= output_size ||
+      output_size < HOST_KEY_FILE_SUFFIX_RESERVE ||
+      (size_t) written >= output_size - HOST_KEY_FILE_SUFFIX_RESERVE) {
+    output[0] = '\0';
+    gs_error = "The saved PC name makes the Vita pairing-data path too long. "
+               "Delete it and add the PC again with a shorter name.";
+    return false;
+  }
+  return true;
+}
+
+static bool release_host_client_state(void) {
+  int status = connection_get_status();
+  int transition_result = 0;
+
+  if (status == LI_READY)
+    transition_result = connection_abort_attempt();
+  else if (status != LI_DISCONNECTED)
+    transition_result = connection_terminate();
+
+  if (transition_result != 0) {
+    vita_debug_event(
+        VITA_DEBUG_LEVEL_ERROR, "connection.state",
+        "state=release_blocked reason=transition_failed code=%d",
+        transition_result);
+    return false;
+  }
+
+  gs_free_applist(&server_applist);
+  gs_cleanup(&server);
+  return true;
+}
+
 int get_app_id(PAPP_LIST list, char *name) {
   while (list != NULL) {
     if (strcmp(list->name, name) == 0)
@@ -61,10 +147,11 @@ int get_app_id(PAPP_LIST list, char *name) {
   return -1;
 }
 
-int get_app_name(PAPP_LIST list, int id, char *name) {
+int get_app_name(PAPP_LIST list, int id, char *name, size_t name_size) {
+  if (name == NULL || name_size == 0) return 0;
   while (list != NULL) {
     if (list->id == id) {
-      strcpy(name, list->name);
+      snprintf(name, name_size, "%s", list->name);
       return 1;
     }
 
@@ -107,11 +194,11 @@ void ui_connect_stream(int appId) {
     drFlags |= DISPLAY_FULLSCREEN;
 
   DECODER_RENDERER_CALLBACKS *video_callback = platform_get_video(system);
-  if (config.enable_ref_frame_invalidation) {
-    video_callback->capabilities |= CAPABILITY_REFERENCE_FRAME_INVALIDATION_AVC;
-  } else {
-    video_callback->capabilities &= ~CAPABILITY_REFERENCE_FRAME_INVALIDATION_AVC;
-  }
+  /* The Vita decoder rewrites num_ref_frames/max_dec_frame_buffering to one.
+   * RFI is invalid with a patched reference structure and can corrupt video
+   * after packet loss, so recovery must use a clean IDR frame instead. */
+  video_callback->capabilities &=
+      ~CAPABILITY_REFERENCE_FRAME_INVALIDATION_AVC;
 
   // --- Ajuste para soporte Host Resolution: no modificar resolución si es -1 ---
   // Eliminados g_requested_width y g_requested_height, lógica simplificada
@@ -154,9 +241,11 @@ void ui_connect_stream(int appId) {
 }
 
 enum {
-  CONNECT_PAIRUNPAIR = 13,
-  CONNECT_DISCONNECT,
-  CONNECT_QUITAPP
+  /* Sunshine App IDs are positive. Keep local menu actions in a separate
+   * namespace so an ordinary App can never trigger a control action. */
+  CONNECT_PAIRUNPAIR = -1001,
+  CONNECT_DISCONNECT = -1002,
+  CONNECT_QUITAPP = -1003
 };
 
 #define QUIT_RELOAD 2
@@ -196,12 +285,20 @@ int ui_connect_loop(int id, void *context, const input_data *input) {
       }
 
       char pin[5];
-      sprintf(pin, "%d%d%d%d",
-              (uint32_t)rand() % 10, (uint32_t)rand() % 10, (uint32_t)rand() % 10, (uint32_t)rand() % 10);
+      if (gs_generate_pin(pin) != GS_OK) {
+        display_error("Could not create a secure pairing PIN\n%s",
+                      connection_error_message());
+        return 0;
+      }
       flash_message("Please enter the following PIN\non the target PC:\n\n%s", pin);
       ret = gs_pair(&server, &pin[0]);
       if (ret == 0) {
-        connection_paired();
+        if (connection_paired() != 0) {
+          display_error("Pairing completed, but the Vita connection state "
+                        "could not be updated. Reconnect and try again.");
+          release_host_client_state();
+          return 1;
+        }
         // After pairing, save server MAC into known device if present
         device_info_t *dev = find_device_by_address(server.serverInfo.address);
         if (dev) {
@@ -216,13 +313,12 @@ int ui_connect_loop(int id, void *context, const input_data *input) {
           // (which was drawn earlier) is replaced by a success message.
           flash_message("Paired: %s", dev->name);
         }
-        if (connection_terminate()) {
-          display_error("Reconnect failed: %d", -2);
-          return 0;
-        }
+        /* No media connection exists yet. Remain in LI_PAIRED while the
+         * menu reloads so the applications view can open immediately. */
         return QUIT_RELOAD;
       }
-      display_error("Pairing failed: %d\n Error: %s", ret, gs_error);
+      display_error("Pairing failed: %d\n%s", ret,
+                    connection_error_message());
       return 0;
 
     case CONNECT_DISCONNECT:
@@ -232,7 +328,12 @@ int ui_connect_loop(int id, void *context, const input_data *input) {
       flash_message("Quitting...");
       ret = gs_quit_app(&server);
       if (ret == GS_OK) {
-        connection_paired();
+        if (connection_paired() != 0) {
+          display_error("The app closed, but the Vita connection state could "
+                        "not be updated. Reconnect and try again.");
+          release_host_client_state();
+          return 1;
+        }
         server.currentGame = 0;
         return QUIT_RELOAD;
       }
@@ -297,15 +398,22 @@ int ui_connect_loop(int id, void *context, const input_data *input) {
                 apply_display ? "display_settings" : "input_settings", ret);
             display_error(
                 "%s reconnect refresh failed: %d\n%s",
-                apply_display ? "Display" : "Input", ret, gs_error);
+                apply_display ? "Display" : "Input", ret,
+                connection_error_message());
             break;
           }
 
-          if (connection_reset() != 0 || connection_paired() != 0) {
+          ret = connection_reset();
+          if (ret == 0)
+            ret = connection_paired();
+          if (ret != 0) {
             vita_debug_event(
                 VITA_DEBUG_LEVEL_ERROR, "stream.action",
-                "action=reconnect state=failed phase=state_reset reason=%s",
-                apply_display ? "display_settings" : "input_settings");
+                "action=reconnect state=failed phase=state_reset reason=%s "
+                "code=%d",
+                apply_display ? "display_settings" : "input_settings", ret);
+            if (connection_get_status() == LI_READY)
+              connection_abort_attempt();
             break;
           }
           vitapower_config(config);
@@ -374,8 +482,13 @@ int ui_connect_loop(int id, void *context, const input_data *input) {
 
 disconnect:
   flash_message("Disconnecting...");
-  connection_terminate();
+  status = connection_get_status();
+  if (status == LI_READY)
+    connection_abort_attempt();
+  else if (status != LI_DISCONNECTED)
+    connection_terminate();
   sceKernelDelayThread(1000 * 1000);
+  release_host_client_state();
   return 1;
 }
 
@@ -387,12 +500,17 @@ int ui_connect(char *name, char *address, uint16_t port) {
         VITA_DEBUG_LEVEL_INFO, "stream.action",
         "action=connect state=starting phase=host_init");
 
-    char key_dir[4096];
-    sprintf(key_dir, "%s/%s", config.key_dir, name);
+    char key_dir[HOST_KEY_DIRECTORY_CAPACITY];
+    if (!build_host_key_directory(key_dir, sizeof(key_dir), name)) {
+      display_error("Can't prepare this saved PC\n%s",
+                    connection_error_message());
+      return 0;
+    }
 
     ret = gs_init(
         &server, address, port, key_dir,
-        vita_debug_is_logging_enabled() ? 3 : 0, true);
+        vita_debug_is_logging_enabled() ? 3 : 0,
+        config.unsupported_version);
     if (ret != GS_OK && ret != GS_UNSUPPORTED_VERSION) {
       vita_debug_event(
           VITA_DEBUG_LEVEL_ERROR, "stream.action",
@@ -400,23 +518,31 @@ int ui_connect(char *name, char *address, uint16_t port) {
     }
     if (ret == GS_OUT_OF_MEMORY) {
       display_error("Not enough memory");
+      release_host_client_state();
       return 0;
     } else if (ret == GS_INVALID) {
-      display_error("Invalid data received from server: %s\n", address, gs_error);
+      display_error("Invalid data received from server: %s\n%s", address,
+                    connection_error_message());
+      release_host_client_state();
       return 0;
     } else if (ret == GS_UNSUPPORTED_VERSION) {
       if (!config.unsupported_version) {
         vita_debug_event(
             VITA_DEBUG_LEVEL_ERROR, "stream.action",
             "action=connect state=failed phase=host_init code=%d", ret);
-        display_error("Unsupported version: %s\n", gs_error);
+        display_error("Unsupported version: %s\n",
+                      connection_error_message());
+        release_host_client_state();
         return 0;
       }
     } else if (ret == GS_ERROR) {
-      display_error("Gamestream error: %s\n", gs_error);
+      display_error("Gamestream error: %s\n", connection_error_message());
+      release_host_client_state();
       return 0;
     } else if (ret != GS_OK) {
-      display_error("Can't connect to server\n%s", address);
+      display_error("Can't connect to server\n%s\n%s", address,
+                    connection_error_message());
+      release_host_client_state();
       return 0;
     }
 
@@ -424,7 +550,12 @@ int ui_connect(char *name, char *address, uint16_t port) {
         ret == GS_OK ? VITA_DEBUG_LEVEL_INFO : VITA_DEBUG_LEVEL_WARNING,
         "stream.action",
         "action=connect state=ready phase=host_init code=%d", ret);
-    connection_reset();
+    if (connection_reset() != 0) {
+      display_error("Could not begin the Vita connection attempt.\n"
+                    "Disconnect and try this PC again.");
+      release_host_client_state();
+      return 0;
+    }
   }
   return 1;
 }
@@ -432,10 +563,15 @@ int ui_connect(char *name, char *address, uint16_t port) {
 int ui_connected_menu() {
   int ret;
   int app_count = 0;
+  pos[0] = 0;
+  pos[1] = 0;
+  gs_free_applist(&server_applist);
   if (server.paired) {
     ret = gs_applist(&server, &server_applist);
     if (ret != GS_OK) {
-      display_error("Can't get applist!\n%d\n%s", ret, gs_error);
+      display_error("Can't load this PC's applications.\n%d\n%s", ret,
+                    connection_error_message());
+      release_host_client_state();
       return 0;
     }
 
@@ -449,8 +585,15 @@ int ui_connected_menu() {
     }
   }
 
-  // current menu = 11 + app_count. but little more alloc ;)
-  struct menu_entry menu[app_count + 16];
+  /* App data is supplied by the host. Keep the potentially large menu off the
+   * Vita's main-thread stack even though the XML parser also bounds its list. */
+  struct menu_entry *menu = (struct menu_entry *) calloc(
+      (size_t) app_count + 16u, sizeof(*menu));
+  if (menu == NULL) {
+    display_error("Not enough memory to show this PC's applications.");
+    release_host_client_state();
+    return 0;
+  }
 
   int idx = 0;
 
@@ -487,8 +630,10 @@ int ui_connected_menu() {
 
   if (!server.paired) {
     // pairing
-    MENU_CATEGORY("Not paired");
-    MENU_ENTRY(CONNECT_PAIRUNPAIR, "Pair");
+    MENU_CATEGORY(server.securePairingRequired
+        ? "Secure pairing required"
+        : "Not paired");
+    MENU_ENTRY(CONNECT_PAIRUNPAIR, "Pair securely");
 
     MENU_ENTRY(CONNECT_DISCONNECT, "Disconnect");
   } else {
@@ -497,10 +642,12 @@ int ui_connected_menu() {
       char current_appname[256];
       char current_status[256];
 
-      if (!get_app_name(server_applist, server.currentGame, current_appname)) {
-        strcpy(current_appname, "unknown");
+      if (!get_app_name(server_applist, server.currentGame,
+                        current_appname, sizeof(current_appname))) {
+        snprintf(current_appname, sizeof(current_appname), "%s", "unknown");
       }
-      sprintf(current_status, "Streaming %s", current_appname);
+      snprintf(current_status, sizeof(current_status),
+               "Streaming %s", current_appname);
 
       MENU_CATEGORY(current_status);
       MENU_ENTRY(server.currentGame, "Resume");
@@ -509,7 +656,13 @@ int ui_connected_menu() {
 
     // pairing
     MENU_CATEGORY("Paired");
-    connection_paired();
+    if (connection_paired() != 0) {
+      display_error("The Vita connection state could not be prepared.\n"
+                    "Disconnect and try this PC again.");
+      free(menu);
+      release_host_client_state();
+      return 0;
+    }
     // FIXME: unpair not work
     // MENU_ENTRY(CONNECT_PAIRUNPAIR, "Unpair");
 
@@ -529,11 +682,14 @@ int ui_connected_menu() {
 
       pos[1] = idx;
     } else {
-      pos[0] = -1;
+      pos[0] = 0;
+      pos[1] = 0;
     }
   }
 
-  return display_menu(menu, idx, NULL, &ui_connect_loop, NULL, NULL, menu);
+  ret = display_menu(menu, idx, NULL, &ui_connect_loop, NULL, NULL, menu);
+  free(menu);
+  return ret;
 }
 
 device_info_t* ui_connect_and_pairing(device_info_t *info) {
@@ -541,13 +697,18 @@ device_info_t* ui_connect_and_pairing(device_info_t *info) {
   vita_debug_event(
       VITA_DEBUG_LEVEL_INFO, "stream.action",
       "action=connect state=starting phase=host_init");
-  char key_dir[4096];
-  sprintf(key_dir, "%s/%s", config.key_dir, info->name);
+  char key_dir[HOST_KEY_DIRECTORY_CAPACITY];
+  if (!build_host_key_directory(key_dir, sizeof(key_dir), info->name)) {
+    display_error("Can't save pairing data for this PC.\n%s",
+                  connection_error_message());
+    return NULL;
+  }
   sceIoMkdir(key_dir, 0777);
 
   int ret = gs_init(
       &server, info->internal, info->port, key_dir,
-      vita_debug_is_logging_enabled() ? 3 : 0, true);
+      vita_debug_is_logging_enabled() ? 3 : 0,
+      config.unsupported_version);
   if (ret != GS_OK && ret != GS_UNSUPPORTED_VERSION) {
     vita_debug_event(
         VITA_DEBUG_LEVEL_ERROR, "stream.action",
@@ -556,23 +717,31 @@ device_info_t* ui_connect_and_pairing(device_info_t *info) {
 
   if (ret == GS_OUT_OF_MEMORY) {
     display_error("Not enough memory");
+    release_host_client_state();
     return NULL;
   } else if (ret == GS_INVALID) {
-    display_error("Invalid data received from server: %s\n", info->internal, gs_error);
+    display_error("Invalid data received from server: %s\n%s",
+                  info->internal, connection_error_message());
+    release_host_client_state();
     return NULL;
   } else if (ret == GS_UNSUPPORTED_VERSION) {
     if (!config.unsupported_version) {
       vita_debug_event(
           VITA_DEBUG_LEVEL_ERROR, "stream.action",
           "action=connect state=failed phase=host_init code=%d", ret);
-      display_error("Unsupported version: %s\n", gs_error);
+      display_error("Unsupported version: %s\n",
+                    connection_error_message());
+      release_host_client_state();
       return NULL;
     }
   } else if (ret == GS_ERROR) {
-    display_error("Gamestream error: %s\n", gs_error);
+    display_error("Gamestream error: %s\n", connection_error_message());
+    release_host_client_state();
     return NULL;
   } else if (ret != GS_OK) {
-    display_error("Can't connect to server\n%s", info->internal);
+    display_error("Can't connect to server\n%s\n%s", info->internal,
+                  connection_error_message());
+    release_host_client_state();
     return NULL;
   }
 
@@ -580,7 +749,12 @@ device_info_t* ui_connect_and_pairing(device_info_t *info) {
       ret == GS_OK ? VITA_DEBUG_LEVEL_INFO : VITA_DEBUG_LEVEL_WARNING,
       "stream.action",
       "action=connect state=ready phase=host_init code=%d", ret);
-  connection_reset();
+  if (connection_reset() != 0) {
+    display_error("Could not begin the Vita connection attempt.\n"
+                  "Disconnect and try adding this PC again.");
+    release_host_client_state();
+    return NULL;
+  }
 
   device_info_t *p = append_device(info);
   if (p == NULL) {
@@ -595,8 +769,7 @@ device_info_t* ui_connect_and_pairing(device_info_t *info) {
 
   // connectable address
   save_device_info(info);
-  // Notify user pairing succeeded
-  flash_message("Paired: %s", info->name);
+  flash_message("PC saved: %s", info->name);
 
   if (server.paired) {
     // no more need, move next action
@@ -604,20 +777,31 @@ device_info_t* ui_connect_and_pairing(device_info_t *info) {
   }
 
   char pin[5];
-  sprintf(pin, "%d%d%d%d",
-          (int)rand() % 10, (int)rand() % 10, (int)rand() % 10, (int)rand() % 10);
+  if (gs_generate_pin(pin) != GS_OK) {
+    display_error("Could not create a secure pairing PIN\n%s",
+                  connection_error_message());
+    release_host_client_state();
+    return NULL;
+  }
   flash_message("Please enter the following PIN\non the target PC:\n\n%s", pin);
 
   ret = gs_pair(&server, pin);
   if (ret != GS_OK) {
-    display_error("Pairing failed: %d", ret);
-    connection_terminate();
+    display_error("Pairing failed: %d\n%s", ret,
+                  connection_error_message());
+    release_host_client_state();
     return NULL;
   }
 paired:
-  connection_paired();
+  if (connection_paired() != 0) {
+    display_error("Pairing completed, but the Vita connection state could not "
+                  "be updated. Please reconnect and try again.");
+    release_host_client_state();
+    return NULL;
+  }
 
   info->paired = true;
+  flash_message("Securely paired: %s", info->name);
 
   // Preferimos usar la MAC ya obtenida en serverinfo (XML) si está disponible
   char mac[18] = {0};
@@ -629,9 +813,11 @@ paired:
 
   if (connection_terminate()) {
     display_error("Reconnect failed: %d", -2);
+    release_host_client_state();
     return info;
   }
 
+  release_host_client_state();
   return info;
 }
 
@@ -653,7 +839,7 @@ void ui_connect_manual() {
 
 bool check_connection(const char *name, char *addr, uint16_t port) {
   // someone already connected
-  if (connection_is_ready()) {
+  if (connection_is_ready() || addr == NULL || addr[0] == '\0') {
     return false;
   }
 
@@ -664,15 +850,17 @@ bool check_connection(const char *name, char *addr, uint16_t port) {
     log_level = 3;
   }
 
-  char key_dir[4096];
-  sprintf(key_dir, "%s/%s", config.key_dir, name);
-
-  if (gs_init(&server, addr, port, key_dir, log_level, true) != GS_OK) {
+  char key_dir[HOST_KEY_DIRECTORY_CAPACITY];
+  if (!build_host_key_directory(key_dir, sizeof(key_dir), name))
     return false;
-  }
 
-  /* A gs_init reachability probe never enters the stream state machine. */
-  return true;
+  SERVER_DATA probe = {0};
+  int ret = gs_init(
+      &probe, addr, port, key_dir, log_level,
+      config.unsupported_version);
+  bool reachable = ret == GS_OK;
+  gs_cleanup(&probe);
+  return reachable;
 }
 
 void ui_connect_paired_device(device_info_t *info) {
@@ -693,7 +881,9 @@ void ui_connect_paired_device(device_info_t *info) {
   save_device_info(info);
 
   if (addr == NULL) {
-    display_error("Can't connect to server\n%s", info->name);
+    display_error("Can't connect to server\n%s\n%s", info->name,
+                  gs_error == NULL ? "Check that Sunshine is running"
+                                   : connection_error_message());
     return;
   }
 

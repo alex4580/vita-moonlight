@@ -1,0 +1,4 @@
+# Preserve exact reviewed patch bytes. Unified diffs require a one-character
+# context prefix on otherwise blank source lines, so whitespace checking the
+# patch artifact itself would report false positives.
+patches/moonlight-common-c/*.patch text eol=lf -whitespace

@@ -32,6 +32,7 @@
 
 #include <pthread.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <psp2/kernel/sysmem.h>
 #include <psp2/kernel/threadmgr.h>
 #include <psp2/display.h>
@@ -81,6 +82,50 @@ enum {
 static char* decoder_buffer = NULL;
 
 static size_t decoder_buffer_size = 0;
+
+static bool decoder_buffer_requirement(PDECODE_UNIT decode_unit,
+                                       size_t* payload_size,
+                                       size_t* allocation_size) {
+  if (decode_unit == NULL || decode_unit->bufferList == NULL ||
+      decode_unit->fullLength <= 0 || payload_size == NULL ||
+      allocation_size == NULL) {
+    return false;
+  }
+
+  size_t source_size = 0;
+  size_t required_size = 0;
+  size_t entry_count = 0;
+  for (PLENTRY entry = decode_unit->bufferList;
+       entry != NULL; entry = entry->next) {
+    /* Each valid entry contains at least one source byte, so this also bounds
+     * traversal if a malformed list contains a cycle. */
+    entry_count++;
+    if (entry_count > (size_t)decode_unit->fullLength ||
+        entry->data == NULL || entry->length <= 0) {
+      return false;
+    }
+
+    size_t entry_source_size = (size_t)entry->length;
+    if (source_size > SIZE_MAX - entry_source_size) return false;
+    source_size += entry_source_size;
+
+    size_t entry_output_size = entry->bufferType == BUFFER_TYPE_SPS
+        ? (size_t)GS_SPS_MAX_REWRITTEN_SIZE
+        : entry_source_size;
+    if (required_size > SIZE_MAX - entry_output_size) return false;
+    required_size += entry_output_size;
+  }
+
+  if (source_size != (size_t)decode_unit->fullLength ||
+      required_size > UINT32_MAX ||
+      required_size > SIZE_MAX - AV_INPUT_BUFFER_PADDING_SIZE) {
+    return false;
+  }
+
+  *payload_size = required_size;
+  *allocation_size = required_size + AV_INPUT_BUFFER_PADDING_SIZE;
+  return true;
+}
 
 enum {
   SCREEN_WIDTH = 960,
@@ -394,54 +439,48 @@ static void vita_cleanup() {
     return;
   }
 
-  if (video_status == INIT_AVC_DEC) {
+  /* video_status records completed platform stages, while the pointers and
+   * UIDs below may be acquired partway through the next stage. Release by
+   * ownership so every setup failure is retry-safe. */
+  if (video_status >= INIT_AVC_DEC && decoder != NULL) {
     sceAvcdecDeleteDecoder(decoder);
-    video_status--;
   }
 
-  if (video_status == INIT_DECODER_MEMBLOCK) {
-    if (decoderblock >= 0) {
-      sceKernelFreeMemBlock(decoderblock);
-      decoderblock = -1;
-    }
-    if (decoder != NULL) {
-      free(decoder);
-      decoder = NULL;
-    }
-    if (decoder_info != NULL) {
-      free(decoder_info);
-      decoder_info = NULL;
-    }
-    video_status--;
+  if (decoderblock >= 0) {
+    sceKernelFreeMemBlock(decoderblock);
+    decoderblock = -1;
+  }
+  if (decoder != NULL) {
+    free(decoder);
+    decoder = NULL;
+  }
+  if (decoder_info != NULL) {
+    free(decoder_info);
+    decoder_info = NULL;
   }
 
-  if (video_status == INIT_AVC_LIB) {
+  if (video_status >= INIT_AVC_LIB) {
     sceVideodecTermLibrary(SCE_VIDEODEC_TYPE_HW_AVCDEC);
-
-    if (init != NULL) {
-      free(init);
-      init = NULL;
-    }
-    video_status--;
+  }
+  if (init != NULL) {
+    free(init);
+    init = NULL;
   }
 
-  if (video_status == INIT_FRAMEBUFFER) {
-    if (frame_texture != NULL) {
-      vita2d_free_texture(frame_texture);
-      frame_texture = NULL;
-    }
-
-    if (decoder_buffer != NULL) {
-      free(decoder_buffer);
-      decoder_buffer = NULL;
-    }
-    video_status--;
+  if (frame_texture != NULL) {
+    vita2d_free_texture(frame_texture);
+    frame_texture = NULL;
   }
+  if (decoder_buffer != NULL) {
+    free(decoder_buffer);
+    decoder_buffer = NULL;
+  }
+  decoder_buffer_size = 0;
 
-  if (video_status == INIT_GS) {
+  if (video_status >= INIT_GS) {
     gs_sps_stop();
-    video_status--;
   }
+  video_status = NOT_INIT;
 
   decoded_frame_available = false;
   atomic_store_u32(&redraw_request_generation, 0);
@@ -700,38 +739,66 @@ static int vita_submit_decode_unit(PDECODE_UNIT decodeUnit) {
   picture.frame.frameHeight = image_scaling.texture_height;
   picture.frame.pPicture[0] = vita2d_texture_get_datap(frame_texture);
 
-  //ensure_buf_size((void *)&decoder_buffer, &decoder_buffer_size, decodeUnit->fullLength + 64);
-
-  if (decoder_buffer_size < (decodeUnit->fullLength + AV_INPUT_BUFFER_PADDING_SIZE)) {
-    printf("Reallocating decoder buffer to %u bytes", (size_t)decodeUnit->fullLength + AV_INPUT_BUFFER_PADDING_SIZE);
-    decoder_buffer = realloc(decoder_buffer, decodeUnit->fullLength + AV_INPUT_BUFFER_PADDING_SIZE);
-    decoder_buffer_size = decodeUnit->fullLength+AV_INPUT_BUFFER_PADDING_SIZE;
-    if (decoder_buffer == NULL) {
-      printf("Out of memory! could not reallocate buffer!!");
-      exit(1);
-    }
+  size_t payload_capacity = 0;
+  size_t required_allocation = 0;
+  if (!decoder_buffer_requirement(
+          decodeUnit, &payload_capacity, &required_allocation)) {
+    vita_debug_event(
+        VITA_DEBUG_LEVEL_ERROR, "decoder.state",
+        "state=error phase=validate_input source_bytes=%d",
+        decodeUnit != NULL ? decodeUnit->fullLength : 0);
+    return DR_NEED_IDR;
   }
 
-
-/*   if (decodeUnit->fullLength >= DECODER_BUFFER_SIZE + 64) {
-    printf("Video decode buffer too small\n");
-    exit(1);
-  } */
+  if (decoder_buffer == NULL || decoder_buffer_size < required_allocation) {
+    printf("Reallocating decoder buffer to %u bytes",
+           (unsigned int)required_allocation);
+    char* resized_buffer = realloc(decoder_buffer, required_allocation);
+    if (resized_buffer == NULL) {
+      vita_debug_event(
+          VITA_DEBUG_LEVEL_ERROR, "decoder.state",
+          "state=error phase=grow_input_buffer requested_bytes=%u",
+          (unsigned int)required_allocation);
+      return DR_NEED_IDR;
+    }
+    decoder_buffer = resized_buffer;
+    decoder_buffer_size = required_allocation;
+  }
 
   PLENTRY entry = decodeUnit->bufferList;
   uint32_t length = 0;
   while (entry != NULL) {
     if (entry->bufferType == BUFFER_TYPE_SPS) {
-      gs_sps_fix(entry, GS_SPS_BITSTREAM_FIXUP, decoder_buffer, &length);
+      if (!gs_sps_fix(entry, GS_SPS_BITSTREAM_FIXUP,
+                      (uint8_t*)decoder_buffer, payload_capacity, &length)) {
+        vita_debug_event(
+            VITA_DEBUG_LEVEL_ERROR, "decoder.state",
+            "state=error phase=rewrite_sps source_bytes=%d",
+            decodeUnit->fullLength);
+        return DR_NEED_IDR;
+      }
     } else {
-      memcpy(decoder_buffer+length, entry->data, entry->length);
-      length += entry->length;
+      size_t entry_length = (size_t)entry->length;
+      if ((size_t)length > payload_capacity ||
+          entry_length > payload_capacity - (size_t)length) {
+        vita_debug_event(
+            VITA_DEBUG_LEVEL_ERROR, "decoder.state",
+            "state=error phase=copy_input source_bytes=%d output_bytes=%u",
+            decodeUnit->fullLength, (unsigned int)length);
+        return DR_NEED_IDR;
+      }
+      memcpy(decoder_buffer + length, entry->data, entry_length);
+      length += (uint32_t)entry_length;
     }
     entry = entry->next;
   }
 
+  /* Hardware decoders may read a small distance past the payload. Keep that
+   * region allocated and deterministic after both copies and SPS rewrites. */
+  memset(decoder_buffer + length, 0, AV_INPUT_BUFFER_PADDING_SIZE);
+
   au.es.pBuf = decoder_buffer;
-  au.es.size = decodeUnit->fullLength;
+  au.es.size = length;
   au.dts.lower = 0xFFFFFFFF;
   au.dts.upper = 0xFFFFFFFF;
   au.pts.lower = 0xFFFFFFFF;
@@ -752,7 +819,7 @@ static int vita_submit_decode_unit(PDECODE_UNIT decodeUnit) {
   if (ret < 0) {
     if (collect_diagnostics) {
       ui_diagnostics_record_video_frame(
-          decodeUnit->fullLength, decode_time_us, false);
+          length, decode_time_us, false);
     }
     uint64_t now_us = sceKernelGetSystemTimeWide();
     if (last_decoder_error_log_us == 0 ||
@@ -760,10 +827,12 @@ static int vita_submit_decode_unit(PDECODE_UNIT decodeUnit) {
             DECODER_ERROR_LOG_INTERVAL_US) {
       vita_debug_event(
           VITA_DEBUG_LEVEL_ERROR, "decoder.state",
-          "state=error phase=decode code=0x%08x unit_bytes=%u outputs=%d "
+          "state=error phase=decode code=0x%08x source_bytes=%u "
+          "unit_bytes=%u outputs=%d "
           "repeats_suppressed=%u",
           (unsigned int)ret, (unsigned int)decodeUnit->fullLength,
-          array_picture.numOfOutput, suppressed_decoder_errors);
+          (unsigned int)length, array_picture.numOfOutput,
+          suppressed_decoder_errors);
       last_decoder_error_log_us = now_us;
       suppressed_decoder_errors = 0;
     } else {
@@ -776,7 +845,7 @@ static int vita_submit_decode_unit(PDECODE_UNIT decodeUnit) {
   if (array_picture.numOfOutput != 1) {
     if (collect_diagnostics) {
       ui_diagnostics_record_video_frame(
-          decodeUnit->fullLength, decode_time_us, false);
+          length, decode_time_us, false);
     }
     //printf("numOfOutput %d\n", array_picture.numOfOutput);
     pthread_mutex_unlock(&video_render_mutex);
@@ -802,7 +871,7 @@ static int vita_submit_decode_unit(PDECODE_UNIT decodeUnit) {
 
   if (collect_diagnostics) {
     ui_diagnostics_record_video_frame(
-        decodeUnit->fullLength, decode_time_us, presented);
+        length, decode_time_us, presented);
   }
   pthread_mutex_unlock(&video_render_mutex);
 
@@ -895,5 +964,7 @@ DECODER_RENDERER_CALLBACKS decoder_callbacks_vita = {
   .setup = vita_setup,
   .cleanup = vita_cleanup,
   .submitDecodeUnit = vita_submit_decode_unit,
-  .capabilities = CAPABILITY_DIRECT_SUBMIT | CAPABILITY_SLICES_PER_FRAME(2)
+  /* Decode, draw, and buffer swap may block. Keep them off the receive thread
+   * and let moonlight-common's renderer queue absorb short scheduling jitter. */
+  .capabilities = CAPABILITY_SLICES_PER_FRAME(2)
 };

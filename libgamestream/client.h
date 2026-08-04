@@ -31,7 +31,8 @@
 typedef struct _SERVER_DATA {
   char* gpuType;
   bool paired;
-  bool unsupported;
+  bool allowUnsupportedVersion;
+  bool securePairingRequired;
   bool isNvidiaSoftware;
   int currentGame;
   int serverMajorVersion;
@@ -43,7 +44,8 @@ typedef struct _SERVER_DATA {
   unsigned short httpsPort;
 } SERVER_DATA, *PSERVER_DATA;
 
-int gs_init(PSERVER_DATA server, char* address, unsigned short httpPort, const char *keyDirectory, int logLevel, bool unsupported);
+int gs_init(PSERVER_DATA server, char* address, unsigned short httpPort, const char *keyDirectory, int logLevel, bool allowUnsupportedVersion);
+void gs_cleanup(PSERVER_DATA server);
 int gs_refresh(PSERVER_DATA server);
 int gs_start_app(PSERVER_DATA server, PSTREAM_CONFIGURATION config, int appId, bool sops, bool localaudio, int gamepad_mask);
 int gs_applist(PSERVER_DATA server, PAPP_LIST *app_list);
@@ -51,3 +53,5 @@ int gs_unpair(PSERVER_DATA server);
 int gs_pair(PSERVER_DATA server, char* pin);
 int gs_quit_app(PSERVER_DATA server);
 int gs_get_server_mac(PSERVER_DATA server, char *mac, unsigned int size);
+int gs_generate_pin(char pin[5]);
+void gs_free_applist(PAPP_LIST *app_list);

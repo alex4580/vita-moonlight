@@ -34,26 +34,26 @@ static const int NUM_YEARS = 10;
 int mkcert(X509 **x509p, EVP_PKEY **pkeyp, int bits, int serial, int years);
 
 CERT_KEY_PAIR mkcert_generate() {
-    BIO *bio_err;
     X509 *x509 = NULL;
     EVP_PKEY *pkey = NULL;
     PKCS12 *p12 = NULL;
 
-    bio_err = BIO_new_fp(stderr, BIO_NOCLOSE);
-
     OpenSSL_add_all_algorithms();
     ERR_load_crypto_strings();
 
-    mkcert(&x509, &pkey, NUM_BITS, SERIAL, NUM_YEARS);
+    if (!mkcert(&x509, &pkey, NUM_BITS, SERIAL, NUM_YEARS)) {
+        goto cleanup;
+    }
 
     p12 = PKCS12_create("limelight", "GameStream", pkey, x509, NULL, 0, 0, 0, 0, 0);
 
-#ifndef OPENSSL_NO_ENGINE
-    ENGINE_cleanup();
-#endif
-    CRYPTO_cleanup_all_ex_data();
-
-    BIO_free(bio_err);
+cleanup:
+    if (p12 == NULL) {
+        X509_free(x509);
+        EVP_PKEY_free(pkey);
+        x509 = NULL;
+        pkey = NULL;
+    }
 
     return (CERT_KEY_PAIR) {x509, pkey, p12};
 }
@@ -64,57 +64,94 @@ void mkcert_free(CERT_KEY_PAIR certKeyPair) {
     PKCS12_free(certKeyPair.p12);
 }
 
-void mkcert_save(const char* certFile, const char* p12File, const char* keyPairFile, CERT_KEY_PAIR certKeyPair) {
+int mkcert_save(const char* certFile, const char* p12File, const char* keyPairFile, CERT_KEY_PAIR certKeyPair) {
     FILE* certFilePtr = fopen(certFile, "w");
     FILE* keyPairFilePtr = fopen(keyPairFile, "w");
     FILE* p12FilePtr = fopen(p12File, "wb");
 
-    //TODO: error check
-    PEM_write_PrivateKey(keyPairFilePtr, certKeyPair.pkey, NULL, NULL, 0, NULL, NULL);
-    PEM_write_X509(certFilePtr, certKeyPair.x509);
-    i2d_PKCS12_fp(p12FilePtr, certKeyPair.p12);
+    if (certFilePtr == NULL || keyPairFilePtr == NULL || p12FilePtr == NULL) {
+        if (p12FilePtr != NULL) fclose(p12FilePtr);
+        if (certFilePtr != NULL) fclose(certFilePtr);
+        if (keyPairFilePtr != NULL) fclose(keyPairFilePtr);
+        remove(certFile);
+        remove(keyPairFile);
+        remove(p12File);
+        return -1;
+    }
 
-    fclose(p12FilePtr);
-    fclose(certFilePtr);
-    fclose(keyPairFilePtr);
+    int ok = PEM_write_PrivateKey(keyPairFilePtr, certKeyPair.pkey, NULL, NULL, 0, NULL, NULL) == 1 &&
+             PEM_write_X509(certFilePtr, certKeyPair.x509) == 1 &&
+             i2d_PKCS12_fp(p12FilePtr, certKeyPair.p12) == 1;
+
+    ok = fclose(p12FilePtr) == 0 && ok;
+    ok = fclose(certFilePtr) == 0 && ok;
+    ok = fclose(keyPairFilePtr) == 0 && ok;
+    if (!ok) {
+        remove(certFile);
+        remove(keyPairFile);
+        remove(p12File);
+        return -1;
+    }
+    return 0;
 }
 
 int mkcert(X509 **x509p, EVP_PKEY **pkeyp, int bits, int serial, int years) {
     EVP_PKEY_CTX* ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_RSA, NULL);
-    EVP_PKEY_keygen_init(ctx);
-    EVP_PKEY_CTX_set_rsa_keygen_bits(ctx, bits);
+    if (ctx == NULL || EVP_PKEY_keygen_init(ctx) <= 0 ||
+        EVP_PKEY_CTX_set_rsa_keygen_bits(ctx, bits) <= 0) {
+        EVP_PKEY_CTX_free(ctx);
+        return 0;
+    }
 
     // pk must be initialized on input
     EVP_PKEY *pk = NULL;;
-    EVP_PKEY_keygen(ctx, &pk);
+    if (EVP_PKEY_keygen(ctx, &pk) <= 0 || pk == NULL) {
+        EVP_PKEY_CTX_free(ctx);
+        return 0;
+    }
 
     EVP_PKEY_CTX_free(ctx);
 
     X509* cert = X509_new();
-    X509_set_version(cert, 2);
-    ASN1_INTEGER_set(X509_get_serialNumber(cert), serial);
+    if (cert == NULL) {
+        EVP_PKEY_free(pk);
+        return 0;
+    }
+    if (X509_set_version(cert, 2) != 1 ||
+        ASN1_INTEGER_set(X509_get_serialNumber(cert), serial) != 1) {
+        goto err;
+    }
 #if OPENSSL_VERSION_NUMBER < 0x10100000L
-    X509_gmtime_adj(X509_get_notBefore(cert), 0);
-    X509_gmtime_adj(X509_get_notAfter(cert), 60 * 60 * 24 * 365 * years);
+    if (X509_gmtime_adj(X509_get_notBefore(cert), 0) == NULL ||
+        X509_gmtime_adj(X509_get_notAfter(cert), 60 * 60 * 24 * 365 * years) == NULL) {
+        goto err;
+    }
 #else
     ASN1_TIME* before = ASN1_STRING_dup(X509_get0_notBefore(cert));
     ASN1_TIME* after = ASN1_STRING_dup(X509_get0_notAfter(cert));
 
-    X509_gmtime_adj(before, 0);
-    X509_gmtime_adj(after, 60 * 60 * 24 * 365 * years);
-
-    X509_set1_notBefore(cert, before);
-    X509_set1_notAfter(cert, after);
+    if (before == NULL || after == NULL ||
+        X509_gmtime_adj(before, 0) == NULL ||
+        X509_gmtime_adj(after, 60 * 60 * 24 * 365 * years) == NULL ||
+        X509_set1_notBefore(cert, before) != 1 ||
+        X509_set1_notAfter(cert, after) != 1) {
+        ASN1_STRING_free(before);
+        ASN1_STRING_free(after);
+        goto err;
+    }
 
     ASN1_STRING_free(before);
     ASN1_STRING_free(after);
 #endif
 
-    X509_set_pubkey(cert, pk);
+    if (X509_set_pubkey(cert, pk) != 1) goto err;
 
     X509_NAME* name = X509_get_subject_name(cert);
-    X509_NAME_add_entry_by_txt(name,"CN", MBSTRING_ASC, (unsigned char*)"NVIDIA GameStream Client", -1, -1, 0);
-    X509_set_issuer_name(cert, name);
+    if (name == NULL ||
+        X509_NAME_add_entry_by_txt(name,"CN", MBSTRING_ASC, (unsigned char*)"Vita Moonlight Client", -1, -1, 0) != 1 ||
+        X509_set_issuer_name(cert, name) != 1) {
+        goto err;
+    }
 
     if (!X509_sign(cert, pk, EVP_sha256())) {
         goto err;
@@ -125,5 +162,7 @@ int mkcert(X509 **x509p, EVP_PKEY **pkeyp, int bits, int serial, int years) {
 
     return(1);
 err:
+    X509_free(cert);
+    EVP_PKEY_free(pk);
     return(0);
 }

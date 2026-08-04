@@ -1,5 +1,25 @@
 ## 0.14.7
 
+* Added a machine-checked Vita/host compatibility contract. Vita requests are
+  limited to 960x544, 960x540, or 1280x720 at 24/30/40/50/60 FPS while the
+  Windows virtual desktop remains at a driver-safe 60 Hz. The shared Sunshine
+  hook now leaves unrelated Moonlight resolutions and frame rates untouched.
+* Secured Vita-to-Sunshine HTTPS with a certificate pin established by the PIN
+  exchange. Upgrades preserve valid unique client identities; the historical
+  shared identity is replaced only during the required one-time migration when
+  no authenticated host pin exists. Fresh installs generate a unique identity,
+  all cryptographic randomness is checked, and optional HTTP diagnostics no
+  longer print pairing secrets or response bodies.
+* Removed blocking direct-submit audio/video callbacks from Moonlight's network
+  receive path, bounded SPS rewriting, disabled incompatible H.264 reference-
+  frame invalidation, and pinned the Vita-tested Moonlight common transport
+  fixes at `07c32c80f98bb0d7214c577bd080eea3ce64a856`.
+* Bounded untrusted Sunshine XML, App lists, mode lists, and UI strings; fixed
+  empty-list menu indexing and optional legacy-host fields; and made failed
+  decoder, audio, motion, pairing, and reconnect lifecycles safe to retry.
+* Made gyro sampling lazy and host-driven. No motion worker runs outside a
+  compatible PS/DS4 stream, one 64 KiB event-driven worker replaces two
+  permanent polling workers, and sensor setup failures no longer trap startup.
 * Added a durable, reversible **Pause Vita host features** lifecycle that restores
   the physical desktop, disables Vita background tasks and the managed VDD,
   while leaving shared Sunshine/Apollo installed and reachable. Clients pinned

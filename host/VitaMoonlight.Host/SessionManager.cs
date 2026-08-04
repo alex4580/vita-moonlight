@@ -8,7 +8,8 @@ internal sealed record SessionStartResult(
     string DisplayName,
     int Width,
     int Height,
-    int Fps,
+    int StreamFps,
+    int DesktopRefreshRate,
     string RecoveryFile,
     DateTimeOffset RecoveryCapturedAt);
 internal sealed record SessionModeResult(string DisplayName, VitaDisplayMode Mode);
@@ -607,7 +608,10 @@ internal sealed class SessionManager
 
     internal SessionStartResult Start(int width, int height, int fps)
     {
-        ValidateStreamMode(width, height, fps);
+        var streamMode = VitaDisplayModes.RequireSupportedStreamMode(
+            width,
+            height,
+            fps);
         var suspendBeforeLease = DisplaySuspendIntentStore.Inspect();
         using var transaction = DisplayTransactionLock.Acquire();
         DisplaySuspendIntentStore.RequireClearForDisplayMutationLocked(
@@ -617,9 +621,7 @@ internal sealed class SessionManager
         RequireFullyReadyBackendLocked(transaction);
         return StartCoreLocked(
             transaction,
-            width,
-            height,
-            fps,
+            streamMode,
             HostSettings.Load(),
             prepareDriverMode: true,
             persistMode: false,
@@ -644,7 +646,10 @@ internal sealed class SessionManager
             ForceSdr = true,
         };
 
-        ValidateStreamMode(mode.Width, mode.Height, mode.Fps);
+        var streamMode = VitaDisplayModes.RequireSupportedStreamMode(
+            mode.Width,
+            mode.Height,
+            mode.Fps);
         var suspendBeforeLease = DisplaySuspendIntentStore.Inspect();
         using var transaction = DisplayTransactionLock.Acquire();
         DisplaySuspendIntentStore.RequireClearForDisplayMutationLocked(
@@ -731,22 +736,22 @@ internal sealed class SessionManager
             selected.FriendlyName,
             mode.Width,
             mode.Height,
-            mode.Fps,
+            streamMode.StreamFps,
+            streamMode.DesktopMode.Fps,
             HostStatePaths.RecoveryFile,
             recovery.CapturedAt);
     }
 
     private SessionStartResult StartCoreLocked(
         DisplayTransactionLease transaction,
-        int width,
-        int height,
-        int fps,
+        VitaStreamMode streamMode,
         HostSettings settings,
         bool prepareDriverMode,
         bool persistMode,
         int activationAttempts)
     {
         transaction.RequireActive();
+        var desktopMode = streamMode.DesktopMode;
         if (File.Exists(HostStatePaths.RecoveryFile))
         {
             throw new InvalidOperationException(
@@ -754,7 +759,10 @@ internal sealed class SessionManager
             );
         }
 
-        var recovery = displays.CaptureRecovery(width, height, fps);
+        var recovery = displays.CaptureRecovery(
+            desktopMode.Width,
+            desktopMode.Height,
+            desktopMode.Fps);
         displays.SaveRecovery(transaction, recovery);
 
         try
@@ -763,16 +771,16 @@ internal sealed class SessionManager
             {
                 DisplayWizardAdapter.LocateBundled().PrepareMode(
                     transaction,
-                    width,
-                    height,
-                    fps);
+                    desktopMode.Width,
+                    desktopMode.Height,
+                    desktopMode.Fps);
             }
 
             var selected = ActivateWithRetry(
                 settings.DisplayMatch,
-                width,
-                height,
-                fps,
+                desktopMode.Width,
+                desktopMode.Height,
+                desktopMode.Fps,
                 settings.ForceSdr,
                 persistMode,
                 activationAttempts);
@@ -785,9 +793,10 @@ internal sealed class SessionManager
             // physical-layout record.
             return new SessionStartResult(
                 selected.FriendlyName,
-                width,
-                height,
-                fps,
+                desktopMode.Width,
+                desktopMode.Height,
+                streamMode.StreamFps,
+                desktopMode.Fps,
                 HostStatePaths.RecoveryFile,
                 recovery.CapturedAt);
         }
@@ -949,11 +958,4 @@ internal sealed class SessionManager
             $"Check readiness before reconnecting. {details}");
     }
 
-    private static void ValidateStreamMode(int width, int height, int fps)
-    {
-        if (width < 64 || width > 7680 || height < 64 || height > 4320 || fps < 24 || fps > 240)
-        {
-            throw new ArgumentOutOfRangeException(nameof(width), "The requested stream mode is outside supported bounds.");
-        }
-    }
 }

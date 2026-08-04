@@ -22,7 +22,7 @@ Presets are full configurations, not bitrate shortcuts. All four set:
 - stereo audio with PC-local audio disabled;
 - 60 Hz Vita client timing;
 - host game optimization enabled;
-- H.264 reference-frame invalidation enabled for packet-loss recovery;
+- automatic clean-keyframe (IDR) recovery compatible with the Vita decoder;
 - Vita frame pacing enabled;
 - Vita vblank wait disabled;
 - fit-entire-frame scaling instead of crop/fill;
@@ -104,7 +104,7 @@ Windows game.
 | **Frame rate** | 60 FPS produces smoother movement and shorter input-to-visible-frame intervals. | 30 FPS is easier for Wi-Fi and decoder load, but less fluid. Intermediate 24/40/50 values are available for special cases and make the preset Custom. |
 | **Video bitrate** | More bits reduce blocks, smearing, and lost detail during motion. | A rate above the sustainable link capacity causes queues, loss, freezes, and added input latency. The accepted range is 1-30 Mbps. |
 | **Network mode** | Auto detect chooses local/remote handling; Local only and Remote / VPN override it. | Forcing the wrong path can reduce responsiveness or reliability. Leave Auto detect selected unless the host path is known. |
-| **Packet-loss recovery** | Requests reference-frame invalidation when the host supports it; otherwise Moonlight falls back to requesting a clean IDR frame. | Small protocol/encoder overhead; leave it on for Wi-Fi, but the host ultimately decides which recovery mechanism is negotiated. |
+| **Packet-loss recovery** | Automatically requests a clean IDR keyframe when the decoder must recover. Reference-frame invalidation is intentionally disabled because the Vita hardware decoder requires a rewritten one-reference-frame SPS. | No user tuning is required. This avoids the corruption that reference invalidation can cause when the decoded reference structure differs from the host's original stream. |
 | **Frame pacing** | Drops late or excess frames instead of displaying an uneven queue. | Usually smoother. Turning it off can feel slightly more immediate in a special case but can introduce judder. |
 | **Wait for Vita vblank** | Synchronizes drawing to the Vita display. | May reduce tearing, but can add synchronization latency; presets leave it off. |
 | **Aspect scaling** | Fit shows the complete encoded frame; Crop / fill removes borders by trimming edges. | Crop can hide desktop UI and game HUD elements. Fit is the safe default. |

@@ -49,7 +49,9 @@ Every other beta, release-candidate, and stable tag remains signing-required.
 4. Copy `moonlight.vpk` to the Vita with VitaShell USB or FTP, select the file
    in VitaShell, and install it.
 5. Start Vita Moonlight. Select the PC, enter the displayed PIN in Sunshine's
-   web page when asked, and launch **Steam Big Picture** or **Desktop**.
+   web page when asked, and launch **Steam Big Picture** or **Desktop**. Pairing
+   also pins that PC's Sunshine identity so later HTTPS control requests fail
+   safely if the host certificate changes unexpectedly.
 
 On Sunshine's first launch, its web page may ask you to create a username and
 password. Those are local Sunshine administration credentials; the short PIN
@@ -107,7 +109,10 @@ automatically during Enable; if it needs a restart or fails, host features
 return to Paused and the plan remains available for a safe retry.
 
 Installing the same VPK over the current Vita app is also safe. Saved hosts and
-settings should remain.
+settings should remain. The first VPK in this security-hardened line asks an
+existing paired PC to **Pair securely (one-time upgrade)** because older Vita
+builds did not save a verifiable Sunshine certificate pin. Enter the new PIN in
+Sunshine once; this is expected and does not assume a clean install.
 
 ## Uninstall
 

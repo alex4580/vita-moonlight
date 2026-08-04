@@ -165,6 +165,19 @@ int connection_reset() {
   return 0;
 }
 
+int connection_abort_attempt() {
+  if (connection_status != LI_READY) {
+    log_invalid_transition("abort_attempt");
+    return -1;
+  }
+
+  connection_stage = 0;
+  set_connection_state(
+      LI_DISCONNECTED, "attempt_aborted", VITA_DEBUG_LEVEL_INFO, 0);
+  vita_debug_flush();
+  return 0;
+}
+
 int connection_paired() {
   if (connection_status != LI_READY && connection_status != LI_PAIRED &&
       connection_status != LI_CONNECTED) {

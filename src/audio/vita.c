@@ -21,6 +21,8 @@
 #include "../debug.h"
 
 #include <stdio.h>
+#include <stdint.h>
+#include <string.h>
 #include <opus/opus_multistream.h>
 #include <psp2/audioout.h>
 
@@ -33,22 +35,54 @@ enum {
 #define FRAME_SIZE 240
 #define VITA_SAMPLES 960
 #define BUFFER_SIZE (2 * VITA_SAMPLES)
-static int decode_offset;
-static int port;
+static int decode_offset = 0;
+static int port = -1;
 
-static int active_audio_thread = true;
+/* This flag is written by the UI thread and read by moonlight-common's
+ * queued audio worker. Publish it atomically so pause/resume cannot race. */
+static uint32_t active_audio_thread = 1U;
 static OpusMSDecoder* decoder = NULL;
 
 static short buffer[BUFFER_SIZE];
 
+static uint32_t atomic_load_u32(const uint32_t *value) {
+  return __atomic_load_n(value, __ATOMIC_ACQUIRE);
+}
+
+static void atomic_store_u32(uint32_t *value, uint32_t next) {
+  __atomic_store_n(value, next, __ATOMIC_RELEASE);
+}
+
 static void vita_renderer_cleanup() {
+  /* Cleanup may follow a partial init or be called more than once. Keep the
+   * Vita audio port and Opus decoder under a single idempotent lifecycle. */
+  if (port >= 0) {
+    int release_result = sceAudioOutReleasePort(port);
+    if (release_result < 0) {
+      vita_debug_log("Failed to release audio port 0x%x: 0x%x\n",
+                     port, release_result);
+    }
+  }
+  port = -1;
+
   if (decoder != NULL) {
     opus_multistream_decoder_destroy(decoder);
     decoder = NULL;
   }
+
+  decode_offset = 0;
+  memset(buffer, 0, sizeof(buffer));
 }
 
 static int vita_renderer_init(int audioConfiguration, POPUS_MULTISTREAM_CONFIGURATION opusConfig, void* audioContext, int arFlags) {
+  (void)audioConfiguration;
+  (void)audioContext;
+  (void)arFlags;
+
+  /* Recover cleanly if Moonlight retries initialization after a partial or
+   * interrupted session. */
+  vita_renderer_cleanup();
+
   int rc;
   decoder = opus_multistream_decoder_create(opusConfig->sampleRate,
                                             opusConfig->channelCount,
@@ -57,7 +91,11 @@ static int vita_renderer_init(int audioConfiguration, POPUS_MULTISTREAM_CONFIGUR
                                             opusConfig->mapping,
                                             &rc);
 
-  if (rc < 0) {
+  if (rc < 0 || decoder == NULL) {
+      if (decoder != NULL) {
+        opus_multistream_decoder_destroy(decoder);
+        decoder = NULL;
+      }
       return VITA_AUDIO_ERROR_BAD_OPUS;
   }
 
@@ -73,7 +111,7 @@ static int vita_renderer_init(int audioConfiguration, POPUS_MULTISTREAM_CONFIGUR
 }
 
 static void vita_renderer_decode_and_play_sample(char* data, int length) {
-  if (!data)
+  if (!data || length <= 0 || decoder == NULL || port < 0)
     return;
 
   int decodeLen = opus_multistream_decode(decoder, data, length, buffer + 2 * decode_offset, FRAME_SIZE, 0);
@@ -84,7 +122,7 @@ static void vita_renderer_decode_and_play_sample(char* data, int length) {
 
     if (decode_offset == VITA_SAMPLES) {
       decode_offset = 0;
-      if (active_audio_thread) {
+      if (atomic_load_u32(&active_audio_thread)) {
         sceAudioOutOutput(port, buffer);
       }
     }
@@ -97,14 +135,16 @@ AUDIO_RENDERER_CALLBACKS audio_callbacks_vita = {
   .init = vita_renderer_init,
   .cleanup = vita_renderer_cleanup,
   .decodeAndPlaySample = vita_renderer_decode_and_play_sample,
-  .capabilities = CAPABILITY_DIRECT_SUBMIT,
+  /* Opus decode and sceAudioOutOutput() may block. Let moonlight-common use
+   * its audio renderer queue instead of stalling the network receive path. */
+  .capabilities = 0,
 };
 
 
 void vitaaudio_start() {
-  active_audio_thread = true;
+  atomic_store_u32(&active_audio_thread, 1U);
 }
 
 void vitaaudio_stop() {
-  active_audio_thread = false;
+  atomic_store_u32(&active_audio_thread, 0U);
 }

@@ -16,8 +16,8 @@ typedef struct VitaMotionStatus {
 } VitaMotionStatus;
 
 bool vita_motion_init(void);
-void vita_motion_begin_stream(bool allow_motion);
-void vita_motion_end_stream(void);
+bool vita_motion_begin_stream(bool allow_motion);
+bool vita_motion_end_stream(void);
 void vita_motion_set_state(uint8_t motion_type, uint16_t report_rate);
 void vita_motion_get_status(VitaMotionStatus *status);
 
@@ -26,10 +26,6 @@ void vita_motion_get_status(VitaMotionStatus *status);
 
 uint16_t vita_motion_clamp_report_rate(uint16_t report_rate);
 
-int vitainput_motion_gyro_thread(SceSize args, void *argp);
-int vitainput_motion_accel_thread(SceSize args, void *argp);
-
-void motion_process_gyro(void);
-void motion_process_accel(void);
+int vitainput_motion_thread(SceSize args, void *argp);
 
 #endif

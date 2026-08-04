@@ -47,6 +47,9 @@ extern CONNECTION_LISTENER_CALLBACKS connection_callbacks;
 extern int connection_stage;
 
 int connection_reset();
+/* Cancel host setup before a stream exists. This is the only legal
+ * LI_READY -> LI_DISCONNECTED transition and never calls LiStopConnection(). */
+int connection_abort_attempt();
 int connection_paired();
 int connection_minimize();
 int connection_resume();

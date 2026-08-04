@@ -1237,8 +1237,10 @@ void vitainput_start(void) {
   // Keep Xbox mode strictly XInput-compatible. Sunshine's automatic controller
   // selection promotes motion-capable clients to DS4, so gyro and touchpad are
   // only advertised by the PlayStation profile that can represent them.
+  bool motion_ready = vita_motion_begin_stream(
+      controller_type == LI_CTYPE_PS && config.enable_motion_controls);
   if (controller_type == LI_CTYPE_PS) {
-    if (config.enable_motion_controls) {
+    if (motion_ready) {
       gamepadCapabilities |= LI_CCAP_GYRO | LI_CCAP_ACCEL;
     }
     if (config.touchscreen_mode == 1) {
@@ -1247,7 +1249,6 @@ void vitainput_start(void) {
     }
   }
 
-  vita_motion_begin_stream((gamepadCapabilities & (LI_CCAP_GYRO | LI_CCAP_ACCEL)) != 0);
   LiSendControllerArrivalEvent(0, gamepadMask, controller_type, gamepadSupportedButtonFlags, gamepadCapabilities);
 
   int battery_percent = scePowerGetBatteryLifePercent();

@@ -19,9 +19,18 @@
 
 #include <Limelight.h>
 
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
 #define GS_SPS_BITSTREAM_FIXUP  0x01
 #define GS_SPS_REMOVE_VST_FIXUP 0x02
 #define GS_SPS_REMOVE_CLI_FIXUP 0x04
 
+/* h264bitstream writes the rewritten NAL into a bounded 128-byte scratch
+ * region. Include the longest Annex B start code in the caller's budget. */
+#define GS_SPS_MAX_REWRITTEN_SIZE (4U + 128U)
+
 void gs_sps_init(int width, int height);
-void gs_sps_fix(PLENTRY sps, int flags, uint8_t* out_buf, uint32_t* out_offset);
+bool gs_sps_fix(PLENTRY sps, int flags, uint8_t* out_buf,
+                size_t out_capacity, uint32_t* out_offset);

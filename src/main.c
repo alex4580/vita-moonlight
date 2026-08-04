@@ -153,8 +153,9 @@ int main(int argc, char* argv[]) {
   }
 
   if (!vita_motion_init()) {
-    printf("Failed to init motion input!");
-    loop_forever();
+    /* Gyro is optional. Keep the rest of the client usable if the motion
+     * service or its synchronization objects are unavailable. */
+    printf("Motion input unavailable; continuing without gyro.\n");
   }
 
   char out_path[MOONLIGHT_PATH_MAX] = {0};

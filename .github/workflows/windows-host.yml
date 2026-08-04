@@ -5,6 +5,12 @@ on:
     branches: [vita]
     paths:
       - "host/**"
+      - "protocol/**"
+      - "src/config.c"
+      - "src/gui/ui_connect.c"
+      - "src/gui/ui_settings.c"
+      - "src/gui/ui_stream_overlay.c"
+      - "libgamestream/client.c"
       - "CMakeLists.txt"
       - "CHANGELOG.md"
       - "README.md"
@@ -21,6 +27,7 @@ on:
       - "resources/changeinfo.xml"
       - "sce_sys/livearea/contents/template.xml"
       - "tools/check-version-consistency.py"
+      - "tools/check-host-client-contract.py"
       - "tools/check-windows-upgrade-contract.py"
       - "tools/summarize-vita-log.py"
       - ".github/workflows/release.yml"
@@ -29,6 +36,12 @@ on:
     branches: [vita]
     paths:
       - "host/**"
+      - "protocol/**"
+      - "src/config.c"
+      - "src/gui/ui_connect.c"
+      - "src/gui/ui_settings.c"
+      - "src/gui/ui_stream_overlay.c"
+      - "libgamestream/client.c"
       - "CMakeLists.txt"
       - "CHANGELOG.md"
       - "README.md"
@@ -45,6 +58,7 @@ on:
       - "resources/changeinfo.xml"
       - "sce_sys/livearea/contents/template.xml"
       - "tools/check-version-consistency.py"
+      - "tools/check-host-client-contract.py"
       - "tools/check-windows-upgrade-contract.py"
       - "tools/summarize-vita-log.py"
       - ".github/workflows/release.yml"
@@ -79,6 +93,8 @@ jobs:
           python-version: "3.x"
       - name: Verify release version consistency
         run: python tools/check-version-consistency.py
+      - name: Verify Vita/host compatibility contract
+        run: python tools/check-host-client-contract.py
       - name: Verify safe in-place upgrade contract
         run: python tools/check-windows-upgrade-contract.py
       - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
@@ -111,6 +127,8 @@ jobs:
           python-version: "3.x"
       - name: Verify release version consistency
         run: python tools/check-version-consistency.py
+      - name: Verify Vita/host compatibility contract
+        run: python tools/check-host-client-contract.py
       - name: Verify safe in-place upgrade contract
         run: python tools/check-windows-upgrade-contract.py
       - name: Select Windows release signing mode

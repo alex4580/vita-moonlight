@@ -1,6 +1,9 @@
 # Host architecture
 
-The streaming protocol remains standard Moonlight/GameStream. The Vita client
+The streaming protocol remains standard Moonlight/GameStream. The versioned,
+machine-checked boundary is
+[`protocol/vita-host-contract.json`](../protocol/vita-host-contract.json).
+The Vita client
 negotiates video and sends controller, touch, and motion data; the Windows
 companion owns Sunshine integration, virtual-display topology, SDR state, and
 crash recovery.
@@ -11,8 +14,10 @@ crash recovery.
 WinForms control panel and an optional CLI. It detects Sunshine or Apollo,
 ViGEmBus, the packaged signed virtual-display driver, and elevation state. Its
 recommended profile is 960x544, 60 FPS, 8000 Kbps, H.264, and SDR.
-The Vita's first-run controller is Xbox/XInput; H.264 reference-frame
-invalidation and client frame pacing are enabled for Wi-Fi resilience.
+The Vita's first-run controller is Xbox/XInput. H.264 recovery uses automatic
+IDR requests; reference-frame invalidation is deliberately not advertised
+while the Vita SPS compatibility rewrite constrains the decoder to one
+reference frame.
 
 Host discovery does not require the default installation directory. It checks
 explicit environment overrides, Sunshine's registered Windows service image,
@@ -164,7 +169,23 @@ selects their removal.
 
 The client advertises a conventional controller in Xbox mode and DS4 motion
 and touchpad capabilities only in the PS4 profile. Sensor samples are converted
-to Moonlight protocol units and rate-limited to the host request.
+to Moonlight protocol units and rate-limited independently to the host request.
+Motion initialization is nonfatal and lazy: the single event-driven worker and
+Vita sampler exist only during a compatible PS/DS4 stream, and sleep without
+polling until Sunshine requests a sensor.
+
+GameStream HTTPS uses the client certificate plus a persisted SPKI SHA-256 pin
+for Sunshine's self-signed server certificate. The PIN pairing proof binds the
+pin before the first privileged HTTPS request. Older installs retain valid
+client IDs and keys but require one visible secure re-pair because no trusted
+server pin can be reconstructed after the fact. Reachability probes use a
+disposable client state and every exit releases certificate, HTTP, app-list,
+audio, motion, and stream resources.
+
+Video and audio callbacks use moonlight-common's queues because Vita decoding,
+display synchronization, and audio output can block. They are never declared
+as direct-submit callbacks on network receive threads. SPS rewriting has a
+fixed checked output bound and submits the actual rewritten access-unit size.
 
 New installs use the Recommended 960x544/60/8 Mbps preset. Reliable, High
 quality, and Remote / VPN presets set the whole streaming path, including

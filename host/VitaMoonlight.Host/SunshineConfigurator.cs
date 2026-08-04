@@ -20,8 +20,8 @@ internal static class SunshineConfigurator
         "{\"mixed\":[],\"resolution_only\":[" +
         "{\"requested_resolution\":\"960x540\",\"final_resolution\":\"960x540\"}," +
         "{\"requested_resolution\":\"960x544\",\"final_resolution\":\"960x544\"}," +
-        "{\"requested_resolution\":\"1280x720\",\"final_resolution\":\"1280x720\"}," +
-        "{\"final_resolution\":\"960x544\"}],\"refresh_rate_only\":[]}";
+        "{\"requested_resolution\":\"1280x720\",\"final_resolution\":\"1280x720\"}]," +
+        "\"refresh_rate_only\":[]}";
 
     internal static SunshineConfigurationResult Configure(HostSettings settings, string companionPath)
     {
@@ -327,14 +327,27 @@ internal static class SunshineConfigurator
                 existing["undo"]?.GetValue<string>() ?? string.Empty));
     }
 
-    private static bool IsGeneratedStartCommand(string command) =>
-        command.StartsWith(
-            "cmd.exe /D /S /C \"\"",
-            StringComparison.OrdinalIgnoreCase) &&
-        command.Contains(
-            $"{HookMarker}.exe\" session start --width %SUNSHINE_CLIENT_WIDTH% " +
-            "--height %SUNSHINE_CLIENT_HEIGHT% --fps %SUNSHINE_CLIENT_FPS%",
-            StringComparison.OrdinalIgnoreCase);
+    private static bool IsGeneratedStartCommand(string command)
+    {
+        if (!command.StartsWith(
+                "cmd.exe /D /S /C \"\"",
+                StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var arguments =
+            "--width %SUNSHINE_CLIENT_WIDTH% " +
+            "--height %SUNSHINE_CLIENT_HEIGHT% --fps %SUNSHINE_CLIENT_FPS%";
+        return command.Contains(
+                   $"{HookMarker}.exe\" session hook-start {arguments}",
+                   StringComparison.OrdinalIgnoreCase) ||
+               // Recognize hooks from earlier releases so an upgrade removes
+               // the strict boundary before installing the tolerant one.
+               command.Contains(
+                   $"{HookMarker}.exe\" session start {arguments}",
+                   StringComparison.OrdinalIgnoreCase);
+    }
 
     private static bool IsGeneratedStopCommand(string command) =>
         command.StartsWith('"') &&
@@ -416,7 +429,7 @@ internal static class SunshineConfigurator
     internal static string BuildStartCommand(string companionPath)
     {
         ValidateExecutablePath(companionPath);
-        return $"cmd.exe /D /S /C \"\"{companionPath}\" session start --width %SUNSHINE_CLIENT_WIDTH% --height %SUNSHINE_CLIENT_HEIGHT% --fps %SUNSHINE_CLIENT_FPS%\"";
+        return $"cmd.exe /D /S /C \"\"{companionPath}\" session hook-start --width %SUNSHINE_CLIENT_WIDTH% --height %SUNSHINE_CLIENT_HEIGHT% --fps %SUNSHINE_CLIENT_FPS%\"";
     }
 
     internal static string BuildStopCommand(string companionPath)
@@ -644,7 +657,9 @@ internal static class SunshineConfigurator
 
     private sealed record SunshineDisplayCandidate(string Id, string Name, string Raw);
 
-    internal static bool IsNativeDisplayManagementReady(string configDirectory)
+    internal static bool IsNativeDisplayManagementReady(
+        string configDirectory,
+        bool forceSdr)
     {
         var path = Path.Combine(configDirectory, "sunshine.conf");
         if (!File.Exists(path)) return false;
@@ -656,7 +671,16 @@ internal static class SunshineConfigurator
                    HasConfigurationValue(lines, "dd_refresh_rate_option", "manual") &&
                    HasConfigurationValue(lines, "dd_manual_refresh_rate", "60") &&
                    HasConfigurationValue(lines, "dd_mode_remapping", VitaDisplayModeRemapping) &&
+                   HasConfigurationValue(lines, "dd_hdr_option", forceSdr ? "auto" : "disabled") &&
+                   HasConfigurationValue(lines, "dd_config_revert_delay", "500") &&
                    HasConfigurationValue(lines, "dd_config_revert_on_disconnect", "enabled") &&
+                   HasConfigurationValue(lines, "controller", "enabled") &&
+                   HasConfigurationValue(lines, "gamepad", "auto") &&
+                   HasConfigurationValue(lines, "motion_as_ds4", "enabled") &&
+                   HasConfigurationValue(lines, "touchpad_as_ds4", "enabled") &&
+                   HasConfigurationValue(lines, "keyboard", "enabled") &&
+                   HasConfigurationValue(lines, "mouse", "enabled") &&
+                   HasConfigurationValue(lines, "native_pen_touch", "enabled") &&
                    lines.Any(line => line.TrimStart().StartsWith("output_name =", StringComparison.OrdinalIgnoreCase) &&
                                      !string.IsNullOrWhiteSpace(line[(line.IndexOf('=') + 1)..]));
         }

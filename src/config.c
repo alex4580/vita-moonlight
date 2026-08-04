@@ -46,6 +46,41 @@ extern char* strdup(const char*);
 #define VITA_TOUCH_WIDTH 960
 #define VITA_TOUCH_HEIGHT 544
 
+/*
+ * Keep loaded/legacy configuration inside the same finite mode contract as
+ * both Vita settings surfaces and the Windows host companion. The JSON
+ * contract and CI checker intentionally mirror these values.
+ */
+static const int VITA_STREAM_CONTRACT_RESOLUTIONS[][2] = {
+  {960, 544},
+  {960, 540},
+  {1280, 720},
+};
+static const int VITA_STREAM_CONTRACT_FRAME_RATES[] = {24, 30, 40, 50, 60};
+
+static bool contract_supports_resolution(int width, int height) {
+  for (unsigned int i = 0;
+       i < sizeof(VITA_STREAM_CONTRACT_RESOLUTIONS) /
+               sizeof(VITA_STREAM_CONTRACT_RESOLUTIONS[0]);
+       i++) {
+    if (VITA_STREAM_CONTRACT_RESOLUTIONS[i][0] == width &&
+        VITA_STREAM_CONTRACT_RESOLUTIONS[i][1] == height) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool contract_supports_frame_rate(int fps) {
+  for (unsigned int i = 0;
+       i < sizeof(VITA_STREAM_CONTRACT_FRAME_RATES) /
+               sizeof(VITA_STREAM_CONTRACT_FRAME_RATES[0]);
+       i++) {
+    if (VITA_STREAM_CONTRACT_FRAME_RATES[i] == fps) return true;
+  }
+  return false;
+}
+
 #define write_config_string(fd, key, value) fprintf(fd, "%s = %s\n", key, value)
 #define write_config_int(fd, key, value) fprintf(fd, "%s = %d\n", key, value)
 #define write_config_hex(fd, key, value) fprintf(fd, "%s = %X\n", key, value)
@@ -82,7 +117,7 @@ static bool stream_preset_base_matches(void) {
          config.stream.colorRange == COLOR_RANGE_LIMITED &&
          config.sops &&
          !config.localaudio &&
-         config.enable_ref_frame_invalidation &&
+         !config.enable_ref_frame_invalidation &&
          config.enable_frame_pacer &&
          !config.enable_vita_vblank_wait &&
          !config.center_region_only &&
@@ -132,7 +167,9 @@ void config_apply_stream_preset(int preset) {
   config.stream.colorRange = COLOR_RANGE_LIMITED;
   config.sops = true;
   config.localaudio = false;
-  config.enable_ref_frame_invalidation = true;
+  /* The Vita hardware decoder requires the SPS one-reference-frame fixup.
+   * moonlight-common explicitly forbids advertising RFI with that rewrite. */
+  config.enable_ref_frame_invalidation = false;
   config.enable_frame_pacer = true;
   config.enable_vita_vblank_wait = false;
   config.center_region_only = false;
@@ -372,12 +409,16 @@ static void sanitize_deadzone_axis(int *leading, int *trailing, int extent) {
 }
 
 void config_sanitize(PCONFIGURATION config) {
-  if (config->stream.width < 64 || config->stream.width > 1920 ||
-      config->stream.height < 64 || config->stream.height > 1080) {
+  /* Migrate legacy installs that persisted RFI=On. Decoder errors still
+   * request a clean IDR frame, which is safe with the Vita SPS rewrite. */
+  config->enable_ref_frame_invalidation = false;
+
+  if (!contract_supports_resolution(
+          config->stream.width, config->stream.height)) {
     config->stream.width = DEFAULT_STREAM_WIDTH;
     config->stream.height = DEFAULT_STREAM_HEIGHT;
   }
-  if (config->stream.fps < 24 || config->stream.fps > 60) {
+  if (!contract_supports_frame_rate(config->stream.fps)) {
     config->stream.fps = DEFAULT_STREAM_FPS;
   }
   if (config->stream.bitrate != -1 &&
@@ -573,7 +614,7 @@ void config_parse(int argc, char* argv[], PCONFIGURATION config) {
   config->special_keys.size = 150;
 
   config->mouse_acceleration = 150;
-  config->enable_ref_frame_invalidation = true;
+  config->enable_ref_frame_invalidation = false;
   config->enable_vita_vblank_wait = false;
   config->enable_motion_controls = false;
   config->psbutton_mode = PSBUTTON_MODE_LOCAL_ESCAPE;
