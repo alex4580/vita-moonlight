@@ -54,6 +54,24 @@ def parse_version_major_vector(text: str) -> int | None:
     return major
 
 
+def decode_hex_vector(
+    text: str,
+    expected_length: int | None = None,
+) -> bytes | None:
+    """Mirror the locale- and scanf-independent Vita pairing decoder."""
+    if len(text) % 2 != 0 or (
+        expected_length is not None and len(text) // 2 != expected_length
+    ):
+        return None
+    decoded = bytearray()
+    for offset in range(0, len(text), 2):
+        pair = text[offset : offset + 2]
+        if not re.fullmatch(r"[0-9A-Fa-f]{2}", pair):
+            return None
+        decoded.append(int(pair, 16))
+    return bytes(decoded)
+
+
 def main() -> int:
     client = read("libgamestream/client.c")
     client_header = read("libgamestream/client.h")
@@ -321,6 +339,35 @@ def main() -> int:
         and "Sunshine returned an invalid appversion field" in client
         and "Sunshine returned an invalid numeric server field" not in client,
         "libgamestream/client.c: bounded appversion parsing must accept Sunshine's signed build sentinel and identify field failures",
+    )
+    hex_decoder = function_body(
+        client,
+        "static int hex_nibble(",
+        "static int sign_it(",
+    )
+    sunshine_pem_fixture = (
+        b"-----BEGIN CERTIFICATE-----\n"
+        b"MIIBVitaMoonlightCompatibilityFixture==\n"
+        b"-----END CERTIFICATE-----\n"
+    )
+    require(
+        decode_hex_vector("000aA5fF") == b"\x00\x0a\xa5\xff"
+        and decode_hex_vector(sunshine_pem_fixture.hex())
+        == sunshine_pem_fixture
+        and decode_hex_vector("000a", expected_length=3) is None
+        and all(
+            decode_hex_vector(value) is None
+            for value in ("0", "GG", "0x", "0a 1", "0a\n")
+        )
+        and "sscanf(" not in hex_decoder
+        and "strtol(" not in hex_decoder
+        and "isxdigit(" not in hex_decoder
+        and "if (value >= '0' && value <= '9')" in hex_decoder
+        and "if (value >= 'a' && value <= 'f')" in hex_decoder
+        and "if (value >= 'A' && value <= 'F')" in hex_decoder
+        and "inputLength / 2 != outputLength" in hex_decoder
+        and "Sunshine returned a non-hex pairing certificate" in client,
+        "libgamestream/client.c: pairing hex must use a strict Vita-safe ASCII nibble decoder",
     )
     quit_app = function_body(client, "int gs_quit_app(", "int gs_init(")
     require(

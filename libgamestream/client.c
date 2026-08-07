@@ -744,17 +744,26 @@ static void bytes_to_hex(unsigned char *in, char *out, size_t len) {
   out[len * 2] = 0;
 }
 
-static bool hex_to_bytes(const char *in, unsigned char* out, size_t outputLength) {
-  if (in == NULL || strlen(in) != outputLength * 2) {
+static int hex_nibble(unsigned char value) {
+  if (value >= '0' && value <= '9') return value - '0';
+  if (value >= 'a' && value <= 'f') return value - 'a' + 10;
+  if (value >= 'A' && value <= 'F') return value - 'A' + 10;
+  return -1;
+}
+
+static bool hex_to_bytes(const char *in, unsigned char *out,
+                         size_t outputLength) {
+  if (in == NULL || out == NULL) {
     return false;
   }
+  size_t inputLength = strlen(in);
+  if ((inputLength & 1u) != 0 || inputLength / 2 != outputLength) return false;
+
   for (size_t count = 0; count < outputLength; ++count) {
-    unsigned char high = (unsigned char)in[count * 2];
-    unsigned char low = (unsigned char)in[count * 2 + 1];
-    if (!isxdigit(high) || !isxdigit(low) ||
-        sscanf(&in[count * 2], "%2hhx", &out[count]) != 1) {
-      return false;
-    }
+    int high = hex_nibble((unsigned char)in[count * 2]);
+    int low = hex_nibble((unsigned char)in[count * 2 + 1]);
+    if (high < 0 || low < 0) return false;
+    out[count] = (unsigned char)((high << 4) | low);
   }
   return true;
 }
@@ -971,7 +980,7 @@ int gs_pair(PSERVER_DATA server, char* pin) {
     goto cleanup;
   }
   if (!hex_to_bytes(result, (unsigned char *)plaincert, certificateLength)) {
-    gs_error = "Sunshine returned a malformed pairing certificate";
+    gs_error = "Sunshine returned a non-hex pairing certificate";
     ret = GS_INVALID;
     goto cleanup;
   }

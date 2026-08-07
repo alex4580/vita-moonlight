@@ -4,6 +4,10 @@
   contains the legitimate signed build sentinel used by `7.1.431.-1`. Invalid
   server numeric data now identifies the exact field instead of reporting a
   generic numeric-field error.
+* Restored Sunshine PIN pairing on Vita by replacing the embedded-runtime-
+  dependent `%hhx` certificate conversion with a strict ASCII hex decoder.
+  The decoder accepts only exact upper- or lowercase hex and permanently tests
+  Sunshine's PEM certificate envelope while rejecting odd or decorated input.
 * Added a machine-checked Vita/host compatibility contract. Vita requests are
   limited to 960x544, 960x540, or 1280x720 at 24/30/40/50/60 FPS while the
   Windows virtual desktop remains at a driver-safe 60 Hz. The shared Sunshine
