@@ -34,6 +34,26 @@ def function_body(source: str, start_marker: str, end_marker: str) -> str:
     return source[start:end]
 
 
+def parse_version_major_vector(text: str) -> int | None:
+    """Mirror the bounded appversion grammar enforced by the Vita client."""
+    if len(text) > 64:
+        return None
+    match = re.fullmatch(
+        r"\s*([0-9]+)(?:\.-?[0-9]+)*\s*",
+        text,
+    )
+    if match is None:
+        return None
+    major = int(match.group(1))
+    if major > 2_147_483_647:
+        return None
+    for component in text.strip().split(".")[1:]:
+        value = int(component)
+        if value < -2_147_483_648 or value > 2_147_483_647:
+            return None
+    return major
+
+
 def main() -> int:
     client = read("libgamestream/client.c")
     client_header = read("libgamestream/client.h")
@@ -263,6 +283,44 @@ def main() -> int:
         and "SERVERINFO_NUMERIC_TEXT_MAX" in client
         and "atoi(" not in client,
         "libgamestream/client.c: host numeric fields must use bounded range-checked parsing",
+    )
+    valid_appversions = {
+        "7.1.431.-1": 7,
+        "7.1.431.0": 7,
+        "7": 7,
+        "  7.1.-2  ": 7,
+    }
+    invalid_appversions = (
+        "",
+        "-1.0.0.0",
+        "+7.1.0.0",
+        "7.",
+        "7.1.release",
+        "7.1.+2",
+        "2147483648.1.0.0",
+        "7.1.431.-2147483649",
+        "7.1.431.2147483648",
+        "7" * 65,
+    )
+    require(
+        all(
+            parse_version_major_vector(version) == expected
+            for version, expected in valid_appversions.items()
+        )
+        and all(
+            parse_version_major_vector(version) is None
+            for version in invalid_appversions
+        )
+        and "while (*component == '.')" in client
+        and "if (*digits == '-') digits++;" in client
+        and "strtol(component, &componentEnd, 10)" in client
+        and "componentValue < INT_MIN || componentValue > INT_MAX" in client
+        and "Sunshine returned an invalid currentgame field" in client
+        and "Sunshine returned an invalid ServerCodecModeSupport field" in client
+        and "Sunshine returned an invalid HttpsPort field" in client
+        and "Sunshine returned an invalid appversion field" in client
+        and "Sunshine returned an invalid numeric server field" not in client,
+        "libgamestream/client.c: bounded appversion parsing must accept Sunshine's signed build sentinel and identify field failures",
     )
     quit_app = function_body(client, "int gs_quit_app(", "int gs_init(")
     require(

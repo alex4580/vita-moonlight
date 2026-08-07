@@ -1,5 +1,9 @@
 ## 0.14.7
 
+* Fixed Vita connections to current Sunshine builds whose bounded `appversion`
+  contains the legitimate signed build sentinel used by `7.1.431.-1`. Invalid
+  server numeric data now identifies the exact field instead of reporting a
+  generic numeric-field error.
 * Added a machine-checked Vita/host compatibility contract. Vita requests are
   limited to 960x544, 960x540, or 1280x720 at 24/30/40/50/60 FPS while the
   Windows virtual desktop remains at a driver-safe 60 Hz. The shared Sunshine

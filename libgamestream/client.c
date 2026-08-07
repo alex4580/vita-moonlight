@@ -237,29 +237,27 @@ static bool parse_version_major_field(const char *text, int *majorVersion) {
   unsigned long parsed = strtoul(text, &end, 10);
   if (errno == ERANGE || end == text || parsed > INT_MAX) return false;
 
-  if (*end == '.') {
-    /* The remaining version components are informational, but validate their
-     * syntax so an attacker cannot smuggle an arbitrary suffix past parsing. */
-    const char *component = end + 1;
-    if (!isdigit((unsigned char)*component)) return false;
-    while (*component != '\0' && !isspace((unsigned char)*component)) {
-      if (*component == '.') {
-        if (!isdigit((unsigned char)component[1])) return false;
-      }
-      else if (!isdigit((unsigned char)*component)) {
-        return false;
-      }
-      component++;
+  /* Sunshine uses a signed sentinel in versions such as 7.1.431.-1. The
+   * major version must remain non-negative, but subsequent components follow
+   * Moonlight common's signed-decimal version-quad contract. */
+  const char *component = end;
+  while (*component == '.') {
+    component++;
+    const char *digits = component;
+    if (*digits == '-') digits++;
+    if (!isdigit((unsigned char)*digits)) return false;
+
+    errno = 0;
+    char *componentEnd = NULL;
+    long componentValue = strtol(component, &componentEnd, 10);
+    if (errno == ERANGE || componentEnd == component ||
+        componentValue < INT_MIN || componentValue > INT_MAX) {
+      return false;
     }
-    while (*component != '\0' && isspace((unsigned char)*component)) {
-      component++;
-    }
-    if (*component != '\0') return false;
+    component = componentEnd;
   }
-  else {
-    while (*end != '\0' && isspace((unsigned char)*end)) end++;
-    if (*end != '\0') return false;
-  }
+  while (*component != '\0' && isspace((unsigned char)*component)) component++;
+  if (*component != '\0') return false;
 
   *majorVersion = (int)parsed;
   return true;
@@ -597,16 +595,28 @@ static int load_serverinfo(PSERVER_DATA server, bool https) {
   unsigned long currentGame = 0;
   unsigned long codecModeSupport = SCM_H264;
   unsigned long httpsPort = 0;
-  if (!parse_unsigned_decimal_field(currentGameText, INT_MAX, &currentGame) ||
-      (serverCodecModeSupportText[0] != '\0' &&
-       !parse_unsigned_decimal_field(
-           serverCodecModeSupportText, INT_MAX, &codecModeSupport)) ||
-      (httpsPortText[0] != '\0' &&
-       !parse_unsigned_decimal_field(httpsPortText, 65535u, &httpsPort)) ||
-      !parse_version_major_field(
+  if (!parse_unsigned_decimal_field(currentGameText, INT_MAX, &currentGame)) {
+    gs_error = "Sunshine returned an invalid currentgame field";
+    ret = GS_INVALID;
+    goto cleanup;
+  }
+  if (serverCodecModeSupportText[0] != '\0' &&
+      !parse_unsigned_decimal_field(
+          serverCodecModeSupportText, INT_MAX, &codecModeSupport)) {
+    gs_error = "Sunshine returned an invalid ServerCodecModeSupport field";
+    ret = GS_INVALID;
+    goto cleanup;
+  }
+  if (httpsPortText[0] != '\0' &&
+      !parse_unsigned_decimal_field(httpsPortText, 65535u, &httpsPort)) {
+    gs_error = "Sunshine returned an invalid HttpsPort field";
+    ret = GS_INVALID;
+    goto cleanup;
+  }
+  if (!parse_version_major_field(
           server->serverInfo.serverInfoAppVersion,
           &server->serverMajorVersion)) {
-    gs_error = "Sunshine returned an invalid numeric server field";
+    gs_error = "Sunshine returned an invalid appversion field";
     ret = GS_INVALID;
     goto cleanup;
   }
