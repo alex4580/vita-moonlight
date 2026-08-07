@@ -120,9 +120,14 @@ extern char *config_path;
 extern bool inputAdded;
 
 bool config_file_parse(char* filename, PCONFIGURATION config);
-void config_parse(int argc, char* argv[], PCONFIGURATION config);
+bool config_parse(int argc, char* argv[], PCONFIGURATION config);
 void config_sanitize(PCONFIGURATION config);
-void config_save(const char* filename, PCONFIGURATION config);
+/*
+ * Persist the configuration transactionally. The previous file remains
+ * recoverable if a write or rename fails. Callers must surface false to the
+ * user instead of terminating the process.
+ */
+bool config_save(const char* filename, PCONFIGURATION config);
 int config_recommended_bitrate(int width, int height, int fps);
 int config_detect_stream_preset(void);
 void config_apply_stream_preset(int preset);

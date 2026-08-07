@@ -866,7 +866,7 @@ void ui_diagnostics_screen_handle_input(const SceCtrlData *pad,
   if (pressed(pad, previous, SCE_CTRL_TRIANGLE)) {
     bool enabled = !vita_debug_is_logging_enabled();
     vita_debug_set_logging_enabled(enabled);
-    if (config_path) config_save(config_path, &config);
+    /* Support capture is intentionally per-run and never persisted. */
     return;
   }
   if (pressed(pad, previous, config.btn_cancel) ||

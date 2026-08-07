@@ -11,8 +11,9 @@ crash recovery.
 ## Windows companion
 
 `VitaMoonlight.Host` is a self-contained .NET 8 Windows application with a
-WinForms control panel and an optional CLI. It detects Sunshine or Apollo,
-ViGEmBus, the packaged signed virtual-display driver, and elevation state. Its
+WinForms control panel and an optional CLI. The release path detects and
+configures Sunshine, ViGEmBus, the packaged signed virtual-display driver, and
+elevation state. Its
 recommended profile is 960x544, 60 FPS, 8000 Kbps, H.264, and SDR.
 The Vita's first-run controller is Xbox/XInput. H.264 recovery uses automatic
 IDR requests; reference-frame invalidation is deliberately not advertised
@@ -50,8 +51,10 @@ Vita, and reverts after a 500 ms disconnect grace period. This avoids tying
 display restoration to application shutdown; Sunshine deliberately keeps
 detached applications such as Steam Big Picture alive for resume.
 
-The companion's `session start` transaction remains available for Apollo,
-legacy single-app mode, and the timed manual preview. It:
+The companion's `session start` transaction remains available for the legacy
+single-app path, the timed manual preview, and an explicitly selected
+experimental Apollo CLI path. Apollo is not exposed by the installer or GUI,
+is not public-beta qualified, and requires an explicit display match. It:
 
 1. acquires the machine-wide display transaction lock;
 2. captures the active Windows paths and modes;
@@ -70,8 +73,10 @@ restore. Recovery and rescue tasks allow battery operation and delayed starts,
 so a laptop does not postpone recovery until it is connected to AC power.
 
 The driver is installed or updated explicitly by the installer/control panel;
-stream start never installs a driver. Apollo mode delegates virtual-display
-creation to Apollo but retains the same client and controller profile.
+stream start never installs a driver. The supported Sunshine release path
+requires the managed MTT display. The retained experimental Apollo CLI path
+delegates display creation to Apollo, refuses automatic display selection, and
+must not be described as release-ready without a separate hardware matrix.
 
 Every companion path that can mutate topology, a managed display device, or
 the pending recovery record uses that same typed transaction lease: session
@@ -88,8 +93,9 @@ stale pre-sleep transaction.
 work, not a network or Sunshine power switch. Before pausing, the companion
 restores and verifies a physical-only topology. It then disables only the
 exact managed MTT VDD instance IDs captured on entry and removes the exact two
-Vita scheduled tasks. Sunshine and Apollo remain shared dependencies and are
-never started, stopped, disabled, or executed by this lifecycle. A client
+Vita scheduled tasks. Sunshine and any pre-existing Apollo installation remain
+shared programs and are never started, stopped, disabled, or executed by this
+lifecycle. A client
 pinned to the disabled Vita VDD may therefore need a different host output.
 
 The saved state uses redundant checksummed JSON records plus a small Disabled
@@ -102,20 +108,33 @@ intentional Pause.
 ## Stream rescue agent
 
 Setup installs a highest-privilege per-user logon task that runs a hidden,
-single-instance WinForms message loop. Close-game and emergency-recovery
-hotkeys are mandatory. The three managed display-mode hotkeys register
-independently, so an unrelated shortcut collision cannot disable the two
-recovery actions; readiness is exposed to the health check. A named ready event
-is signaled only after mandatory registration succeeds. No TCP listener,
-credentials, or remotely callable HTTP endpoint is added. The Vita overlay
-emits the matching keyboard chords through the normal encrypted Moonlight input
-channel.
+single-instance WinForms message loop. The physical-display recovery hotkey is
+mandatory. The supported native Sunshine path neither registers nor requires
+the legacy F8-F10 display-mode hotkeys: the current Vita client changes mode by
+reconnecting with an ordinary GameStream launch request. F8-F10 register
+independently only when the user explicitly selects the legacy
+single-application fallback, preserving older clients without reserving those
+keys on a default installation. A named ready event is signaled only after
+mandatory recovery registration succeeds. No TCP listener, credentials, or
+remotely callable HTTP endpoint is added. The Vita overlay sends only the F11
+recovery chord through the normal encrypted Moonlight input channel.
 
-The close-game action captures the foreground window, refuses Windows shell,
-Steam, Sunshine, companion, and critical-system process names, requests a
-normal window close, then terminates only that process tree if it remains alive
-after 1.5 seconds. The display-recovery action first restores any saved manual
-transaction and a physical-only topology, then stops Sunshine, reloads the
+Both scheduled tasks are created for the current interactive token at highest
+available privilege and their executable, arguments, logon type, and run level
+are verified through Task Scheduler after creation. Before setup or repair can
+recover displays or replace files, the maintenance helper compares the elevated
+Windows identity with the owner of the current interactive session. An
+over-the-shoulder UAC elevation with a different Administrator account is
+rejected before mutation because its task would run in the wrong desktop.
+Uninstall does not create a task and may run under another Administrator; it
+removes a same-name task only after verifying its exact Vita executable and
+arguments.
+
+The companion never closes or kills an inferred foreground process. The Vita
+can open Windows Task Manager through the ordinary Moonlight keyboard channel;
+ending a Sunshine application uses GameStream's authenticated quit-app request.
+The display-recovery action first restores any saved manual transaction and a
+physical-only topology, then stops Sunshine, reloads the
 signed VDD, reapplies the physical-only topology after driver enumeration, and
 starts Sunshine. If a suspend notification arrives during that action,
 physical recovery is kept and the slower service/driver phase is skipped.
@@ -190,7 +209,7 @@ fixed checked output bound and submits the actual rewritten access-unit size.
 New installs use the Recommended 960x544/60/8 Mbps preset. Reliable, High
 quality, and Remote / VPN presets set the whole streaming path, including
 resolution, frame rate, bitrate, route detection, packet size, codec, color
-range, recovery, pacing, and scaling. Configuration values are range-checked
+range, recovery, immediate presentation, and scaling. Configuration values are range-checked
 before decoder/input initialization so an old or damaged INI file cannot select
 unsafe packet, video, motion, controller, or touch values.
 
@@ -201,9 +220,13 @@ while input policies and performance-overlay modes can update during the
 current session. The dedicated diagnostics page is read-only except for its
 explicit **Start support log** / **Stop and save support log** action.
 Destructive rescue items require a second confirmation.
-Disconnect, Sunshine-app termination, display-mode changes, and host-recovery
-requests are consumed by the connection UI loop so network teardown remains
-ordered; close-game recovery keeps the current stream alive.
+Disconnect, Sunshine-app termination, display-setting reconnects, and
+host-recovery requests are consumed by the connection UI loop so network
+teardown remains ordered. A display-setting reconnect saves the new mode,
+terminates the video session, refreshes GameStream state, and resumes the same
+application without a legacy hotkey or extra pre-disconnect delay. Opening Task
+Manager is ordinary encrypted keyboard input and does not add a host-side
+process-control endpoint.
 
 ## Packaging
 

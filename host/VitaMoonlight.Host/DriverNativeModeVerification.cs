@@ -42,6 +42,14 @@ internal static class DriverNativeModeVerification
 
     internal static bool IsCurrent(out string message)
     {
+        return TryGetCurrent(out _, out message);
+    }
+
+    internal static bool TryGetCurrent(
+        out DriverNativeModeVerificationRecord? current,
+        out string message)
+    {
+        current = null;
         if (!File.Exists(VerificationFile))
         {
             message = "native 960x544 mode has not been verified";
@@ -66,6 +74,7 @@ internal static class DriverNativeModeVerification
                 return false;
             }
 
+            current = record;
             message = $"native 960x544 mode verified {record.VerifiedAt.LocalDateTime:g}";
             return true;
         }

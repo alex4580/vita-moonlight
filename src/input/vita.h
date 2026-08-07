@@ -111,6 +111,7 @@ typedef struct TouchData {
 struct mapping;
 
 bool vitainput_init();
+bool vitainput_shutdown(void);
 void vitainput_config(CONFIGURATION config);
 void vitainput_default_mapping(struct mapping *target, uint32_t model);
 void vitainput_get_mapping(struct mapping *target);

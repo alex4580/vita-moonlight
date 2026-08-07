@@ -14,6 +14,12 @@ internal sealed record ExactScheduledTaskProbe(
     ExactScheduledTaskState State,
     string? Error);
 
+internal sealed record ExactScheduledTaskDefinition(
+    string ExecutablePath,
+    string Arguments,
+    int LogonType,
+    int RunLevel);
+
 /// <summary>
 /// Uses the Task Scheduler COM API so a missing exact task can be separated
 /// from access denied, service failures, and other unknown query results.
@@ -27,6 +33,8 @@ internal static class ExactScheduledTaskManager
         unchecked((int)0x80070003);
     private const int TaskNotRunning =
         unchecked((int)0x8004130B);
+    private const int TaskLogonInteractiveToken = 3;
+    private const int TaskRunLevelHighest = 1;
 
     internal static ExactScheduledTaskProbe Probe(string taskName)
     {
@@ -202,6 +210,102 @@ internal static class ExactScheduledTaskManager
         }
     }
 
+    internal static void RequireOwnedInteractiveTask(
+        string taskName,
+        string expectedExecutablePath,
+        string expectedArguments,
+        bool requireInteractiveHighest = true)
+    {
+        var definition = ReadDefinition(taskName);
+        var expectedPath = Path.GetFullPath(expectedExecutablePath);
+        var observedPath = Path.GetFullPath(
+            Environment.ExpandEnvironmentVariables(
+                definition.ExecutablePath.Trim().Trim('"')));
+        if (!string.Equals(
+                observedPath,
+                expectedPath,
+                StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(
+                definition.Arguments.Trim(),
+                expectedArguments,
+                StringComparison.Ordinal) ||
+            (requireInteractiveHighest &&
+             (definition.LogonType != TaskLogonInteractiveToken ||
+              definition.RunLevel != TaskRunLevelHighest)))
+        {
+            throw new InvalidOperationException(
+                $"Scheduled task '{taskName}' is not the exact Vita Moonlight " +
+                (requireInteractiveHighest ? "interactive/highest task. " : "owned task. ") +
+                $"Observed action: {definition.ExecutablePath} {definition.Arguments}; " +
+                $"logon type {definition.LogonType}, run level {definition.RunLevel}. " +
+                "No task was removed or trusted.");
+        }
+    }
+
+    private static ExactScheduledTaskDefinition ReadDefinition(
+        string taskName)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            throw new PlatformNotSupportedException(
+                "Task Scheduler is available only on Windows.");
+        }
+
+        object? service = null;
+        object? folder = null;
+        object? task = null;
+        object? definition = null;
+        object? actions = null;
+        object? action = null;
+        object? principal = null;
+        try
+        {
+            (service, folder) = Connect();
+            task = ((dynamic)folder).GetTask(taskName);
+            definition = ((dynamic)task).Definition;
+            actions = ((dynamic)definition).Actions;
+            if ((int)((dynamic)actions).Count != 1)
+            {
+                throw new InvalidDataException(
+                    $"Scheduled task '{taskName}' must contain exactly one action.");
+            }
+            action = ((dynamic)actions).Item(1);
+            if ((int)((dynamic)action).Type != 0)
+            {
+                throw new InvalidDataException(
+                    $"Scheduled task '{taskName}' does not contain an executable action.");
+            }
+            principal = ((dynamic)definition).Principal;
+            return new ExactScheduledTaskDefinition(
+                (string)((dynamic)action).Path,
+                (string?)((dynamic)action).Arguments ?? string.Empty,
+                (int)((dynamic)principal).LogonType,
+                (int)((dynamic)principal).RunLevel);
+        }
+        catch (Exception error) when (IsNotFound(error))
+        {
+            throw new InvalidOperationException(
+                $"Scheduled task '{taskName}' is missing.",
+                error);
+        }
+        catch (Exception error) when (error is not InvalidOperationException)
+        {
+            throw new InvalidOperationException(
+                $"Windows could not verify the exact definition of scheduled task '{taskName}'.",
+                error);
+        }
+        finally
+        {
+            ReleaseComObject(principal);
+            ReleaseComObject(action);
+            ReleaseComObject(actions);
+            ReleaseComObject(definition);
+            ReleaseComObject(task);
+            ReleaseComObject(folder);
+            ReleaseComObject(service);
+        }
+    }
+
     private static (object Service, object Folder) Connect()
     {
         var schedulerType = Type.GetTypeFromProgID(
@@ -273,24 +377,51 @@ internal static class RecoveryTaskManager
 
     internal static void Install(string executablePath)
     {
+        ScheduledTaskAccount.RequireCurrentInteractiveUser(
+            "Installing automatic display recovery");
         var existing = GetInstallationState();
         ExactScheduledTaskManager.RequireKnown(existing, TaskName);
+        if (existing.State == ExactScheduledTaskState.Present)
+        {
+            ExactScheduledTaskManager.RequireOwnedInteractiveTask(
+                TaskName,
+                executablePath,
+                "session recover",
+                requireInteractiveHighest: false);
+        }
         var taskCommand = $"\"{Path.GetFullPath(executablePath)}\" session recover";
         var exitCode = Run(
             "/Create", "/F",
             "/TN", TaskName,
             "/TR", taskCommand,
             "/SC", "ONLOGON",
+            "/IT",
             "/RL", "HIGHEST");
         if (exitCode != 0)
         {
             throw new InvalidOperationException("Windows could not create the display-recovery task.");
         }
         ConfigurePortableTaskSettings();
+        ExactScheduledTaskManager.RequireOwnedInteractiveTask(
+            TaskName,
+            executablePath,
+            "session recover");
     }
 
     internal static void Uninstall()
     {
+        var existing = GetInstallationState();
+        ExactScheduledTaskManager.RequireKnown(existing, TaskName);
+        if (existing.State == ExactScheduledTaskState.Present)
+        {
+            ExactScheduledTaskManager.RequireOwnedInteractiveTask(
+                TaskName,
+                Environment.ProcessPath ?? Path.Combine(
+                    AppContext.BaseDirectory,
+                    "VitaMoonlight.Host.exe"),
+                "session recover",
+                requireInteractiveHighest: false);
+        }
         ExactScheduledTaskManager.DeleteExact(TaskName);
     }
 

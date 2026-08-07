@@ -151,6 +151,23 @@ decoder state, network aggregates, actions, warnings, errors, session
 boundaries, and malformed or missing records. It does not reproduce raw legacy
 messages, unknown values, arbitrary filenames, or local paths.
 
+Logs created by older beta builds did not contain `vita-support-v1` records.
+The same command also recognizes their exact `[PERF]` lines and known
+Moonlight network, audio, video, and recovery messages. Legacy results are a
+whole-file aggregate because those logs have no reliable session boundaries.
+They include FPS, bitrate, decode time, RTT, frame/packet totals, network-state
+counts, and fixed recovery-event counters. The parser accepts only complete,
+known line formats and fixed numeric fields. It discards the original text,
+suppresses known touch/input lines, and ignores every other legacy message;
+it never copies IP addresses, host names, paths, pairing material, typed text,
+or arbitrary event content into either summary format.
+
+`recognized_line_count` in the optional `legacy_summary` section is the number
+of old lines that contributed to safe aggregates. `suppressed_input_line_count`
+shows known noisy input lines that were deliberately not parsed, while
+`unrecognized_line_count` shows all other old free-form lines that were
+discarded. These counts do not mean the raw legacy file is safe to publish.
+
 Review either output before sharing. The summarizer reduces accidental
 disclosure; it cannot prove that every future value is harmless.
 
@@ -171,13 +188,14 @@ recovery status, rescue shortcuts, and the current recommendation. It is
 designed to be machine-readable across reports from many testers.
 
 For a Pause/Enable comparison, save one report before Pause, one after the
-paused PC restarts, and one after Enable. Compare these exact schema-version 2
+paused PC restarts, and one after Enable. Compare these exact schema-version 3
 fields:
 
 | What to compare | JSON fields | Expected result |
 |---|---|---|
 | Requested lifecycle | `backendStatus`, `backendDesiredState`, `backendPreferencePersisted` | `Enabled` before, `Disabled` while paused, then `Enabled`; the preference is persisted after the first lifecycle choice. |
 | Recovery safeguards | `recoveryTaskStatus`, `rescueAgentTaskStatus`, `rescueAgentRunning` | Healthy Enabled reports use `Present`, `Present`, `true`; a complete Pause uses `Missing`, `Missing`, `false`; Enable restores the baseline. `Unknown` is a failed inspection, not the same as missing. |
+| Interactive task account | `scheduledTaskAccountReady` | `true` means the elevated process belongs to the interactive streaming account. `false` explains a setup/repair block caused by SYSTEM, a disconnected session, or different-account UAC without exposing either account name. |
 | Managed Vita display | `backendManagedVddDeviceCount`, `backendManagedVddEnabledCount`, `backendManagedVddActive` | Pause keeps the device count, changes the enabled count to `0`, and keeps it inactive. Enable restores the baseline enabled count while the idle display remains inactive. |
 | Physical safety | `backendActivePhysicalDisplayCount`, `recoveryPending` | At least one active physical display and no pending transaction are expected while idle or paused. |
 | Shared host identity | `hostMode`, `sunshineInstalled`, `sunshineVersion` | These values must not change across Pause/Enable. |

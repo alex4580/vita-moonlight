@@ -1,3 +1,67 @@
+## 0.14.8
+
+* Fixed the Vita pairing retry path that could authorize the client in
+  Sunshine but leave the real saved-computer entry unpaired or hidden until a
+  restart. Failed and cancelled attempts now remain visible as **Pairing
+  required**, successful pairing is committed before the app continues, and
+  journaled device storage survives an interrupted write.
+* Isolated every PIN attempt with a fresh Sunshine pairing session identity and
+  kept the final certificate-pinned pairing challenge authoritative. Aborted
+  attempts can be retried without inheriting stale Sunshine session state.
+* Reworked discovery and saved-host health checks around one owned worker,
+  bounded probes, offline backoff, and stable saved identities. Idle or
+  unpaired entries no longer create a permanent polling load, and worker
+  shutdown is joined before pairing, suspension, or exit.
+* Hardened Vita configuration, connection, input, motion, and power lifecycles
+  so partial startup and reconnect failures clean up in reverse order,
+  shortcuts remain local, released inputs cannot stick, and optional support
+  logging remains off until the user starts a capture.
+* Removed the legacy one-second "frame pacer" that converted harmless timer
+  jitter into drops of future decoded frames. Completed frames now present
+  immediately for lower latency and smoother motion; optional Vita vblank
+  synchronization remains available for tear control.
+* Enforced Sunshine launch-mode optimization for managed Vita sessions and
+  removed the misleading client switch that could leave the physical desktop
+  selected after choosing a Vita resolution.
+* Made in-stream display changes reconnect through the ordinary GameStream
+  launch-mode contract without sending F8-F10 or adding a pre-disconnect delay.
+  The host now registers and requires those legacy mode keys only for an
+  explicitly selected single-application fallback; default installs reserve
+  only the F11 physical-display recovery chord.
+* Fixed discovery-menu refresh bookkeeping for an empty result list and when
+  the newest discovered computer is already paired.
+* Made Vita packages optimized Release builds by default while preserving the
+  Vita platform definition across every bundled dependency.
+* Tightened Windows virtual-display selection and recovery. Automatic setup
+  selects only the managed MTT display, validates fresh post-restart Sunshine
+  inventory, rejects unhealthy driver devices, and restores a usable physical
+  mode after suspend without replacing a healthy desktop mode.
+* Made the public Windows path unambiguous: Sunshine always installs with the
+  required managed Vita display. Apollo is preserved but removed from the
+  installer and GUI until separately qualified; its retained experimental CLI
+  path requires an explicit display match.
+* Removed the host-side F12 foreground-process termination shortcut. A Vita can
+  now open Windows Task Manager through ordinary Moonlight input, while ending
+  a Sunshine application continues to use GameStream's authenticated quit-app
+  request.
+* Bound recovery tasks to the actual interactive streaming account. Setup,
+  repair, and Enable reject different-account UAC before mutation, task
+  definitions are verified as interactive/highest after creation, and
+  uninstall remains available to another Administrator after exact action
+  ownership checks.
+* Made Sunshine application/configuration updates rollback together on normal
+  failure and restart safely after interruption. Backup ownership is published
+  before file creation, and legacy Apollo hooks are removed only when unchanged
+  and after Apollo has exited.
+* Expanded release-contract checks and first-time community instructions for
+  clean install, in-place upgrade, same-version repair, Vita reinstall,
+  interrupted pairing retry, Pause/Enable, and both shared-component uninstall
+  choices.
+* Moved the deliberately unsigned Windows preview exception to the exact
+  `v0.14.8-beta.1` tag. The workflow verifies its Unknown-publisher status,
+  paired artifact identity, SHA-256 manifest, and GitHub provenance; every
+  other public tag remains signing-required.
+
 ## 0.14.7
 
 * Fixed Vita connections to current Sunshine builds whose bounded `appversion`
@@ -10,8 +74,9 @@
   Sunshine's PEM certificate envelope while rejecting odd or decorated input.
 * Added a machine-checked Vita/host compatibility contract. Vita requests are
   limited to 960x544, 960x540, or 1280x720 at 24/30/40/50/60 FPS while the
-  Windows virtual desktop remains at a driver-safe 60 Hz. The shared Sunshine
-  hook now leaves unrelated Moonlight resolutions and frame rates untouched.
+  Windows virtual desktop remains at a driver-safe 60 Hz. Native Sunshine
+  display management covers all apps; the tolerant hook remains only for the
+  legacy single-application fallback.
 * Secured Vita-to-Sunshine HTTPS with a certificate pin established by the PIN
   exchange. Upgrades preserve valid unique client identities; the historical
   shared identity is replaced only during the required one-time migration when
@@ -49,10 +114,6 @@
   and allowlisted cleanup of current and legacy Vita-owned state.
 * Expanded privacy-safe support reports with backend issue categories, exact
   task states, managed-VDD state, and active display resolution/refresh data.
-* Restricted the deliberately unsigned Windows preview policy to the exact
-  `v0.14.7-beta.1` tag, with explicit SmartScreen guidance, SHA-256 manifests,
-  signing-state metadata, and GitHub provenance attestations. Every other
-  public tag remains signing-required.
 
 ## 0.14.6
 
@@ -99,8 +160,8 @@
   support report, and packaged the matching user, testing, logging, build, and
   release documentation with both Windows distributions.
 * **Code signing policy:** see the
-  [public policy](https://github.com/alex4580/vita-moonlight/blob/vita/docs/CODE_SIGNING_POLICY.md)
-  and [privacy disclosure](https://github.com/alex4580/vita-moonlight/blob/vita/PRIVACY.md).
+  [public policy](docs/CODE_SIGNING_POLICY.md)
+  and [privacy disclosure](PRIVACY.md).
 
 ## 0.14.5
 

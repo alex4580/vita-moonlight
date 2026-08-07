@@ -240,7 +240,7 @@ internal sealed class HostControlPanel : Form
         AddHeading(
             page,
             "Streaming preferences",
-            "The recommended defaults work for most PCs. Change these only when you use Apollo or have more than one virtual display.");
+            "The public beta uses its pinned Sunshine build and managed Vita display. Change the display match only when readiness finds more than one managed Vita display.");
 
         var form = new TableLayoutPanel
         {
@@ -251,7 +251,7 @@ internal sealed class HostControlPanel : Form
         };
         form.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 210));
         form.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        hostMode.Items.AddRange(new object[] { "Sunshine", "Apollo" });
+        hostMode.Items.Add("Sunshine");
         AddField(form, "Streaming service", hostMode);
         AddField(form, "Preferred virtual display", displayMatch);
         var optionsRow = form.RowCount++;
@@ -377,7 +377,7 @@ internal sealed class HostControlPanel : Form
         AddPageControl(page, CreateActivityPanel());
         AddPageControl(page, CreateInfoCard(
             "Black-screen recovery",
-            "From the Vita overlay, first choose Close Windows game. If video does not recover, choose Recover display + Sunshine; the stream will disconnect while Windows activates the physical monitor, reloads VDD, and restarts Sunshine. Sign out and back in only if the rescue agent cannot run."));
+            "From the Vita overlay, open Windows Task Manager to close a stuck game, or choose End Sunshine app to end the current host session safely. If the captured display remains unusable, choose Recover display + Sunshine; the stream will disconnect while Windows activates the physical monitor, reloads VDD, and restarts Sunshine. Sign out and back in only if the rescue agent cannot run."));
         return page;
     }
 
@@ -585,7 +585,7 @@ internal sealed class HostControlPanel : Form
             ButtonKind.Warning,
             DisableBackendAsync,
             210,
-            "Pause Vita host features now? Disconnect the Vita first. Windows will restore the physical desktop, stop Vita Moonlight safeguards, and disable only the exact managed Vita display instances that are currently enabled. Shared Sunshine and Apollo remain installed and reachable, but clients pinned to the Vita virtual display may need these features enabled again or a physical host output. This does not block network access. Pairing, settings, and installed components are kept. The F11 rescue shortcut is unavailable during a complete Pause.");
+            "Pause Vita host features now? Disconnect the Vita first. Windows will restore the physical desktop, stop Vita Moonlight safeguards, and disable only the exact managed Vita display instances that are currently enabled. Sunshine and any pre-existing Apollo installation remain installed and reachable, but this beta supports streaming through Sunshine only. Clients pinned to the Vita virtual display may need these features enabled again or a physical host output. This does not block network access. Pairing, settings, and installed components are kept. The F11 rescue shortcut is unavailable during a complete Pause.");
 
         var content = new TableLayoutPanel
         {
@@ -678,10 +678,22 @@ internal sealed class HostControlPanel : Form
                 $"Host settings could not be read:{Environment.NewLine}{error}";
             output.Text = lastTechnicalOutput;
         }
-        hostMode.SelectedItem = settings.HostMode.Equals("apollo", StringComparison.OrdinalIgnoreCase) ? "Apollo" : "Sunshine";
+        var legacyApolloSelection = settings.HostMode.Equals(
+            "apollo",
+            StringComparison.OrdinalIgnoreCase);
+        hostMode.SelectedItem = "Sunshine";
         integrateAllApps.Checked = settings.IntegrateAllSunshineApps;
         forceSdr.Checked = settings.ForceSdr;
-        displayMatch.Text = settings.DisplayMatch ?? string.Empty;
+        displayMatch.Text = legacyApolloSelection
+            ? string.Empty
+            : settings.DisplayMatch ?? string.Empty;
+        if (legacyApolloSelection)
+        {
+            readinessSummary.Text =
+                "This PC has an older experimental Apollo selection. Apollo is not release-qualified in this beta. " +
+                "Set up or repair this PC to migrate to the supported Sunshine + Vita display path; Apollo itself and its settings are preserved.";
+            readinessSummary.ForeColor = Color.FromArgb(145, 91, 0);
+        }
     }
 
     private async Task RunHealthCheckAsync()

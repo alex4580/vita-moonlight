@@ -34,6 +34,7 @@ internal sealed class DisplayWizardAdapter
     private const uint CmDisableUiNotOk = 0x00000004;
     private const uint CmDisablePersist = 0x00000008;
     private const uint CmProblemDisabled = 22;
+    private const uint DeviceNodeStarted = 0x00000008;
     private static readonly IReadOnlyDictionary<string, string> DriverFileHashes =
         new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
@@ -558,7 +559,8 @@ internal sealed class DisplayWizardAdapter
     internal static bool IsManagedDeviceEnabled(
         uint deviceStatus,
         uint problemCode) =>
-        problemCode != CmProblemDisabled;
+        problemCode == 0 &&
+        (deviceStatus & DeviceNodeStarted) != 0;
 
     private static void EnsureConfigurationManagerSucceeded(
         uint result,

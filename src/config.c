@@ -22,11 +22,17 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <unistd.h>
 #include <string.h>
 #include <getopt.h>
 #include <ini.h>
 #include "input/vita.h"
+#include "input/keyboardkeys.h"
+
+#ifdef __vita__
+#include <psp2/io/fcntl.h>
+#endif
 
 extern char* strdup(const char*);
 
@@ -45,6 +51,7 @@ extern char* strdup(const char*);
 #define MAX_BITRATE_KBPS 30000
 #define VITA_TOUCH_WIDTH 960
 #define VITA_TOUCH_HEIGHT 544
+#define CONFIG_COMPLETION_MARKER "# config_complete"
 
 /*
  * Keep loaded/legacy configuration inside the same finite mode contract as
@@ -84,7 +91,7 @@ static bool contract_supports_frame_rate(int fps) {
 #define write_config_string(fd, key, value) fprintf(fd, "%s = %s\n", key, value)
 #define write_config_int(fd, key, value) fprintf(fd, "%s = %d\n", key, value)
 #define write_config_hex(fd, key, value) fprintf(fd, "%s = %X\n", key, value)
-#define write_config_bool(fd, key, value) fprintf(fd, "%s = %s\n", key, value?"true":"false");
+#define write_config_bool(fd, key, value) fprintf(fd, "%s = %s\n", key, value?"true":"false")
 #define write_config_float(fd, key, value) fprintf(fd, "%s = %f\n", key, value)
 #define write_config_section(fd, key) fprintf(fd, "\n[%s]\n", key)
 
@@ -118,7 +125,7 @@ static bool stream_preset_base_matches(void) {
          config.sops &&
          !config.localaudio &&
          !config.enable_ref_frame_invalidation &&
-         config.enable_frame_pacer &&
+         !config.enable_frame_pacer &&
          !config.enable_vita_vblank_wait &&
          !config.center_region_only &&
          config.disable_powersave;
@@ -170,7 +177,7 @@ void config_apply_stream_preset(int preset) {
   /* The Vita hardware decoder requires the SPS one-reference-frame fixup.
    * moonlight-common explicitly forbids advertising RFI with that rewrite. */
   config.enable_ref_frame_invalidation = false;
-  config.enable_frame_pacer = true;
+  config.enable_frame_pacer = false;
   config.enable_vita_vblank_wait = false;
   config.center_region_only = false;
   config.disable_powersave = true;
@@ -283,8 +290,11 @@ static int ini_handle(void *out, const char *section, const char *name,
     } else if (strcmp(name, "swap_shoulder_buttons") == 0) {
       config->swap_shoulder_buttons = BOOL(value);
     } else if (strcmp(name, "key_dir") == 0) {
-      strncpy(config->key_dir, value, sizeof(config->key_dir)-1);
-      config->key_dir[sizeof(config->key_dir)-1] = '\0';
+      /*
+       * Legacy builds persisted the storage root. Never let an old config
+       * redirect credentials after an SD/ux0/uma0 layout change. main.c has
+       * already selected and validated the current writable data root.
+       */
     }
   } else if (strcmp(section, "special_keys") == 0) {
     if (strcmp(name, "nw") == 0) {
@@ -374,11 +384,161 @@ static int ini_handle(void *out, const char *section, const char *name,
       config->swap_shoulder_buttons = BOOL(value);
     }
   }
-  return 0;
+  /* inih handlers return non-zero to continue parsing. Returning zero marks
+   * the current line as an error (even when INI_STOP_ON_FIRST_ERROR is off). */
+  return 1;
+}
+
+static char* config_sibling_name(const char* filename, const char* suffix) {
+  if (!filename || !suffix) return NULL;
+  size_t filename_length = strlen(filename);
+  size_t suffix_length = strlen(suffix);
+  if (filename_length > SIZE_MAX - suffix_length - 1) return NULL;
+
+  char* result = malloc(filename_length + suffix_length + 1);
+  if (!result) return NULL;
+  memcpy(result, filename, filename_length);
+  memcpy(result + filename_length, suffix, suffix_length + 1);
+  return result;
+}
+
+static bool config_path_exists(const char* path) {
+  FILE* file = fopen(path, "r");
+  if (!file) return false;
+  fclose(file);
+  return true;
+}
+
+static int config_rename_file(const char* old_path, const char* new_path) {
+#ifdef __vita__
+  return sceIoRename(old_path, new_path);
+#else
+  return rename(old_path, new_path);
+#endif
+}
+
+static int config_remove_file(const char* path) {
+#ifdef __vita__
+  return sceIoRemove(path);
+#else
+  return remove(path);
+#endif
+}
+
+static bool config_temporary_file_complete(const char* path) {
+  char line[64];
+  bool complete = false;
+  FILE* file = fopen(path, "r");
+  if (!file) return false;
+  while (fgets(line, sizeof(line), file)) {
+    if (strncmp(line, CONFIG_COMPLETION_MARKER,
+                sizeof(CONFIG_COMPLETION_MARKER) - 1) == 0) {
+      complete = true;
+    }
+  }
+  if (fclose(file) != 0) complete = false;
+  return complete;
+}
+
+static void config_discard_candidate_strings(
+    PCONFIGURATION candidate, const PCONFIGURATION base) {
+  if (candidate->address != base->address) free(candidate->address);
+  if (candidate->app != base->app) free(candidate->app);
+  if (candidate->mapping != base->mapping) free(candidate->mapping);
+}
+
+static bool config_parse_candidate(
+    const char* path, const PCONFIGURATION base, PCONFIGURATION candidate) {
+  *candidate = *base;
+  int parse_result = ini_parse(path, ini_handle, candidate);
+  /* Every historical Vita Moonlight config written by this project contains
+   * a positive config_version. Version 5 and newer are journaled and must also
+   * contain the completion marker written last. This prevents an empty file,
+   * or a current-format file truncated after an otherwise valid prefix, from
+   * silently winning over its complete .bak/.tmp recovery candidate. */
+  bool has_known_version = candidate->config_version > 0;
+  bool current_file_complete =
+      candidate->config_version < CURRENT_CONFIG_VERSION ||
+      config_temporary_file_complete(path);
+  if (parse_result == 0 && has_known_version && current_file_complete) {
+    return true;
+  }
+  config_discard_candidate_strings(candidate, base);
+  return false;
+}
+
+static bool config_promote_recovery(
+    const char* source, const char* filename) {
+  if (strcmp(source, filename) == 0) return true;
+  if (config_path_exists(filename) && config_remove_file(filename) != 0) {
+    return false;
+  }
+  return config_rename_file(source, filename) == 0;
+}
+
+static bool config_saved_state_exists(const char* filename) {
+  if (config_path_exists(filename)) return true;
+  char* backup_name = config_sibling_name(filename, ".bak");
+  char* temporary_name = config_sibling_name(filename, ".tmp");
+  bool exists = backup_name && config_path_exists(backup_name);
+  if (!exists && temporary_name && config_path_exists(temporary_name)) {
+    exists = config_temporary_file_complete(temporary_name);
+  }
+  free(backup_name);
+  free(temporary_name);
+  return exists;
 }
 
 bool config_file_parse(char* filename, PCONFIGURATION config) {
-  return ini_parse(filename, ini_handle, config) == 0;
+  if (!filename || !config) return false;
+
+  char* temporary_name = config_sibling_name(filename, ".tmp");
+  char* backup_name = config_sibling_name(filename, ".bak");
+  if (!temporary_name || !backup_name) {
+    free(temporary_name);
+    free(backup_name);
+    return false;
+  }
+
+  const char* candidates[3] = {filename, backup_name, temporary_name};
+  CONFIGURATION parsed;
+  const char* selected = NULL;
+  for (unsigned int i = 0; i < 3; i++) {
+    const char* path = candidates[i];
+    if (!config_path_exists(path)) continue;
+    if (path == temporary_name &&
+        !config_temporary_file_complete(temporary_name)) {
+      continue;
+    }
+    if (config_parse_candidate(path, config, &parsed)) {
+      selected = path;
+      break;
+    }
+  }
+
+  if (!selected) {
+    free(temporary_name);
+    free(backup_name);
+    return false;
+  }
+
+  *config = parsed;
+  bool promoted = config_promote_recovery(selected, filename);
+  if (!promoted) {
+    fprintf(stderr, "Loaded recovery configuration but could not promote %s\n",
+            selected);
+  } else {
+    /* Once a validated configuration is live, stale journal files are no
+     * longer needed and must not win a later recovery decision. */
+    if (strcmp(temporary_name, filename) != 0) {
+      config_remove_file(temporary_name);
+    }
+    if (strcmp(backup_name, filename) != 0) config_remove_file(backup_name);
+  }
+
+  free(temporary_name);
+  free(backup_name);
+  return true;
 }
 
 static int clamp_int(int value, int minimum, int maximum) {
@@ -409,9 +569,17 @@ static void sanitize_deadzone_axis(int *leading, int *trailing, int extent) {
 }
 
 void config_sanitize(PCONFIGURATION config) {
+  /* The managed host relies on Sunshine honoring the Vita launch mode. Old
+   * builds exposed SOPS as a toggle, so migrate saved configurations to the
+   * supported behavior instead of silently streaming the physical desktop. */
+  config->sops = true;
   /* Migrate legacy installs that persisted RFI=On. Decoder errors still
    * request a clean IDR frame, which is safe with the Vita SPS rewrite. */
   config->enable_ref_frame_invalidation = false;
+  /* The legacy "frame pacer" dropped future presentations based on a coarse
+   * one-second count. It increased stutter and latency instead of spacing
+   * frames, so current builds always use immediate presentation. */
+  config->enable_frame_pacer = false;
 
   if (!contract_supports_resolution(
           config->stream.width, config->stream.height)) {
@@ -444,6 +612,10 @@ void config_sanitize(PCONFIGURATION config) {
   }
   if (config->psbutton_mode < 0 || config->psbutton_mode >= PSBUTTON_MODE_COUNT) {
     config->psbutton_mode = PSBUTTON_MODE_LOCAL_ESCAPE;
+  }
+  if (config->keyboard_layout < 0 ||
+      config->keyboard_layout >= KB_LAYOUT_COUNT) {
+    config->keyboard_layout = KB_LAYOUT_EN_US;
   }
   if (config->mouse_acceleration < 15 || config->mouse_acceleration > 300) {
     config->mouse_acceleration = 150;
@@ -479,18 +651,39 @@ void config_sanitize(PCONFIGURATION config) {
                 special_extent - config->special_keys.offset);
 }
 
-void config_save(const char* filename, PCONFIGURATION config) {
+bool config_save(const char* filename, PCONFIGURATION config) {
   /*
    * Settings can be edited after initial parsing. Validate again before
    * persisting so an invalid UI or legacy value cannot be used for the next
    * input configuration in this process.
    */
+  if (!filename || !config) return false;
   config_sanitize(config);
 
-  FILE* fd = fopen(filename, "w");
+  char* temporary_name = config_sibling_name(filename, ".tmp");
+  char* backup_name = config_sibling_name(filename, ".bak");
+  if (!temporary_name || !backup_name) {
+    free(temporary_name);
+    free(backup_name);
+    return false;
+  }
+
+  /* Finish recovery from a save interrupted after live -> backup. */
+  if (!config_path_exists(filename) && config_path_exists(backup_name) &&
+      config_rename_file(backup_name, filename) != 0) {
+    free(temporary_name);
+    free(backup_name);
+    return false;
+  }
+  config_remove_file(temporary_name);
+
+  FILE* fd = fopen(temporary_name, "w");
   if (fd == NULL) {
-    fprintf(stderr, "Can't open configuration file: %s\n", filename);
-    exit(EXIT_FAILURE);
+    fprintf(stderr, "Can't open temporary configuration file: %s\n",
+            temporary_name);
+    free(temporary_name);
+    free(backup_name);
+    return false;
   }
 
   write_config_int(fd, "config_version", CURRENT_CONFIG_VERSION);
@@ -520,7 +713,7 @@ void config_save(const char* filename, PCONFIGURATION config) {
   if (config->app && strcmp(config->app, "Steam") != 0)
     write_config_string(fd, "app", config->app);
 
-  write_config_string(fd, "key_dir", config->key_dir); // Guardar key_dir en la raíz
+  /* key_dir is runtime-selected storage state and must not be persisted. */
   write_config_bool(fd, "enable_frame_pacer", config->enable_frame_pacer);
   write_config_bool(fd, "center_region_only", config->center_region_only);
   write_config_bool(fd, "disable_powersave", config->disable_powersave);
@@ -558,8 +751,50 @@ void config_save(const char* filename, PCONFIGURATION config) {
   write_config_hex(fd, "se",      config->special_keys.se);
   write_config_int(fd, "offset",  config->special_keys.offset);
   write_config_int(fd, "size",    config->special_keys.size);
+  fprintf(fd, "%s\n", CONFIG_COMPLETION_MARKER);
 
-  fclose(fd);
+  bool succeeded = ferror(fd) == 0;
+  if (fflush(fd) != 0) succeeded = false;
+  if (fclose(fd) != 0) succeeded = false;
+  if (!succeeded) {
+    config_remove_file(temporary_name);
+    free(temporary_name);
+    free(backup_name);
+    return false;
+  }
+
+  bool had_live_file = config_path_exists(filename);
+  if (had_live_file) {
+    if (config_path_exists(backup_name) &&
+        config_remove_file(backup_name) != 0) {
+      config_remove_file(temporary_name);
+      free(temporary_name);
+      free(backup_name);
+      return false;
+    }
+    if (config_rename_file(filename, backup_name) != 0) {
+      config_remove_file(temporary_name);
+      free(temporary_name);
+      free(backup_name);
+      return false;
+    }
+  }
+
+  if (config_rename_file(temporary_name, filename) != 0) {
+    if (had_live_file && config_rename_file(backup_name, filename) == 0) {
+      config_remove_file(temporary_name);
+    } else if (!had_live_file) {
+      config_remove_file(temporary_name);
+    }
+    free(temporary_name);
+    free(backup_name);
+    return false;
+  }
+
+  if (had_live_file) config_remove_file(backup_name);
+  free(temporary_name);
+  free(backup_name);
+  return true;
 }
 
 void update_layout() {
@@ -573,7 +808,7 @@ void update_layout() {
   }
 }
 
-void config_parse(int argc, char* argv[], PCONFIGURATION config) {
+bool config_parse(int argc, char* argv[], PCONFIGURATION config) {
   LiInitializeStreamConfiguration(&config->stream);
 
   config->config_version = 0;
@@ -604,7 +839,7 @@ void config_parse(int argc, char* argv[], PCONFIGURATION config) {
   config->jp_layout = false;
   config->show_fps = false;
   config->performance_overlay_mode = 0;
-  config->enable_frame_pacer = true;
+  config->enable_frame_pacer = false;
   config->center_region_only = false;
 
   config->enable_front_touchzones = false;
@@ -637,7 +872,12 @@ void config_parse(int argc, char* argv[], PCONFIGURATION config) {
 
   char* config_file = config_path;
   if (config_file) {
-    config_file_parse(config_file, config);
+    bool had_saved_state = config_saved_state_exists(config_file);
+    if (!config_file_parse(config_file, config) && had_saved_state) {
+      fprintf(stderr, "Saved configuration is invalid and has no valid recovery file: %s\n",
+              config_file);
+      return false;
+    }
   }
 
   // Preserve the old FPS-counter preference without drawing both overlays.
@@ -676,14 +916,22 @@ void config_parse(int argc, char* argv[], PCONFIGURATION config) {
     }
     config->config_version = CURRENT_CONFIG_VERSION;
     if (config_file) {
-      config_save(config_file, config);
+      if (!config_save(config_file, config)) {
+        fprintf(stderr, "Could not persist migrated configuration: %s\n",
+                config_file);
+        return false;
+      }
     }
   }
 
   update_layout();
 
-  if (config->config_file != NULL)
-    config_save(config->config_file, config);
+  if (config->config_file != NULL &&
+      !config_save(config->config_file, config)) {
+    fprintf(stderr, "Could not persist configuration: %s\n",
+            config->config_file);
+    return false;
+  }
 
   // Solo asignar valor por defecto si sigue vacío
   if (config->key_dir[0] == 0x0) {
@@ -709,10 +957,11 @@ void config_parse(int argc, char* argv[], PCONFIGURATION config) {
   if (inputAdded) {
     if (!mapped) {
         fprintf(stderr, "Mapping option should be followed by the input to be mapped.\n");
-        exit(-1);
+        return false;
     } else if (config->mapping == NULL) {
         fprintf(stderr, "Please specify mapping file as default mapping could not be found.\n");
-        exit(-1);
+        return false;
     }
   }
+  return true;
 }

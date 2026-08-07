@@ -17,8 +17,8 @@
 [Setup]
 AppId={{D88FE6B4-D767-4A27-B192-E1DB4F6E835C}
 AppName=Vita Moonlight Host
-AppVersion=0.14.7
-VersionInfoVersion=0.14.7.0
+AppVersion=0.14.8
+VersionInfoVersion=0.14.8.0
 AppPublisher=Vita Moonlight contributors
 AppPublisherURL=https://github.com/alex4580/vita-moonlight
 DefaultDirName={autopf}\Vita Moonlight Host
@@ -48,9 +48,7 @@ SignedUninstaller=no
 [Tasks]
 Name: "gamepaddriver"; Description: "Controller support (recommended for Xbox, DS4, and Steam Input)"; GroupDescription: "Choose what setup should prepare:"
 Name: "host"; Description: "Configure this PC for Vita streaming now (recommended)"; GroupDescription: "Choose what setup should prepare:"
-Name: "host\sunshine"; Description: "Sunshine - recommended for most users"; Flags: exclusive
-Name: "host\sunshine\virtualdriver"; Description: "Vita-sized virtual display (recommended with Sunshine)"
-Name: "host\apollo"; Description: "Apollo - select only if this PC already uses Apollo"; Flags: exclusive unchecked
+Name: "host\sunshine"; Description: "Sunshine and the required Vita-sized virtual display"
 
 [Dirs]
 Name: "{app}\state"
@@ -131,6 +129,12 @@ Name: "{group}\Uninstall Vita Moonlight Host"; Filename: "{uninstallexe}"
 Filename: "{app}\VitaMoonlight.Host.exe"; Description: "Open the Vita Moonlight Host Control Panel"; Check: CanLaunchControlPanel; Flags: postinstall skipifsilent nowait
 
 [Code]
+const
+  { Inno reserves 0-8 for its own documented setup results. A post-copy host
+    configuration failure is an intentional, incomplete setup result rather
+    than a Pascal-script exception, so use a stable product-specific code. }
+  SetupHostConfigurationFailedExitCode = 10;
+
 var
   DriverReadinessChecked: Boolean;
   DriverReady: Boolean;
@@ -156,6 +160,9 @@ var
   MaintenanceFenceActive: Boolean;
   MaintenanceHelperExtracted: Boolean;
   MaintenanceOwnerPid: Integer;
+  SetupFailureRecorded: Boolean;
+  SetupFailureText: String;
+  SetupFailurePage: TOutputMsgMemoWizardPage;
 
 function GetCurrentProcessId: Integer;
   external 'GetCurrentProcessId@kernel32.dll stdcall';
@@ -168,6 +175,22 @@ begin
     Result := Result + ' --maintenance-owner-pid ' +
       IntToStr(MaintenanceOwnerPid);
   end;
+end;
+
+procedure RecordSetupFailure(const ErrorText: String); forward;
+
+procedure InitializeWizard;
+begin
+  { Host configuration runs after Inno has copied and finalized the new
+    payload. A conditional page is therefore the supported way to explain an
+    incomplete post-copy setup; GetCustomSetupExitCode supplies the nonzero
+    process result without exposing an internal "Runtime error" dialog. }
+  SetupFailurePage := CreateOutputMsgMemoPage(
+    wpInstalling,
+    'Setup could not complete',
+    'Vita Moonlight Host stopped safely.',
+    'Review the details below. Your physical display remains the priority.',
+    '');
 end;
 
 function InitializeSetup: Boolean;
@@ -223,7 +246,9 @@ begin
     ewWaitUntilTerminated,
     ResultCode) then
   begin
-    RaiseException(Description + ' could not be started.');
+    RecordSetupFailure(Description + ' could not be started.');
+    Result := False;
+    exit;
   end;
 
   if ResultCode = 4 then
@@ -252,17 +277,17 @@ begin
       ErrorText := Trim(ErrorDetails);
     if ErrorText <> '' then
     begin
-      RaiseException(
+      RecordSetupFailure(
         Description + ' failed with exit code ' + IntToStr(ResultCode) + '.' + #13#10 + #13#10 +
-        ErrorText + #13#10 + #13#10 +
-        'No later host-configuration steps were run.');
+        ErrorText);
     end
     else
     begin
-      RaiseException(
-        Description + ' failed with exit code ' + IntToStr(ResultCode) + '.' + #13#10 +
-        'No later host-configuration steps were run.');
+      RecordSetupFailure(
+        Description + ' failed with exit code ' + IntToStr(ResultCode) + '.');
     end;
+    Result := False;
+    exit;
   end;
   Result := True;
 end;
@@ -283,6 +308,19 @@ begin
   Result := '';
   if LoadStringFromFile(
     ExpandConstant('{app}\state\last-command-error.txt'),
+    ErrorDetails) then
+  begin
+    Result := Trim(ErrorDetails);
+  end;
+end;
+
+function ReadMaintenanceHelperError: String;
+var
+  ErrorDetails: AnsiString;
+begin
+  Result := '';
+  if LoadStringFromFile(
+    ExpandConstant('{tmp}\VitaMoonlight.Host.Maintenance.error.txt'),
     ErrorDetails) then
   begin
     Result := Trim(ErrorDetails);
@@ -316,6 +354,7 @@ end;
 
 function BeginUpgradeMaintenance(var ErrorText: String): Boolean;
 var
+  HostError: String;
   ResultCode: Integer;
 begin
   Result := False;
@@ -333,6 +372,8 @@ begin
   WizardForm.StatusLabel.Update;
   MaintenanceOwnerPid := GetCurrentProcessId;
   ResultCode := -1;
+  DeleteFile(ExpandConstant(
+    '{tmp}\VitaMoonlight.Host.Maintenance.error.txt'));
   if not Exec(
     ExpandConstant('{tmp}\VitaMoonlight.Host.Maintenance.exe'),
     'maintenance begin --owner-pid ' + IntToStr(MaintenanceOwnerPid),
@@ -348,12 +389,17 @@ begin
   end;
   if ResultCode <> 0 then
   begin
+    HostError := ReadMaintenanceHelperError;
+    if HostError <> '' then
+      HostError := #13#10 + #13#10 + HostError;
     ErrorText :=
       'Setup could not begin exclusive Vita Moonlight maintenance (exit code ' +
-      IntToStr(ResultCode) + ').' + #13#10 + #13#10 +
+      IntToStr(ResultCode) + ').' + HostError + #13#10 + #13#10 +
       'Finish any other setup or host change, then run this installer again.';
     exit;
   end;
+  DeleteFile(ExpandConstant(
+    '{tmp}\VitaMoonlight.Host.Maintenance.error.txt'));
 
   MaintenanceFenceActive := True;
   Log(
@@ -588,6 +634,31 @@ begin
   end;
 end;
 
+procedure RecordSetupFailure(const ErrorText: String);
+begin
+  if SetupFailureRecorded then
+    exit;
+
+  SetupFailureRecorded := True;
+  SetupFailureText :=
+    'Setup installed or updated the application files, but could not finish ' +
+    'configuring this PC.' + #13#10 + #13#10 +
+    ErrorText + #13#10 + #13#10 +
+    'No later host-configuration steps were run. Close Setup, correct the ' +
+    'reported problem, and run this installer again. Setup will return a ' +
+    'nonzero result so deployment tools cannot mistake this for success.';
+  ConfigurationDeferredForRestart := True;
+  Log('ERROR: ' + SetupFailureText);
+
+  { Restore safeguards removed during upgrade preflight immediately. The
+    maintenance fence remains active until DeinitializeSetup verifies this
+    rollback and closes the exact transaction. }
+  TryRestoreUpgradeSafeguards;
+
+  if SetupFailurePage <> nil then
+    SetupFailurePage.RichEditViewer.Lines.Text := SetupFailureText;
+end;
+
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   ResultCode: Integer;
@@ -766,7 +837,7 @@ end;
 
 function CanLaunchControlPanel: Boolean;
 begin
-  Result := not ConfigurationDeferredForRestart;
+  Result := not ConfigurationDeferredForRestart and not SetupFailureRecorded;
 end;
 
 function NeedRestart: Boolean;
@@ -774,27 +845,39 @@ begin
   Result := RestartRequiredByPrerequisite;
 end;
 
-function GetBackendSetupIntent: Integer;
+function TryGetBackendSetupIntent(var BackendIntent: Integer): Boolean;
+var
+  ErrorText: String;
 begin
+  Result := False;
+  BackendIntent := -1;
   if not Exec(
     ExpandConstant('{app}\VitaMoonlight.Host.exe'),
     WithMaintenanceBypass('backend status --intent-exit-code'),
     ExpandConstant('{app}'),
     SW_HIDE,
     ewWaitUntilTerminated,
-    Result) then
+    BackendIntent) then
   begin
-    RaiseException(
+    RecordSetupFailure(
       'Setup could not read the saved Vita host-feature preference. ' +
       'No Vita host configuration was changed.');
+    exit;
   end;
 
-  if (Result <> 0) and (Result <> 5) and (Result <> 6) then
+  if (BackendIntent <> 0) and (BackendIntent <> 5) and
+    (BackendIntent <> 6) then
   begin
-    RaiseException(
+    ErrorText := ReadSetupHostCommandError;
+    if ErrorText <> '' then
+      ErrorText := #13#10 + #13#10 + ErrorText;
+    RecordSetupFailure(
       'Setup could not safely classify the saved Vita host-feature preference ' +
-      '(exit code ' + IntToStr(Result) + '). No Vita host configuration was changed.');
+      '(exit code ' + IntToStr(BackendIntent) + '). No Vita host configuration was changed.' +
+      ErrorText);
+    exit;
   end;
+  Result := True;
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
@@ -819,13 +902,15 @@ begin
     Update product files and safe shared prerequisites, reassert the
     physical-safe paused state with the new executable, and defer work which
     could enable VDD or recreate background tasks until explicit Enable. }
-  BackendIntent := GetBackendSetupIntent;
+  if not TryGetBackendSetupIntent(BackendIntent) then
+    exit;
   if BackendIntent = 6 then
   begin
-    RaiseException(
+    RecordSetupFailure(
       'The protected Vita host-feature record is unreadable. Setup kept ' +
       'the physical desktop and ran no Vita host-configuration steps. Open the ' +
       'Vita Moonlight Host control panel as Administrator for recovery details.');
+    exit;
   end;
   if BackendIntent = 5 then
   begin
@@ -842,7 +927,7 @@ begin
         exit;
     end;
 
-    if WizardIsTaskSelected('host\sunshine\virtualdriver') then
+    if WizardIsTaskSelected('host\sunshine') then
     begin
       if not RunRequiredHostCommand(
         'Checking the virtual display runtime while Vita host features remain paused',
@@ -855,20 +940,10 @@ begin
     if WizardIsTaskSelected('host\sunshine') then
     begin
       DeferredSetupParameters :=
-        'deferred-setup save --host sunshine --virtual-driver false';
-      if WizardIsTaskSelected('host\sunshine\virtualdriver') then
-        DeferredSetupParameters :=
-          'deferred-setup save --host sunshine --virtual-driver true';
+        'deferred-setup save --host sunshine --virtual-driver true';
       if not RunRequiredHostCommand(
         'Saving Sunshine setup until Vita host features are enabled',
         DeferredSetupParameters) then
-        exit;
-    end
-    else if WizardIsTaskSelected('host\apollo') then
-    begin
-      if not RunRequiredHostCommand(
-        'Saving Apollo setup until Vita host features are enabled',
-        'deferred-setup save --host apollo --virtual-driver false') then
         exit;
     end
     else
@@ -907,7 +982,7 @@ begin
       exit;
   end;
 
-  if WizardIsTaskSelected('host\sunshine\virtualdriver') then
+  if WizardIsTaskSelected('host\sunshine') then
   begin
     if not RunRequiredHostCommand(
       'Checking and repairing the virtual display runtime',
@@ -928,9 +1003,10 @@ begin
     if not DriverReadyForConfiguration then
     begin
       DriverNeedsAttention := True;
-      RaiseException(
+      RecordSetupFailure(
         'The virtual display did not pass its native 960x544 readiness check. ' +
         'No Sunshine display configuration was written.');
+      exit;
     end;
     if not RunRequiredHostCommand(
       'Refreshing Sunshine display detection',
@@ -943,14 +1019,6 @@ begin
     if not RunRequiredHostCommand(
       'Restarting Sunshine with the Vita configuration',
       'host restart --host sunshine') then
-      exit;
-  end;
-
-  if WizardIsTaskSelected('host\apollo') then
-  begin
-    if not RunRequiredHostCommand(
-      'Configuring Apollo',
-      'configure --host apollo') then
       exit;
   end;
 
@@ -980,9 +1048,10 @@ begin
     TryRestoreUpgradeSafeguards;
     if UpgradeAgentWasStopped or UpgradeRecoveryTaskWasRemoved then
     begin
-      RaiseException(
+      RecordSetupFailure(
         'Setup updated the selected components, but could not restore the ' +
         'pre-existing Vita display safeguards. Run setup again before streaming.');
+      exit;
     end;
   end;
   UpgradeSafeguardsRestored := True;
@@ -990,9 +1059,30 @@ begin
   UpgradeRecoveryTaskWasRemoved := False;
 end;
 
+function ShouldSkipPage(PageID: Integer): Boolean;
+begin
+  Result :=
+    ((SetupFailurePage <> nil) and
+      (PageID = SetupFailurePage.ID) and not SetupFailureRecorded) or
+    ((PageID = wpFinished) and SetupFailureRecorded);
+end;
+
+function GetCustomSetupExitCode: Integer;
+begin
+  if SetupFailureRecorded then
+    Result := SetupHostConfigurationFailedExitCode
+  else
+    Result := 0;
+end;
+
 procedure CurPageChanged(CurPageID: Integer);
 begin
-  if CurPageID = wpWelcome then
+  if (SetupFailurePage <> nil) and (CurPageID = SetupFailurePage.ID) then
+  begin
+    SetupFailurePage.RichEditViewer.Lines.Text := SetupFailureText;
+    WizardForm.NextButton.Caption := SetupMessage(msgButtonFinish);
+  end
+  else if CurPageID = wpWelcome then
   begin
     if ExistingInstallDetected then
     begin
@@ -1007,7 +1097,7 @@ begin
       WizardForm.WelcomeLabel2.Caption :=
         'This all-in-one setup prepares Sunshine, controller support, a Vita-sized ' +
         'virtual display, and automatic display recovery.' + #13#10 + #13#10 +
-        'Accept the recommended choices unless this PC already uses Apollo. Save open ' +
+        'Accept the recommended choices. Save open ' +
         'work first because connected displays may briefly blink during verification.';
     end;
   end

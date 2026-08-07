@@ -536,15 +536,33 @@ static bool has_specialkey(int key) {
 bool psbutton_locked = 0;
 void lock_psbutton() {
   if(!psbutton_locked) {
-    sceShellUtilLock((SceShellUtilLockType)SCE_SHELL_UTIL_LOCK_TYPE_PS_BTN | SCE_SHELL_UTIL_LOCK_TYPE_PS_BTN_2);
-    psbutton_locked = 1;
+    int ret = sceShellUtilLock(
+        (SceShellUtilLockType)SCE_SHELL_UTIL_LOCK_TYPE_PS_BTN |
+        SCE_SHELL_UTIL_LOCK_TYPE_PS_BTN_2);
+    if (ret >= 0) {
+      psbutton_locked = 1;
+    } else {
+      vita_debug_event(
+          VITA_DEBUG_LEVEL_WARNING, "input.ps_button",
+          "state=system_fallback reason=lock_failed code=0x%08x",
+          (unsigned int)ret);
+    }
   }
 }
 
 void unlock_psbutton() {
   if(psbutton_locked) {
-    sceShellUtilUnlock((SceShellUtilLockType)SCE_SHELL_UTIL_LOCK_TYPE_PS_BTN | SCE_SHELL_UTIL_LOCK_TYPE_PS_BTN_2);
-    psbutton_locked = 0;
+    int ret = sceShellUtilUnlock(
+        (SceShellUtilLockType)SCE_SHELL_UTIL_LOCK_TYPE_PS_BTN |
+        SCE_SHELL_UTIL_LOCK_TYPE_PS_BTN_2);
+    if (ret >= 0) {
+      psbutton_locked = 0;
+    } else {
+      vita_debug_event(
+          VITA_DEBUG_LEVEL_ERROR, "input.ps_button",
+          "state=locked reason=unlock_failed code=0x%08x",
+          (unsigned int)ret);
+    }
   }
 }
 
@@ -887,7 +905,7 @@ inline void vitainput_process(void) {
     memcpy(&pad_old, &raw_pad, sizeof(SceCtrlData));
     memcpy(&shortcut_pad_old, &raw_pad, sizeof(SceCtrlData));
     memset(&old, 0, sizeof(input_data));
-    if (raw_pad.buttons == 0) {
+    if (raw_pad.buttons == 0 && front.reportNum == 0 && back.reportNum == 0) {
       suppress_remote_input_until_release = false;
       reset_physical_shortcuts();
     }
@@ -982,6 +1000,17 @@ inline void vitainput_process(void) {
 static uint8_t active_input_thread = 0;
 static pthread_mutex_t input_process_mutex;
 static bool input_mutex_initialized = false;
+static uint32_t input_worker_running = 0;
+static SceUID input_worker_thread = -1;
+
+static bool input_worker_is_running(void) {
+  return __atomic_load_n(&input_worker_running, __ATOMIC_ACQUIRE) != 0;
+}
+
+static void set_input_worker_running(bool running) {
+  __atomic_store_n(
+      &input_worker_running, running ? 1U : 0U, __ATOMIC_RELEASE);
+}
 
 static void update_front_sections(const CONFIGURATION *input_config) {
   FRONT_SECTIONS[0].left.x = input_config->special_keys.offset;
@@ -1111,7 +1140,7 @@ void vitainput_refresh_touchzones(void) {
 }
 
 int vitainput_thread(SceSize args, void *argp) {
-  while (1) {
+  while (input_worker_is_running()) {
     pthread_mutex_lock(&input_process_mutex);
     if (active_input_thread) {
       vitainput_process();
@@ -1136,15 +1165,56 @@ bool vitainput_init() {
 
   SceUID thid = sceKernelCreateThread("vitainput_thread", vitainput_thread, 0, 0x40000, 0, 0, NULL);
   if (thid >= 0) {
+    input_worker_thread = thid;
+    set_input_worker_running(true);
     if (sceKernelStartThread(thid, 0, NULL) >= 0) {
       return true;
     }
+    set_input_worker_running(false);
     sceKernelDeleteThread(thid);
+    input_worker_thread = -1;
   }
 
   pthread_mutex_destroy(&input_process_mutex);
   input_mutex_initialized = false;
   return false;
+}
+
+bool vitainput_shutdown(void) {
+  keyboardsystem_close_keyboard();
+  set_input_worker_running(false);
+  /* Restore the system escape path before any bounded join can fail. The
+   * worker never locks PS itself, so this is safe while it finishes. */
+  unlock_psbutton();
+
+  SceUID thid = input_worker_thread;
+  if (thid >= 0) {
+    SceUInt timeout = 1000000;
+    int thread_status = 0;
+    int ret = sceKernelWaitThreadEnd(thid, &thread_status, &timeout);
+    if (ret < 0) {
+      vita_debug_event(
+          VITA_DEBUG_LEVEL_ERROR, "input.worker",
+          "state=cleanup_failed phase=wait code=0x%08x",
+          (unsigned int)ret);
+      return false;
+    }
+    ret = sceKernelDeleteThread(thid);
+    if (ret < 0) {
+      vita_debug_event(
+          VITA_DEBUG_LEVEL_ERROR, "input.worker",
+          "state=cleanup_failed phase=delete code=0x%08x",
+          (unsigned int)ret);
+      return false;
+    }
+    input_worker_thread = -1;
+  }
+
+  if (input_mutex_initialized) {
+    pthread_mutex_destroy(&input_process_mutex);
+    input_mutex_initialized = false;
+  }
+  return true;
 }
 
 void vitainput_config(CONFIGURATION config) {
@@ -1219,6 +1289,16 @@ void vitainput_start(void) {
   memset(&pad_old, 0, sizeof(pad_old));
   memset(&shortcut_pad_old, 0, sizeof(shortcut_pad_old));
   memset(&old, 0, sizeof(old));
+  memset(&touch, 0, sizeof(touch));
+  memset(&touch_old, 0, sizeof(touch_old));
+  memset(&swipe, 0, sizeof(swipe));
+  memset(&front, 0, sizeof(front));
+  memset(&back, 0, sizeof(back));
+  memset(&dc_tracker, 0, sizeof(dc_tracker));
+  front_state = NO_TOUCH_ACTION;
+  finger_count = 0;
+  /* A reconnect must not inherit a button held during controller creation. */
+  suppress_remote_input_until_release = true;
   reset_physical_shortcuts();
   uint16_t gamepadMask = 1;
   uint16_t gamepadCapabilities = LI_CCAP_BATTERY_STATE;
@@ -1279,11 +1359,38 @@ void vitainput_stop(void) {
   pthread_mutex_lock(&input_process_mutex);
   active_input_thread = false;
   touchabsolute_release_all();
+  /* A tap or custom keyboard/mouse mapping can be interrupted between its
+   * down and up edges. Release every non-controller mapping while Moonlight's
+   * input channel is still alive. Duplicate releases are harmless. */
+  const uint32_t mapped_actions[] = {
+      map.btn_south, map.btn_north, map.btn_east, map.btn_west,
+      map.btn_select, map.btn_start, map.btn_mode,
+      map.btn_thumbl, map.btn_thumbr, map.btn_tl, map.btn_tr,
+      map.btn_tl2, map.btn_tr2, map.btn_dpad_up, map.btn_dpad_down,
+      map.btn_dpad_left, map.btn_dpad_right,
+      config.special_keys.nw, config.special_keys.ne,
+      config.special_keys.sw, config.special_keys.se,
+  };
+  for (unsigned int i = 0;
+       i < sizeof(mapped_actions) / sizeof(mapped_actions[0]); i++) {
+    if (mapped_actions[i] != 0) special(mapped_actions[i], 0, 1);
+  }
+  LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_LEFT);
+  LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_RIGHT);
   // Release all controls and remove the virtual pad while the connection is
   // still alive. This prevents a held button surviving pause or disconnect.
   LiSendMultiControllerEvent(0, 1, 0, 0, 0, 0, 0, 0, 0);
   LiSendMultiControllerEvent(0, 0, 0, 0, 0, 0, 0, 0, 0);
   memset(&old, 0, sizeof(old));
+  memset(&touch, 0, sizeof(touch));
+  memset(&touch_old, 0, sizeof(touch_old));
+  memset(&swipe, 0, sizeof(swipe));
+  memset(&front, 0, sizeof(front));
+  memset(&back, 0, sizeof(back));
+  memset(&dc_tracker, 0, sizeof(dc_tracker));
+  front_state = NO_TOUCH_ACTION;
+  finger_count = 0;
+  suppress_remote_input_until_release = true;
   unlock_psbutton();
   reset_psbutton_state();
   reset_physical_shortcuts();

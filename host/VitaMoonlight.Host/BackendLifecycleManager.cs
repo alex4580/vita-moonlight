@@ -376,6 +376,8 @@ internal static class BackendLifecycleManager
     {
         operation.RequireActive();
         BackendLifecycleStateStore.RequireNoUninstallInProgress();
+        ScheduledTaskAccount.RequireCurrentInteractiveUser(
+            "Enabling Vita host features");
         var loaded = BackendLifecycleStateStore.LoadForLifecycleAction(
             operation);
         var state = loaded.State ?? CaptureCurrentAsEnabled();

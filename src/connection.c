@@ -27,14 +27,31 @@
 #include "video/vita.h"
 #include "audio/vita.h"
 #include <stdbool.h>
+#include <stdint.h>
+#include <pthread.h>
 #include "connection_overlay.h"
 #include "debug.h"
 #include "gui/ui_stream_overlay.h"
 #include "gui/ui_diagnostics.h"
 
 static int connection_status = LI_DISCONNECTED;
+static uint32_t termination_in_progress = 0;
+static pthread_mutex_t lifecycle_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 int connection_stage = 0;
+
+static int connection_state_load(void) {
+  return __atomic_load_n(&connection_status, __ATOMIC_ACQUIRE);
+}
+
+static bool begin_termination(void) {
+  return __atomic_exchange_n(
+      &termination_in_progress, 1U, __ATOMIC_ACQ_REL) == 0;
+}
+
+static void end_termination(void) {
+  __atomic_store_n(&termination_in_progress, 0U, __ATOMIC_RELEASE);
+}
 
 static const char *connection_state_token(int state) {
   switch (state) {
@@ -52,17 +69,18 @@ static const char *connection_state_token(int state) {
 }
 
 static void log_invalid_transition(const char *operation) {
+  int state = connection_state_load();
   vita_debug_event(
       VITA_DEBUG_LEVEL_ERROR, "connection.state",
       "previous=%s state=%s reason=invalid_%s code=-1",
-      connection_state_token(connection_status),
-      connection_state_token(connection_status), operation);
+      connection_state_token(state),
+      connection_state_token(state), operation);
 }
 
 static void set_connection_state(int next, const char *reason,
                                  VitaDebugLevel level, int code) {
-  int previous = connection_status;
-  connection_status = next;
+  int previous = __atomic_exchange_n(
+      &connection_status, next, __ATOMIC_ACQ_REL);
   vita_debug_event(
       level, "connection.state",
       "previous=%s state=%s reason=%s code=%d",
@@ -95,7 +113,10 @@ void start_output() {
 }
 
 void connection_connection_started() {
-  if (connection_status != LI_PAIRED) {
+  pthread_mutex_lock(&lifecycle_mutex);
+  if (__atomic_load_n(&termination_in_progress, __ATOMIC_ACQUIRE) ||
+      connection_state_load() != LI_PAIRED) {
+    pthread_mutex_unlock(&lifecycle_mutex);
     log_invalid_transition("stream_started");
     return;
   }
@@ -106,19 +127,32 @@ void connection_connection_started() {
   ui_diagnostics_set_network_state(UI_DIAGNOSTICS_NETWORK_GOOD);
   start_output();
   vitavideo_hide_poor_net_indicator();
+  pthread_mutex_unlock(&lifecycle_mutex);
 }
 
 static void connection_connection_terminated_internal(int error_code,
                                                        bool requested) {
-  if (connection_status != LI_PAIRED && connection_status != LI_CONNECTED &&
-      connection_status != LI_MINIMIZED) {
+  if (!begin_termination()) return;
+
+  pthread_mutex_lock(&lifecycle_mutex);
+  int state = connection_state_load();
+  if (state == LI_DISCONNECTED) {
+    pthread_mutex_unlock(&lifecycle_mutex);
+    end_termination();
+    return;
+  }
+  if (state != LI_PAIRED && state != LI_CONNECTED &&
+      state != LI_MINIMIZED) {
     log_invalid_transition("terminate_callback");
   }
 
   const char *reason =
       requested ? "requested" : (error_code == 0 ? "graceful" : "error");
-  VitaDebugLevel level =
-      error_code == 0 ? VITA_DEBUG_LEVEL_INFO : VITA_DEBUG_LEVEL_ERROR;
+  bool graceful = requested || error_code == 0 ||
+                  error_code == ML_ERROR_GRACEFUL_TERMINATION;
+  VitaDebugLevel level = graceful
+      ? VITA_DEBUG_LEVEL_INFO
+      : VITA_DEBUG_LEVEL_ERROR;
   if (!requested) {
     switch (error_code) {
       case ML_ERROR_GRACEFUL_TERMINATION:
@@ -140,15 +174,24 @@ static void connection_connection_terminated_internal(int error_code,
     }
   }
 
-  if (connection_status == LI_CONNECTED) {
+  if (state == LI_CONNECTED) {
     stop_output();
+  } else if (state == LI_MINIMIZED) {
+    /* pause_output() already stopped input/video/audio. Power inhibition is
+     * intentionally retained for resume, but must end during teardown. */
+    vitapower_stop();
   }
-  LiStopConnection();
   set_connection_state(LI_DISCONNECTED, reason, level, error_code);
+  pthread_mutex_unlock(&lifecycle_mutex);
+
+  /* Do not hold the lifecycle mutex here. Moonlight may invoke the
+   * termination callback reentrantly; the gate above makes that a no-op. */
+  LiStopConnection();
   vita_debug_flush();
   stream_overlay_reset();
   ui_diagnostics_reset_session();
   ui_diagnostics_set_network_state(UI_DIAGNOSTICS_NETWORK_UNKNOWN);
+  end_termination();
 }
 
 static void connection_connection_terminated(int error_code) {
@@ -156,17 +199,24 @@ static void connection_connection_terminated(int error_code) {
 }
 
 int connection_reset() {
-  if (connection_status != LI_DISCONNECTED) {
+  pthread_mutex_lock(&lifecycle_mutex);
+  if (connection_state_load() != LI_DISCONNECTED ||
+      __atomic_load_n(&termination_in_progress, __ATOMIC_ACQUIRE)) {
+    pthread_mutex_unlock(&lifecycle_mutex);
     log_invalid_transition("reset");
     return -1;
   }
   set_connection_state(
       LI_READY, "attempt_begin", VITA_DEBUG_LEVEL_INFO, 0);
+  pthread_mutex_unlock(&lifecycle_mutex);
   return 0;
 }
 
 int connection_abort_attempt() {
-  if (connection_status != LI_READY) {
+  pthread_mutex_lock(&lifecycle_mutex);
+  if (connection_state_load() != LI_READY ||
+      __atomic_load_n(&termination_in_progress, __ATOMIC_ACQUIRE)) {
+    pthread_mutex_unlock(&lifecycle_mutex);
     log_invalid_transition("abort_attempt");
     return -1;
   }
@@ -174,48 +224,63 @@ int connection_abort_attempt() {
   connection_stage = 0;
   set_connection_state(
       LI_DISCONNECTED, "attempt_aborted", VITA_DEBUG_LEVEL_INFO, 0);
+  pthread_mutex_unlock(&lifecycle_mutex);
   vita_debug_flush();
   return 0;
 }
 
 int connection_paired() {
-  if (connection_status != LI_READY && connection_status != LI_PAIRED &&
-      connection_status != LI_CONNECTED) {
+  pthread_mutex_lock(&lifecycle_mutex);
+  int state = connection_state_load();
+  if (__atomic_load_n(&termination_in_progress, __ATOMIC_ACQUIRE) ||
+      (state != LI_READY && state != LI_PAIRED &&
+       state != LI_CONNECTED)) {
+    pthread_mutex_unlock(&lifecycle_mutex);
     log_invalid_transition("paired");
     return -1;
   }
-  if (connection_status != LI_PAIRED) {
+  if (state != LI_PAIRED) {
     set_connection_state(
         LI_PAIRED, "pairing_ready", VITA_DEBUG_LEVEL_INFO, 0);
   }
+  pthread_mutex_unlock(&lifecycle_mutex);
   return 0;
 }
 
 int connection_minimize() {
-  if (connection_status != LI_CONNECTED) {
+  pthread_mutex_lock(&lifecycle_mutex);
+  if (connection_state_load() != LI_CONNECTED ||
+      __atomic_load_n(&termination_in_progress, __ATOMIC_ACQUIRE)) {
+    pthread_mutex_unlock(&lifecycle_mutex);
     log_invalid_transition("minimize");
     return -1;
   }
   pause_output();
   set_connection_state(
       LI_MINIMIZED, "output_paused", VITA_DEBUG_LEVEL_INFO, 0);
+  pthread_mutex_unlock(&lifecycle_mutex);
   return 0;
 }
 
 int connection_resume() {
-  if (connection_status != LI_MINIMIZED) {
+  pthread_mutex_lock(&lifecycle_mutex);
+  if (connection_state_load() != LI_MINIMIZED ||
+      __atomic_load_n(&termination_in_progress, __ATOMIC_ACQUIRE)) {
+    pthread_mutex_unlock(&lifecycle_mutex);
     log_invalid_transition("resume");
     return -1;
   }
   start_output();
   set_connection_state(
       LI_CONNECTED, "output_resumed", VITA_DEBUG_LEVEL_INFO, 0);
+  pthread_mutex_unlock(&lifecycle_mutex);
   return 0;
 }
 
 int connection_terminate() {
-  if (connection_status != LI_PAIRED && connection_status != LI_CONNECTED &&
-      connection_status != LI_MINIMIZED) {
+  int state = connection_state_load();
+  if (state != LI_PAIRED && state != LI_CONNECTED &&
+      state != LI_MINIMIZED) {
     log_invalid_transition("terminate_request");
     return -1;
   }
@@ -244,18 +309,20 @@ void connection_stage_failed(int stage, int code) {
 }
 
 bool connection_is_ready() {
-  return connection_status != LI_DISCONNECTED;
+  return connection_state_load() != LI_DISCONNECTED;
 }
 
 bool connection_is_connected() {
-  return connection_status == LI_CONNECTED;
+  return connection_state_load() == LI_CONNECTED;
 }
 
 int connection_get_status() {
-  return connection_status;
+  return connection_state_load();
 }
 
 void connection_status_update(int status) {
+  int state = connection_state_load();
+  if (state != LI_CONNECTED && state != LI_MINIMIZED) return;
   switch (status) {
     case CONN_STATUS_POOR:
       vitavideo_show_poor_net_indicator();

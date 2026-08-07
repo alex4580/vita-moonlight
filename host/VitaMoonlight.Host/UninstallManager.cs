@@ -61,38 +61,64 @@ internal static class UninstallManager
     internal static UninstallPreparationResult Prepare(
         bool beginUninstallTransaction = false)
     {
-        BackendOperationLease? upgradeOperationLock = null;
-        if (beginUninstallTransaction)
-        {
-            // The actual uninstaller holds this durable intent across the
-            // separate optional-dependency commands which follow. Never clear
-            // this fence from a failed preparation: another uninstaller may
-            // already have observed it as a retry and begun its own cleanup.
-            // The next supported uninstall retry owns completing and clearing
-            // the durable transaction.
-            BackendLifecycleStateStore.BeginUninstall();
-        }
-        else
-        {
-            // Upgrade/repair uses this same physical-safety probe but must not
-            // proceed through an unfinished uninstall transaction or race a
-            // backend/deferred-setup mutation. Keep the lifecycle operation
-            // lock through the complete physical-safety probe.
-            upgradeOperationLock = BackendLifecycleStateStore.AcquireLock();
-        }
-
+        var operationLock = BackendLifecycleStateStore.AcquireLock();
         try
         {
-            if (!beginUninstallTransaction)
+            if (beginUninstallTransaction)
             {
+                RequireOwnedFinalizationPreflight();
+                // The actual uninstaller holds this durable intent across the
+                // separate optional-dependency commands which follow. Never
+                // clear this fence from a failed preparation: another
+                // uninstaller may already have observed it as a retry and
+                // begun its own cleanup. The next supported uninstall retry
+                // owns completing and clearing the durable transaction.
+                BackendLifecycleStateStore.BeginUninstallLocked(
+                    operationLock);
+            }
+            else
+            {
+                // Upgrade/repair uses this same physical-safety probe but must
+                // not proceed through an unfinished uninstall transaction or
+                // race a backend/deferred-setup mutation. Keep the lifecycle
+                // operation lock through the complete physical-safety probe.
                 BackendLifecycleStateStore.RequireNoUninstallInProgress();
             }
             return RecoverPhysicalAndDiscardPendingTransaction();
         }
         finally
         {
-            upgradeOperationLock?.Dispose();
+            operationLock.Dispose();
         }
+    }
+
+    private static void RequireOwnedFinalizationPreflight()
+    {
+        var rescueAgent = HostRecoveryAgentManager.GetInstallationState();
+        var recovery = RecoveryTaskManager.GetInstallationState();
+        ExactScheduledTaskManager.RequireKnown(
+            rescueAgent,
+            HostRecoveryAgentManager.TaskName);
+        ExactScheduledTaskManager.RequireKnown(
+            recovery,
+            RecoveryTaskManager.TaskName);
+        if (rescueAgent.State == ExactScheduledTaskState.Present)
+        {
+            ExactScheduledTaskManager.RequireOwnedInteractiveTask(
+                HostRecoveryAgentManager.TaskName,
+                InstallationTrust.ExpectedExecutablePath,
+                "agent run --background",
+                requireInteractiveHighest: false);
+        }
+        if (recovery.State == ExactScheduledTaskState.Present)
+        {
+            ExactScheduledTaskManager.RequireOwnedInteractiveTask(
+                RecoveryTaskManager.TaskName,
+                InstallationTrust.ExpectedExecutablePath,
+                "session recover",
+                requireInteractiveHighest: false);
+        }
+        SunshineConfigurator.RequireManagedIntegrationCleanupReady();
     }
 
     internal static UninstallPreparationResult
@@ -304,19 +330,15 @@ internal static class UninstallManager
                     // at the host executable after Inno removes it.
                     VerifyPhysicalOnlyTopology(
                         new DisplayTopologyService());
-                    // Cleanup can atomically commit more than one Sunshine
-                    // file. Once the first call begins, any later failure is
-                    // conservatively post-commit; never recreate safeguards
+                    // Cleanup is restartable across more than one streaming-
+                    // host file. Once the first call begins, any later failure
+                    // is conservatively post-commit; never recreate safeguards
                     // or clear the uninstall fence against a partial cleanup.
                     integrationCleanupStarted = true;
-                    if (restoreSunshine)
-                    {
-                        SunshineConfigurator.RemoveManagedIntegration();
-                    }
-                    else
-                    {
-                        SunshineOwnershipJournal.Delete();
-                    }
+                    // Always remove exact owned hooks/settings, even when the
+                    // user separately removed Sunshine. The journal may also
+                    // contain an older Apollo location which remains installed.
+                    SunshineConfigurator.RemoveManagedIntegration();
                     return recovery;
                 },
                 "Uninstall finalization display recovery");

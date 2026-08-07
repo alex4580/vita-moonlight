@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
-SCHEMA = "vita-moonlight/host-client-contract/v1"
+SCHEMA = "vita-moonlight/host-client-contract/v2"
 
 
 class ContractFailure(Exception):
@@ -73,7 +73,7 @@ def _validate_contract(contract: dict[str, Any]) -> dict[str, Any]:
         "contract",
     )
     _require(contract["schema"] == SCHEMA, f"schema must be {SCHEMA}")
-    _require(contract["contract_version"] == 1, "contract_version must be 1 for schema v1")
+    _require(contract["contract_version"] == 2, "contract_version must be 2 for schema v2")
 
     stream = contract["stream"]
     _require(isinstance(stream, dict), "stream must be an object")
@@ -105,10 +105,10 @@ def _validate_contract(contract: dict[str, Any]) -> dict[str, Any]:
     frame_rates = stream["allowed_frame_rates_fps"]
     _require(
         frame_rates == [24, 30, 40, 50, 60],
-        "schema v1 stream frame rates must be [24, 30, 40, 50, 60]",
+        "schema v2 stream frame rates must be [24, 30, 40, 50, 60]",
     )
     desktop_refresh = _require_int(stream["desktop_refresh_hz"], "desktop_refresh_hz")
-    _require(desktop_refresh == 60, "schema v1 desktop_refresh_hz must be 60")
+    _require(desktop_refresh == 60, "schema v2 desktop_refresh_hz must be 60")
 
     capabilities = stream["capabilities"]
     _require(isinstance(capabilities, dict), "stream.capabilities must be an object")
@@ -123,7 +123,7 @@ def _validate_contract(contract: dict[str, Any]) -> dict[str, Any]:
         "color_space": "REC_709",
         "color_range": "LIMITED",
         "hdr": False,
-    }, "schema v1 capability profile must remain H.264, stereo, Rec.709 limited SDR")
+    }, "schema v2 capability profile must remain H.264, stereo, Rec.709 limited SDR")
 
     mode_control = contract["mode_control"]
     _require(isinstance(mode_control, dict), "mode_control must be an object")
@@ -131,7 +131,8 @@ def _validate_contract(contract: dict[str, Any]) -> dict[str, Any]:
         mode_control,
         {
             "authoritative_transport",
-            "shared_sunshine_hook",
+            "native_sunshine_display_management",
+            "legacy_single_application_hook",
             "legacy_unacknowledged_hotkeys",
         },
         "mode_control",
@@ -141,24 +142,56 @@ def _validate_contract(contract: dict[str, Any]) -> dict[str, Any]:
         "GameStream launch mode must remain authoritative",
     )
     _require(
-        mode_control["shared_sunshine_hook"] == {
+        mode_control["native_sunshine_display_management"] == {
+            "scope": "all-applications",
+            "configuration_option": "ensure_only_display",
+            "resolution_option": "auto",
+            "refresh_rate_option": "manual",
+            "desktop_refresh_hz": 60,
+            "exact_contract_resolution_remapping": True,
+            "force_sdr_for_vita": True,
+            "revert_delay_ms": 500,
+            "revert_on_disconnect": True,
+        },
+        "native Sunshine display management must select only the Vita output, "
+        "honor exact client modes at 60 Hz SDR, and restore on disconnect",
+    )
+    _require(
+        mode_control["legacy_single_application_hook"] == {
             "command": "session hook-start",
             "recognized_contract_mode": "normalize-to-fixed-desktop-refresh",
             "unrecognized_mode": "pass-through-no-op",
         },
-        "the shared Sunshine hook must normalize Vita modes and leave unrelated "
+        "the legacy single-application hook must normalize Vita modes and leave unrelated "
         "Moonlight client modes untouched",
     )
-    legacy = mode_control["legacy_unacknowledged_hotkeys"]
+    legacy_control = mode_control["legacy_unacknowledged_hotkeys"]
+    _require(isinstance(legacy_control, dict),
+             "legacy_unacknowledged_hotkeys must be an object")
+    _require_keys(
+        legacy_control,
+        {"availability", "sent_by_current_client", "modes"},
+        "legacy_unacknowledged_hotkeys",
+    )
+    _require(
+        legacy_control["availability"] ==
+        "explicit-legacy-single-application-fallback-only",
+        "legacy mode hotkeys must be restricted to the explicit single-application fallback",
+    )
+    _require(
+        legacy_control["sent_by_current_client"] is False,
+        "the current Vita client must not send legacy display-mode hotkeys",
+    )
+    legacy = legacy_control["modes"]
     expected_legacy = [
         (960, 540, 60, "F8", 0x77),
         (960, 544, 60, "F9", 0x78),
         (1280, 720, 60, "F10", 0x79),
     ]
-    _require(isinstance(legacy, list), "legacy_unacknowledged_hotkeys must be an array")
+    _require(isinstance(legacy, list), "legacy_unacknowledged_hotkeys.modes must be an array")
     actual_legacy: list[tuple[int, int, int, str, int]] = []
     for index, hotkey in enumerate(legacy):
-        location = f"legacy_unacknowledged_hotkeys[{index}]"
+        location = f"legacy_unacknowledged_hotkeys.modes[{index}]"
         _require(isinstance(hotkey, dict), f"{location} must be an object")
         _require_keys(
             hotkey,
@@ -173,7 +206,7 @@ def _validate_contract(contract: dict[str, Any]) -> dict[str, Any]:
             _require_int(hotkey["windows_virtual_key"], f"{location}.windows_virtual_key"),
         ))
     _require(actual_legacy == expected_legacy,
-             "schema v1 legacy mode hotkeys must remain F8/F9/F10 for the three display modes")
+             "schema v2 legacy mode hotkeys must remain F8/F9/F10 for the three display modes")
     _require(
         {(width, height) for width, height, _, _, _ in actual_legacy} == set(parsed_resolutions),
         "legacy mode hotkeys must cover exactly the contracted resolutions",
@@ -187,9 +220,9 @@ def _validate_contract(contract: dict[str, Any]) -> dict[str, Any]:
         "companion_control",
     )
     _require(control["transport"] == "moonlight-encrypted-keyboard-input",
-             "schema v1 companion control must use the Moonlight input channel")
+             "schema v2 companion control must use the Moonlight input channel")
     _require(control["acknowledgement"] == "none",
-             "schema v1 hotkey actions are unacknowledged")
+             "schema v2 hotkey actions are unacknowledged")
 
     expected_modifiers = [
         {"key": "CONTROL", "windows_virtual_key": 0x11},
@@ -206,17 +239,10 @@ def _validate_contract(contract: dict[str, Any]) -> dict[str, Any]:
             "windows_virtual_key": 0x7A,
             "host_action": "display-recovery",
             "disconnect_after_send": True,
-        },
-        {
-            "id": "close-foreground-game",
-            "key": "F12",
-            "windows_virtual_key": 0x7B,
-            "host_action": "close-game",
-            "disconnect_after_send": False,
-        },
+        }
     ]
     _require(control["actions"] == expected_actions,
-             "companion actions must be exactly F11 recovery and F12 close-game")
+             "companion actions must be exactly F11 display recovery")
 
     return {
         "resolutions": parsed_resolutions,
@@ -224,7 +250,8 @@ def _validate_contract(contract: dict[str, Any]) -> dict[str, Any]:
         "desktop_refresh": desktop_refresh,
         "capabilities": capabilities,
         "legacy": actual_legacy,
-        "shared_hook": mode_control["shared_sunshine_hook"],
+        "native_display": mode_control["native_sunshine_display_management"],
+        "legacy_hook": mode_control["legacy_single_application_hook"],
         "modifiers": expected_modifiers,
         "actions": expected_actions,
     }
@@ -272,6 +299,7 @@ def _check_vita(root: Path, values: dict[str, Any]) -> None:
     config = _read(root, "src/config.c")
     settings = _read(root, "src/gui/ui_settings.c")
     overlay = _read(root, "src/gui/ui_stream_overlay.c")
+    overlay_header = _read(root, "src/gui/ui_stream_overlay.h")
     connect = _read(root, "src/gui/ui_connect.c")
     gamestream = _read(root, "libgamestream/client.c")
 
@@ -362,6 +390,12 @@ def _check_vita(root: Path, values: dict[str, Any]) -> None:
         "Vita launch must pass the contracted stream configuration to gs_start_app",
     )
     _require(
+        "config->sops = true;" in config and
+        "SETTINGS_SOPS" not in settings and
+        "STREAM_HOST_OPTIMIZE" not in overlay,
+        "the managed-host launch-mode contract must be mandatory, not a client toggle",
+    )
+    _require(
         "LiStartConnection(&server.serverInfo, &config.stream" in connect,
         "Vita connection must pass the same contracted stream configuration to Moonlight",
     )
@@ -428,43 +462,38 @@ def _check_vita(root: Path, values: dict[str, Any]) -> None:
     ]
     _require(
         sorted(literal_action_keys) == sorted(action["windows_virtual_key"] for action in values["actions"]),
-        "Vita companion action calls must be exactly the contracted F11/F12 actions",
+        "Vita companion action calls must be exactly the contracted F11 recovery action",
     )
 
-    resolution_hotkey = _extract_braced_block(
-        overlay,
-        r"static\s+int\s+resolution_virtual_key\s*\(",
-        "legacy resolution_virtual_key",
+    _require(
+        "resolution_virtual_key" not in overlay and
+        "apply_display_virtual_key" not in overlay,
+        "the current Vita client must not map stream resolutions to legacy hotkeys",
     )
-    conditional_legacy = {
-        (int(width), int(height)): int(virtual_key, 16)
-        for width, height, virtual_key in re.findall(
-            r"config\.stream\.width\s*==\s*(\d+)\s*&&\s*"
-            r"config\.stream\.height\s*==\s*(\d+)\s*\)\s*\{\s*"
-            r"return\s+0x([0-9A-Fa-f]+)",
-            resolution_hotkey,
-            re.DOTALL,
-        )
-    }
-    native_resolution = values["resolutions"][0]
-    expected_conditional = {
-        (width, height): virtual_key
-        for width, height, _, _, virtual_key in values["legacy"]
-        if (width, height) != native_resolution
-    }
-    _require(conditional_legacy == expected_conditional,
-             f"Vita conditional legacy mode hotkeys drifted: {conditional_legacy}")
-    return_keys = [
-        int(value, 16)
-        for value in re.findall(r"return\s+0x([0-9A-Fa-f]+)", resolution_hotkey)
-    ]
-    native_key = next(
-        virtual_key
-        for width, height, _, _, virtual_key in values["legacy"]
-        if (width, height) == native_resolution
+    _require(
+        re.findall(
+            r"bool\s+stream_overlay_take_apply_display_request\s*\(([^)]*)\)\s*;",
+            overlay_header,
+        ) == ["void"],
+        "the Vita display-apply request must not carry a legacy virtual key",
     )
-    _require(return_keys and return_keys[-1] == native_key,
-             "Vita native legacy mode fallback must remain the contracted F9 key")
+    _require(
+        "stream_overlay_take_apply_display_request()" in connect and
+        "send_host_rescue_hotkey(display_virtual_key)" not in connect and
+        "sceKernelDelayThread(750 * 1000)" not in connect,
+        "Apply resolution must use an immediate ordinary GameStream reconnect without a legacy hotkey delay",
+    )
+    reconnect = _extract_braced_block(
+        connect,
+        r"if\s*\(apply_display\s*\|\|\s*apply_input\)\s*",
+        "Vita controlled reconnect",
+    )
+    _require(
+        reconnect.find("connection_terminate();") < reconnect.find("gs_refresh(&server);") <
+        reconnect.find("ui_connect_stream(reconnect_app);") and
+        reconnect.find("connection_terminate();") >= 0,
+        "the Vita controlled reconnect must terminate, refresh, and resume the same app in order",
+    )
 
 
 def _decode_csharp_string_expression(expression: str, location: str) -> str:
@@ -586,7 +615,7 @@ def _check_host(root: Path, values: dict[str, Any]) -> None:
     administrator_index = session_command.find("EnsureAdministrator")
     _require(
         0 <= recognize_index < pass_through_message_index < no_op_return_index < administrator_index,
-        "the shared Sunshine hook must return success without privilege or display "
+        "the legacy Sunshine hook must return success without privilege or display "
         "mutation when a client mode is outside the Vita contract",
     )
     _require(
@@ -634,20 +663,43 @@ def _check_host(root: Path, values: dict[str, Any]) -> None:
         f"Sunshine resolution remapping drifted: {actual_remaps} != {expected_remaps}",
     )
 
-    compact_sunshine = re.sub(r"\s+", " ", sunshine)
-    required_sunshine_fragments = [
+    configure = _extract_braced_block(
+        sunshine,
+        r"internal\s+static\s+SunshineConfigurationResult\s+Configure\s*\(",
+        "SunshineConfigurator.Configure",
+    )
+    compact_configure = re.sub(r"\s+", " ", configure)
+    _require(
+        'settings.HostMode == "sunshine" && settings.IntegrateAllSunshineApps' in
+        compact_configure and
+        "useNativeDisplayManagement ? Array.Empty<JsonObject>()" in compact_configure and
+        "RemoveOwnedHooks(app, ownership.Hooks);" in configure and
+        "RemoveLegacyGeneratedHooks(app);" in configure and
+        "ConfigureNativeDisplayManagement(" in configure,
+        "the default all-application path must remove legacy hooks and use native Sunshine display management",
+    )
+    native_configuration = _extract_braced_block(
+        sunshine,
+        r"private\s+static\s+void\s+ConfigureNativeDisplayManagement\s*\(",
+        "SunshineConfigurator.ConfigureNativeDisplayManagement",
+    )
+    native_contract = values["native_display"]
+    required_native_fragments = [
+        '"output_name", displayDeviceId',
+        '"dd_configuration_option", "ensure_only_display"',
         '"dd_resolution_option", "auto"',
         '"dd_refresh_rate_option", "manual"',
-        f'"dd_manual_refresh_rate", "{values["desktop_refresh"]}"',
+        f'"dd_manual_refresh_rate", "{native_contract["desktop_refresh_hz"]}"',
+        '"dd_mode_remapping", VitaDisplayModeRemapping',
         '"dd_hdr_option", forceSdr ? "auto" : "disabled"',
-        "%SUNSHINE_CLIENT_WIDTH%",
-        "%SUNSHINE_CLIENT_HEIGHT%",
-        "%SUNSHINE_CLIENT_FPS%",
-        values["shared_hook"]["command"],
+        f'"dd_config_revert_delay", "{native_contract["revert_delay_ms"]}"',
+        '"dd_config_revert_on_disconnect", "enabled"',
     ]
-    for fragment in required_sunshine_fragments:
-        _require(fragment in compact_sunshine,
-                 f"Sunshine host configuration is missing contracted fragment: {fragment}")
+    for fragment in required_native_fragments:
+        _require(
+            fragment in native_configuration,
+            f"native Sunshine display management is missing contracted fragment: {fragment}",
+        )
     default_settings_match = re.search(
         r"HostSettings\s+Default[^=]*=\s*new\((?P<body>.*?)\)\s*;",
         host_settings,
@@ -660,9 +712,10 @@ def _check_host(root: Path, values: dict[str, Any]) -> None:
         default_settings_match.group("body"),
     )
     _require(
+        compact_default_settings.startswith('"sunshine",') and
         compact_default_settings.endswith("CurrentFormatVersion,true,true") and
         "ForceSdr = true" in host_settings,
-        "fresh and upgraded host settings must default Vita sessions to SDR",
+        "fresh and upgraded host settings must default to native Sunshine all-app SDR sessions",
     )
     build_start = _extract_braced_block(
         sunshine,
@@ -670,9 +723,9 @@ def _check_host(root: Path, values: dict[str, Any]) -> None:
         "SunshineConfigurator.BuildStartCommand",
     )
     _require(
-        values["shared_hook"]["command"] in build_start and
+        values["legacy_hook"]["command"] in build_start and
         "session start --width" not in build_start,
-        "generated Sunshine hooks must use the tolerant hook-start boundary",
+        "legacy generated Sunshine hooks must use the tolerant hook-start boundary",
     )
 
     uint_constants = _parse_csharp_uint_constants(hotkeys)
@@ -695,14 +748,52 @@ def _check_host(root: Path, values: dict[str, Any]) -> None:
         for action in reversed(values["actions"])
     ]
     _require(sorted(required_registrations) == sorted(expected_registrations),
-             f"host required hotkeys must be only F11/F12: {required_registrations}")
+             f"host required hotkeys must be only F11 recovery: {required_registrations}")
 
     optional_keys = re.findall(
         r"RegisterOptionalModeHotkey\(\s*\w+\s*,\s*modifiers\s*,\s*(VkF\d+)",
         hotkeys,
     )
     _require(optional_keys == ["VkF8", "VkF9", "VkF10"],
-             f"legacy host mode hotkeys drifted: {optional_keys}")
+              f"legacy host mode hotkeys drifted: {optional_keys}")
+    compact_hotkeys = re.sub(r"\s+", " ", hotkeys)
+    _require(
+        "internal static bool LegacyModeHotkeysRequired(HostSettings settings)" in
+        compact_hotkeys and
+        "!string.Equals(settings.HostMode, \"sunshine\", StringComparison.OrdinalIgnoreCase) || "
+        "!settings.IntegrateAllSunshineApps;" in compact_hotkeys,
+        "host legacy-mode hotkey policy must be the inverse of native Sunshine all-app integration",
+    )
+    readiness = _extract_braced_block(
+        hotkeys,
+        r"internal\s+static\s+IReadOnlyList<HostModeHotkeyStatus>\s+"
+        r"GetModeHotkeyReadiness\s*\(",
+        "HostRecoveryAgentManager.GetModeHotkeyReadiness",
+    )
+    _require(
+        "!LegacyModeHotkeysRequired(HostSettings.Load())" in readiness and
+        "return Array.Empty<HostModeHotkeyStatus>();" in readiness,
+        "native/default host readiness must not require legacy F8-F10 shortcuts",
+    )
+    constructor = _extract_braced_block(
+        hotkeys,
+        r"internal\s+HostRecoveryHotkeyWindow\s*\(",
+        "HostRecoveryHotkeyWindow constructor",
+    )
+    registration_gate = (
+        "if (HostRecoveryAgentManager.LegacyModeHotkeysRequired(HostSettings.Load()))"
+    )
+    _require(
+        registration_gate in constructor and
+        constructor.find(registration_gate) < constructor.find("RegisterOptionalModeHotkey("),
+        "the host must register F8-F10 only inside the explicit legacy fallback gate",
+    )
+    _require(
+        "public bool ModeHotkeysReady =>" in program and
+        "HostRecoveryAgentManager.LegacyModeHotkeysRequired(" in program and
+        ": ModeHotkeys.Count == 0;" in program,
+        "host diagnostics must accept an empty legacy-hotkey list on the native/default path",
+    )
     _require(
         "var modifiers = ModAlt | ModControl | ModShift | ModNoRepeat;" in hotkeys,
         "host companion chord must remain Control+Alt+Shift with no-repeat",

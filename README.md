@@ -15,20 +15,20 @@ You need:
 - a 64-bit Intel or AMD PC running Windows 10 build 19041 or newer, or
   Windows 11; and
 - the Windows installer and VPK from the **same** entry on the
-  [Releases page](https://github.com/alex4580/vita-moonlight/releases).
+  [Releases page](../../releases).
 
 Save your work before setup. The display may briefly blink while Windows
 checks the virtual display.
 
 Publisher and data-handling details are in the
-[Code signing policy](https://github.com/alex4580/vita-moonlight/blob/vita/docs/CODE_SIGNING_POLICY.md)
-and [Privacy policy](https://github.com/alex4580/vita-moonlight/blob/vita/PRIVACY.md).
+[Code signing policy](docs/CODE_SIGNING_POLICY.md)
+and [Privacy policy](PRIVACY.md).
 For Windows releases whose Authenticode signatures identify SignPath
 Foundation: **Free code signing provided by SignPath.io, certificate by
 SignPath Foundation.** Unsigned previews, if any, are labeled explicitly and
 are not covered by that statement.
 
-The exact `v0.14.7-beta.1` preview is built and published by GitHub Actions
+The exact `v0.14.8-beta.1` preview is built and published by GitHub Actions
 without Authenticode. Windows will show **Unknown publisher** and may display a
 Microsoft Defender SmartScreen warning. Check the warning on the release page,
 verify `SHA256SUMS` and the GitHub provenance attestations, and confirm
@@ -38,7 +38,7 @@ Every other beta, release-candidate, and stable tag remains signing-required.
 ## Install for the first time
 
 1. On the PC, run `Vita-Moonlight-Host-Setup-win-x64.exe` and accept the
-   recommended components. For the explicitly unsigned `v0.14.7-beta.1`
+   recommended components. For the explicitly unsigned `v0.14.8-beta.1`
    preview, verify its checksum and provenance first; if SmartScreen appears, choose
    **More info > Run anyway** only for the verified GitHub download.
 2. Restart Windows if setup asks you to. Open **Vita Moonlight Host** from the
@@ -63,8 +63,10 @@ Vita-sized display. It should return automatically after disconnecting.
 
 ## Use it
 
-- Open the in-stream menu: hold **START**, then press **L + R**.
-- Open the Vita keyboard: **START + D-pad Left**, or choose
+- Open the in-stream menu: hold **START**, then press **L + R** within one
+  second. The shortcut stays on the Vita and is not sent to the PC.
+- Open the Vita keyboard: hold **START**, then press **D-pad Left** within one
+  second, or choose
   **Open on-screen keyboard** from the in-stream menu.
 - End normally: choose **Disconnect stream** from the menu.
 - Return to LiveArea if the stream is stuck: double-press **PS**.
@@ -74,12 +76,13 @@ Vita-sized display. It should return automatically after disconnecting.
   panel as Administrator and choose **Pause Vita host features**. Disconnect
   the Vita first. This restores
   the physical desktop and turns off Vita Moonlight's background safeguards
-  and managed virtual-display device. Shared Sunshine/Apollo remains installed
-  and reachable, but a client pinned to the disabled Vita virtual display may
+  and managed virtual-display device. Sunshine and any pre-existing Apollo
+  installation remain installed and reachable; this beta configures Sunshine
+  only. A client pinned to the disabled Vita virtual display may
   need Vita host features enabled again or its host output changed to a
   physical display. Pairing, settings, and installed shared components are
   kept. Choose
-  **Enable Vita host features** before the next Vita session. Sunshine/Apollo
+  **Enable Vita host features** before the next Vita session. Streaming servers
   remain reachable while paused, so Pause is not a network-access block.
   A complete Pause removes the rescue agent, so **Ctrl + Alt + Shift + F11** is
   not registered again until Vita host features are enabled.
@@ -140,11 +143,16 @@ do not delete a parent storage directory merely to remove a log.
 
 | Problem | What to do |
 |---|---|
+| A PC disappeared after pairing failed or was cancelled | Return to the main screen and look under **Saved computers**. Select the entry marked **Pairing required** and retry. A successful pairing must appear there immediately; if an older build is installed, fully close and reopen Vita Moonlight once, then install the current VPK. |
 | Physical display did not return | While Vita host features are enabled, press **Ctrl + Alt + Shift + F11** on the PC keyboard. During a complete Pause the shortcut is intentionally unavailable; if Windows is visible, reopen the control panel as Administrator and use **Display & recovery > Restore physical display now**. |
 | Vita shows the physical monitor, 800x600, or a washed-out image | Open the control panel as Administrator, run **Set up or repair this PC**, then **Check readiness**. Confirm every-application switching and Force SDR are enabled. |
 | Sunshine says ViGEmBus is missing | Run **Diagnostics & support > Run full health check**, use **Repair controller support**, and restart Sunshine. |
-| A Windows game is black but the Vita menu still opens | Use **Close Windows game** from the in-stream menu. Use **End Sunshine app** or **Recover host display** only if needed. |
+| A Windows game is black but the Vita menu still opens | Use **Open Windows Task Manager** from the in-stream menu, select the bad process, and end it deliberately. **End Sunshine app** stops Sunshine's active app; use **Recover host display** only for a display problem. |
 | Motion is blocky or the stream stalls | Try the **Reliable** preset. Start a support log only for one short reproduction. |
+
+**Forget on this Vita** removes the local saved computer and its pinned
+credentials. It does not delete Sunshine's authorized-client entry; revoke
+that separately in Sunshine only when you intend to remove the Vita there too.
 
 For detailed Windows recovery and advanced setup, see the
 [Windows host guide](host/README.md).

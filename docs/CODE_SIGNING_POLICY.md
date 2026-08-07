@@ -1,7 +1,7 @@
 # Code signing policy
 
 This policy governs public Windows releases built from
-<https://github.com/alex4580/vita-moonlight>.
+[this repository](..).
 
 For Windows artifacts that are accepted into and signed through the SignPath
 Foundation open-source program:
@@ -13,7 +13,7 @@ signature whose signer is **SignPath Foundation**. It does not claim that an
 unsigned build, a developer build, or a release made before SignPath
 Foundation enrollment is covered by that program.
 
-The exact `v0.14.7-beta.1` release is a deliberately unsigned beta preview and
+The exact `v0.14.8-beta.1` release is a deliberately unsigned beta preview and
 is not covered by SignPath Foundation. Its release page, checksum manifest,
 GitHub provenance attestations, and `windows-signing-status.json` identify that
 status. The exception is bound to that repository, tag, and project version;
@@ -42,7 +42,7 @@ and hashes are documented in
 [Third-party notices](../host/THIRD_PARTY_NOTICES.md).
 
 The repository publishes its project source under the GPL-3.0 license in the
-[public LICENSE](https://github.com/alex4580/vita-moonlight/blob/vita/LICENSE);
+[public LICENSE](../LICENSE);
 no alternative project license is included. Bundled open-source dependencies
 keep their upstream licenses. The Microsoft Visual C++ Redistributable is
 included only as the virtual-display driver's required system runtime, keeps
@@ -122,7 +122,7 @@ dependencies.
 The project will assist SignPath Foundation with investigation and root-cause
 analysis of any credible signing-policy complaint. Report a non-sensitive
 project concern through
-[GitHub issues](https://github.com/alex4580/vita-moonlight/issues). Report a
+[GitHub issues](../../../issues). Report a
 suspected violation involving a SignPath Foundation signature to
 `support@signpath.io` as described in the
 [SignPath Foundation conditions](https://signpath.org/terms.html).

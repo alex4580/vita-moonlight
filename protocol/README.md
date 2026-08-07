@@ -10,16 +10,25 @@ sent in the ordinary GameStream launch request. Sunshine keeps the Windows
 virtual desktop at the driver-safe refresh rate in the contract while the
 encoder may deliver any listed stream frame rate.
 
-The host's shared Sunshine prep hook applies that normalization only when the
-request matches the Vita contract. Requests from other Moonlight clients are
-a successful no-op in the companion and remain under Sunshine's control; the
-companion must not reject, coerce, or break those sessions.
+The supported host path uses Sunshine's native all-application display
+lifecycle: the managed virtual display is selected by stable device ID,
+Sunshine applies the requested Vita resolution at a driver-safe 60 Hz, forces
+an SDR session, and restores the prior layout after disconnect. No prep hook
+or extra network service sits in the streaming path.
 
-The companion-specific F11 and F12 actions are fixed, parameter-free commands
-carried inside the already paired and encrypted Moonlight input session. They
-do not acknowledge success. F8-F10 are retained only as legacy,
-unacknowledged mode controls for the current fallback path; they are not a
-second authoritative display protocol.
+`session hook-start` remains only for the explicit legacy single-application
+fallback. There it normalizes recognized Vita modes and returns a successful
+no-op for unrelated Moonlight requests; it must never coerce or reject those
+sessions.
+
+The companion-specific F11 recovery action is a fixed, parameter-free command
+carried inside the already paired and encrypted Moonlight input session. It
+does not acknowledge success. Ending an application uses GameStream's
+authenticated quit-app request and is not a foreground-window hotkey. F8-F10 are retained only as legacy,
+unacknowledged mode controls for older clients on the explicit fallback path;
+the current Vita client never sends them and the host registers them only when
+that fallback is selected. They are not a second authoritative display
+protocol.
 
 Run this before either package is built:
 

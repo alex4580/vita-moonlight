@@ -47,6 +47,7 @@
 #include "../src/debug.h"
 
 #define UNIQUE_FILE_NAME "uniqueid.dat"
+#define PAIRING_PENDING_FILE_NAME "pairing-pending.dat"
 #define P12_FILE_NAME "client.p12"
 #define LEGACY_SHARED_UNIQUE_ID "0123456789ABCDEF"
 
@@ -71,6 +72,9 @@ const char* gs_error;
 
 #define PATH_MAX 1024
 #define SERVERINFO_NUMERIC_TEXT_MAX 64u
+
+static char unique_id_path[PATH_MAX];
+static char pairing_pending_path[PATH_MAX];
 
 static void bytes_to_hex(unsigned char *in, char *out, size_t len);
 
@@ -317,6 +321,15 @@ static bool build_unique_id_path(
   return written > 0 && (size_t)written < pathSize;
 }
 
+static bool build_pairing_pending_path(
+    char *path, size_t pathSize, const char *keyDirectory,
+    const char *suffix) {
+  int written = snprintf(
+      path, pathSize, "%s/%s%s", keyDirectory, PAIRING_PENDING_FILE_NAME,
+      suffix == NULL ? "" : suffix);
+  return written > 0 && (size_t)written < pathSize;
+}
+
 static bool read_unique_id_file(
     const char *path, char value[UNIQUEID_CHARS + 1]) {
   FILE *file = fopen(path, "rb");
@@ -378,23 +391,72 @@ static int persist_unique_id_atomic(
   return GS_OK;
 }
 
+typedef enum PairingPendingState {
+  PAIRING_PENDING_NONE,
+  PAIRING_PENDING_VALID,
+  PAIRING_PENDING_INVALID
+} PairingPendingState;
+
+static bool pairing_pending_sibling_path(
+    char *path, size_t pathSize, const char *suffix) {
+  if (pairing_pending_path[0] == '\0') return false;
+  int written = snprintf(
+      path, pathSize, "%s%s", pairing_pending_path,
+      suffix == NULL ? "" : suffix);
+  return written > 0 && (size_t)written < pathSize;
+}
+
+static bool pairing_pending_artifact_exists(const char *path) {
+  struct stat status;
+  return path != NULL && stat(path, &status) == 0;
+}
+
+static void clear_pairing_pending_files(void) {
+  static const char *suffixes[] = {NULL, ".bak", ".tmp"};
+  char path[PATH_MAX];
+  for (size_t i = 0; i < sizeof(suffixes) / sizeof(suffixes[0]); ++i) {
+    if (pairing_pending_sibling_path(
+            path, sizeof(path), suffixes[i])) {
+      remove(path);
+    }
+  }
+}
+
+static PairingPendingState load_pairing_pending_id(
+    char value[UNIQUEID_CHARS + 1]) {
+  static const char *suffixes[] = {NULL, ".bak", ".tmp"};
+  char path[PATH_MAX];
+  bool foundArtifact = false;
+  for (size_t i = 0; i < sizeof(suffixes) / sizeof(suffixes[0]); ++i) {
+    if (!pairing_pending_sibling_path(
+            path, sizeof(path), suffixes[i])) {
+      continue;
+    }
+    if (pairing_pending_artifact_exists(path)) foundArtifact = true;
+    if (read_unique_id_file(path, value)) return PAIRING_PENDING_VALID;
+  }
+  return foundArtifact ? PAIRING_PENDING_INVALID : PAIRING_PENDING_NONE;
+}
+
 static int load_unique_id(
     const char* keyDirectory, bool hasAuthenticatedServerPin) {
-  char uniqueFilePath[PATH_MAX];
   char backupPath[PATH_MAX];
   if (!build_unique_id_path(
-          uniqueFilePath, sizeof(uniqueFilePath), keyDirectory, NULL) ||
+          unique_id_path, sizeof(unique_id_path), keyDirectory, NULL) ||
       !build_unique_id_path(
-          backupPath, sizeof(backupPath), keyDirectory, ".bak")) {
+          backupPath, sizeof(backupPath), keyDirectory, ".bak") ||
+      !build_pairing_pending_path(
+          pairing_pending_path, sizeof(pairing_pending_path), keyDirectory,
+          NULL)) {
     gs_error = "The Vita pairing identity path is too long";
     return GS_FAILED;
   }
 
-  bool valid = read_unique_id_file(uniqueFilePath, unique_id);
+  bool valid = read_unique_id_file(unique_id_path, unique_id);
   if (!valid && read_unique_id_file(backupPath, unique_id)) {
     /* Recover the last complete identity before considering any migration. */
-    remove(uniqueFilePath);
-    if (rename(backupPath, uniqueFilePath) != 0) {
+    remove(unique_id_path);
+    if (rename(backupPath, unique_id_path) != 0) {
       gs_error = "Could not recover the Vita pairing identity";
       return GS_IO_ERROR;
     }
@@ -420,7 +482,7 @@ static int load_unique_id(
   char generatedId[UNIQUEID_CHARS + 1];
   bytes_to_hex(randomId, generatedId, sizeof(randomId));
 
-  int ret = persist_unique_id_atomic(uniqueFilePath, generatedId);
+  int ret = persist_unique_id_atomic(unique_id_path, generatedId);
   if (ret != GS_OK) return ret;
   memcpy(unique_id, generatedId, sizeof(unique_id));
   return GS_OK;
@@ -700,10 +762,10 @@ static int load_server_status(PSERVER_DATA server) {
 
   if (ret == GS_OK && !server->allowUnsupportedVersion) {
     if (server->serverMajorVersion > MAX_SUPPORTED_GFE_VERSION) {
-      gs_error = "Update Vita Moonlight or use a supported Sunshine/Apollo host version and try again";
+      gs_error = "Update Vita Moonlight or use a supported Sunshine host version and try again";
       ret = GS_UNSUPPORTED_VERSION;
     } else if (server->serverMajorVersion < MIN_SUPPORTED_GFE_VERSION) {
-      gs_error = "Vita Moonlight requires a newer supported Sunshine/Apollo host version.";
+      gs_error = "Vita Moonlight requires a newer supported Sunshine host version.";
       ret = GS_UNSUPPORTED_VERSION;
     }
   }
@@ -899,6 +961,34 @@ int gs_unpair(PSERVER_DATA server) {
   return ret;
 }
 
+static int abort_pairing_session(
+    PSERVER_DATA server, const char pendingId[UNIQUEID_CHARS + 1],
+    char *url, size_t urlSize, PHTTP_DATA data) {
+  uuid_t abortUuid;
+  char abortUuidString[UUID_STRLEN];
+  uuid_generate_random(abortUuid);
+  uuid_unparse(abortUuid, abortUuidString);
+  int written = snprintf(
+      url, urlSize,
+      "http://%s:%u/pair?uniqueid=%s&uuid=%s&devicename=VitaMoonlight"
+      "&updateState=1&clientpairingsecret=00",
+      server->serverInfo.address, server->httpPort, pendingId,
+      abortUuidString);
+  if (written <= 0 || (size_t)written >= urlSize) {
+    gs_error = "The Sunshine pairing recovery request is too long";
+    return GS_INVALID;
+  }
+
+  /* Sunshine intentionally reports an XML pairing status of 400 for the
+   * too-short/out-of-order secret, while removing this exact pending session.
+   * Transport completion is authoritative; do not parse that status. An
+   * already-removed ID is equally safe and cannot remove an authorized cert. */
+  int ret = http_request_with_timeout(
+      url, data, HTTP_TIMEOUT_PAIRING_ABORT_SECONDS);
+  if (ret == GS_OK) clear_pairing_pending_files();
+  return ret;
+}
+
 int gs_pair(PSERVER_DATA server, char* pin) {
   const size_t urlSize = 16384;
   int ret = GS_OK;
@@ -915,7 +1005,9 @@ int gs_pair(PSERVER_DATA server, char* pin) {
   uuid_t uuid;
   char uuid_str[UUID_STRLEN];
   bool ephemeralPinInstalled = false;
-  bool pairingStarted = false;
+  bool pairingSessionOpen = false;
+  unsigned char pairingIdBytes[UNIQUEID_BYTES];
+  char pairingUniqueId[UNIQUEID_CHARS + 1];
 
   if (server == NULL || pin == NULL || strlen(pin) != 4) {
     gs_error = "Pairing requires a four-digit PIN";
@@ -931,13 +1023,55 @@ int gs_pair(PSERVER_DATA server, char* pin) {
     gs_error = "Already paired";
     return GS_WRONG_STATE;
   }
-
   url = malloc(urlSize);
   data = http_create_data();
   if (url == NULL || data == NULL) {
     ret = GS_OUT_OF_MEMORY;
     goto cleanup;
   }
+
+  /* Sunshine's PIN UI currently applies a PIN to the first pending session.
+   * Journal each attempt before opening it, and clear an exact abandoned
+   * session before creating another. This covers wrong PINs, timeouts, and an
+   * application kill during the held getservercert request. */
+  char abandonedPairingId[UNIQUEID_CHARS + 1];
+  PairingPendingState pendingState =
+      load_pairing_pending_id(abandonedPairingId);
+  if (pendingState == PAIRING_PENDING_INVALID) {
+    /* The unknown ID may still name a live Sunshine session. Keep the damaged
+     * evidence fail-closed so an immediate retry cannot create another
+     * session and let the stale one consume its PIN. Forgetting the saved PC
+     * after a Sunshine restart removes this app-owned directory safely. */
+    gs_error = "Pairing recovery data was damaged. Restart Sunshine, forget this PC on the Vita, then add it again";
+    ret = GS_IO_ERROR;
+    goto cleanup;
+  }
+  if (pendingState == PAIRING_PENDING_VALID &&
+      abort_pairing_session(
+          server, abandonedPairingId, url, urlSize, data) != GS_OK) {
+    gs_error = "Could not clear the previous Sunshine pairing attempt. Restart Sunshine, then try again";
+    ret = GS_FAILED;
+    goto cleanup;
+  }
+
+  if (secure_random(
+          pairingIdBytes, sizeof(pairingIdBytes), "pairing identity") !=
+      GS_OK) {
+    ret = GS_FAILED;
+    goto cleanup;
+  }
+  bytes_to_hex(
+      pairingIdBytes, pairingUniqueId, sizeof(pairingIdBytes));
+  if (pairing_pending_path[0] == '\0' ||
+      (ret = persist_unique_id_atomic(
+           pairing_pending_path, pairingUniqueId)) != GS_OK) {
+    if (pairing_pending_path[0] == '\0') {
+      gs_error = "The Sunshine pairing recovery path is unavailable";
+      ret = GS_IO_ERROR;
+    }
+    goto cleanup;
+  }
+  pairingSessionOpen = true;
 
   unsigned char salt_data[16];
   char salt_hex[SIZEOF_AS_HEX_STR(salt_data)];
@@ -949,8 +1083,7 @@ int gs_pair(PSERVER_DATA server, char* pin) {
 
   uuid_generate_random(uuid);
   uuid_unparse(uuid, uuid_str);
-  snprintf(url, urlSize, "http://%s:%u/pair?uniqueid=%s&uuid=%s&devicename=VitaMoonlight&updateState=1&phrase=getservercert&salt=%s&clientcert=%s", server->serverInfo.address, server->httpPort, unique_id, uuid_str, salt_hex, cert_hex);
-  pairingStarted = true;
+  snprintf(url, urlSize, "http://%s:%u/pair?uniqueid=%s&uuid=%s&devicename=VitaMoonlight&updateState=1&phrase=getservercert&salt=%s&clientcert=%s", server->serverInfo.address, server->httpPort, pairingUniqueId, uuid_str, salt_hex, cert_hex);
   if ((ret = http_request_with_timeout(
           url, data, HTTP_TIMEOUT_PAIRING_USER_SECONDS)) != GS_OK) {
     goto cleanup;
@@ -1009,7 +1142,7 @@ int gs_pair(PSERVER_DATA server, char* pin) {
 
   uuid_generate_random(uuid);
   uuid_unparse(uuid, uuid_str);
-  snprintf(url, urlSize, "http://%s:%u/pair?uniqueid=%s&uuid=%s&devicename=VitaMoonlight&updateState=1&clientchallenge=%s", server->serverInfo.address, server->httpPort, unique_id, uuid_str, challenge_hex);
+  snprintf(url, urlSize, "http://%s:%u/pair?uniqueid=%s&uuid=%s&devicename=VitaMoonlight&updateState=1&clientchallenge=%s", server->serverInfo.address, server->httpPort, pairingUniqueId, uuid_str, challenge_hex);
   if ((ret = http_request(url, data)) != GS_OK) goto cleanup;
   free(result);
   result = NULL;
@@ -1085,7 +1218,7 @@ int gs_pair(PSERVER_DATA server, char* pin) {
 
   uuid_generate_random(uuid);
   uuid_unparse(uuid, uuid_str);
-  snprintf(url, urlSize, "http://%s:%u/pair?uniqueid=%s&uuid=%s&devicename=VitaMoonlight&updateState=1&serverchallengeresp=%s", server->serverInfo.address, server->httpPort, unique_id, uuid_str, challengeResponseHex);
+  snprintf(url, urlSize, "http://%s:%u/pair?uniqueid=%s&uuid=%s&devicename=VitaMoonlight&updateState=1&serverchallengeresp=%s", server->serverInfo.address, server->httpPort, pairingUniqueId, uuid_str, challengeResponseHex);
   if ((ret = http_request(url, data)) != GS_OK) goto cleanup;
   free(result);
   result = NULL;
@@ -1168,8 +1301,12 @@ int gs_pair(PSERVER_DATA server, char* pin) {
 
   uuid_generate_random(uuid);
   uuid_unparse(uuid, uuid_str);
-  snprintf(url, urlSize, "http://%s:%u/pair?uniqueid=%s&uuid=%s&devicename=VitaMoonlight&updateState=1&clientpairingsecret=%s", server->serverInfo.address, server->httpPort, unique_id, uuid_str, clientPairingSecretHex);
+  snprintf(url, urlSize, "http://%s:%u/pair?uniqueid=%s&uuid=%s&devicename=VitaMoonlight&updateState=1&clientpairingsecret=%s", server->serverInfo.address, server->httpPort, pairingUniqueId, uuid_str, clientPairingSecretHex);
   if ((ret = http_request(url, data)) != GS_OK) goto cleanup;
+  /* Sunshine removes the pending phase after processing clientpairingsecret,
+   * whether it accepts the proof or rejects it. */
+  pairingSessionOpen = false;
+  clear_pairing_pending_files();
   free(result);
   result = NULL;
   if ((ret = xml_status(data->memory, data->size)) != GS_OK) goto cleanup;
@@ -1182,7 +1319,7 @@ int gs_pair(PSERVER_DATA server, char* pin) {
 
   uuid_generate_random(uuid);
   uuid_unparse(uuid, uuid_str);
-  snprintf(url, urlSize, "https://%s:%u/pair?uniqueid=%s&uuid=%s&devicename=VitaMoonlight&updateState=1&phrase=pairchallenge", server->serverInfo.address, server->httpsPort, unique_id, uuid_str);
+  snprintf(url, urlSize, "https://%s:%u/pair?uniqueid=%s&uuid=%s&devicename=VitaMoonlight&updateState=1&phrase=pairchallenge", server->serverInfo.address, server->httpsPort, pairingUniqueId, uuid_str);
   if ((ret = http_request(url, data)) != GS_OK) goto cleanup;
   free(result);
   result = NULL;
@@ -1195,26 +1332,33 @@ int gs_pair(PSERVER_DATA server, char* pin) {
   }
 
   if ((ret = http_set_server_pin_from_pem(plaincert, true)) != GS_OK) goto cleanup;
+  if (unique_id_path[0] == '\0') {
+    gs_error = "The Vita pairing identity path is unavailable";
+    ret = GS_IO_ERROR;
+    goto cleanup;
+  }
+  if ((ret = persist_unique_id_atomic(
+          unique_id_path, pairingUniqueId)) != GS_OK) {
+    goto cleanup;
+  }
+  memcpy(unique_id, pairingUniqueId, sizeof(unique_id));
   server->paired = true;
   server->securePairingRequired = false;
 
-  // Refresh through pinned HTTPS so paired status, app state, and MAC are trusted.
-  int refreshRet = GS_FAILED;
-  for (int attempt = 0; attempt < 3; ++attempt) {
-    refreshRet = gs_refresh(server);
-    if (refreshRet == GS_OK) break;
-    sceKernelDelayThread(200 * 1000);
-  }
-  if (refreshRet != GS_OK) {
-    ret = refreshRet;
-    goto cleanup;
-  }
+  /* The final pinned pairchallenge commits the pairing in Sunshine. Metadata
+   * refresh is deliberately deferred to later requests: making a transient
+   * serverinfo failure transactional here reports a completed host pairing as
+   * failed and can strand the Vita's local saved-computer state. */
   ret = GS_OK;
+  gs_error = NULL;
 
 cleanup:
   if (ret != GS_OK) {
     const char *pairingError = gs_error;
-    if (pairingStarted) gs_unpair(server);
+    if (pairingSessionOpen) {
+      (void)abort_pairing_session(
+          server, pairingUniqueId, url, urlSize, data);
+    }
     if (ephemeralPinInstalled) http_reload_server_pin();
     gs_error = pairingError;
     server->paired = false;
@@ -1465,6 +1609,8 @@ void gs_cleanup(PSERVER_DATA server) {
   }
   http_cleanup();
   cleanup_client_credentials();
+  unique_id_path[0] = '\0';
+  pairing_pending_path[0] = '\0';
 }
 
 int gs_refresh(PSERVER_DATA server) {

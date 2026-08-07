@@ -60,7 +60,7 @@ both the setup EXE and portable ZIP.
 
 Branch and pull-request packages are deliberately unsigned developer builds.
 Tagged public releases fail unless release-signing credentials are configured,
-except for the exact, explicitly labeled `v0.14.7-beta.1` unsigned preview;
+except for the exact, explicitly labeled `v0.14.8-beta.1` unsigned preview;
 see [RELEASING.md](RELEASING.md).
 
 ## Vita client
@@ -70,6 +70,7 @@ project. With `VITASDK` set and its `bin` directory on `PATH`:
 
 ```sh
 cmake -S . -B build \
+  -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_TOOLCHAIN_FILE="$VITASDK/share/vita.toolchain.cmake"
 cmake --build build
 ```
@@ -78,8 +79,14 @@ The VPK is written under `build/`. `./makepsv` is the existing convenience
 wrapper for local VitaSDK builds.
 
 For reproducibility, `.github/workflows/cmake-psvita.yml` pins the VitaSDK
-archive, package assets, and their SHA-256 hashes. Use that workflow as the
-source of truth if a rolling local VitaSDK behaves differently.
+archive, while `tools/vitasdk-packages.lock.json` commits the exact package
+asset IDs, byte counts, update timestamps, and SHA-256 hashes used by the VPK.
+The package resolver refuses a mutable `master` release asset unless all of
+that metadata still matches the committed lock, downloads through the locked
+asset ID, and verifies the bytes again. Review upstream changes and update the
+lock intentionally when VitaSDK replaces those assets; never copy new hashes
+from a live release into a build job. Use that workflow and lock as the source
+of truth if a rolling local VitaSDK behaves differently.
 The parent repository also pins `moonlight-common-c` to
 `07c32c80f98bb0d7214c577bd080eea3ce64a856`; initialize submodules recursively
 and do not replace that revision without a Vita hardware regression pass. The
@@ -91,18 +98,33 @@ Before building, the Vita workflow runs the same source-contract checks that
 fork maintainers can run locally:
 
 ```sh
+python tools/check-version-consistency.py
+python tools/check-release-contract.py
 python tools/check-host-client-contract.py
 python tools/check-vita-media-contract.py
 python tools/check-vita-security-contract.py
+python tools/check-vita-device-contract.py
+python tools/check-vita-host-scan-contract.py
+python tools/check-vita-client-resilience.py
+python tools/check-xml-hardening.py
 python tools/check-moonlight-common-backport.py
+python tools/summarize-vita-log.py --self-test
+python tools/fetch-vitasdk-packages.py \
+  --lock tools/vitasdk-packages.lock.json --self-test
 ```
+
+The Windows workflow additionally runs
+`python tools/check-windows-upgrade-contract.py`, compiles on its oldest and
+newest supported GitHub runner images, and executes the host self-test. Every
+`tools/check-*.py` contract is referenced by at least one required workflow;
+`check-release-contract.py` enforces that coverage.
 
 ## Version and generated metadata
 
 Do not edit version fields independently. To begin a new release:
 
 ```powershell
-python release.py 0.14.7
+python release.py 0.14.8
 python tools/check-version-consistency.py
 ```
 

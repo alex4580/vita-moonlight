@@ -8,3 +8,4 @@ bool ui_connect_connected();
 void ui_connect_resume();
 void ui_connect_manual();
 void ui_connect_paired_device(device_info_t *info);
+bool check_connection(const char *name, const char *addr, uint16_t port);

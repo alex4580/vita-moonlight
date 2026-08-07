@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Summarize Vita Moonlight structured support logs without exposing raw data.
+"""Summarize Vita Moonlight support logs without exposing raw data.
 
 The Vita logger writes one key=value record per line using schema
 ``vita-support-v1``. This tool deliberately retains only fields that the
-schema defines as non-identifying diagnostics. Raw legacy messages,
-unrecognized fields, and malformed input are counted but never reproduced.
+schema defines as non-identifying diagnostics. Older releases wrote a fixed
+``[PERF]`` record plus free-form Moonlight messages. Exact legacy performance
+and recovery records are reduced to allowlisted numeric aggregates; raw text,
+input events, unrecognized fields, and malformed input are never reproduced.
 """
 
 from __future__ import annotations
@@ -50,6 +52,59 @@ GYRO_SCALAR_RE = re.compile(r"^[0-5](?:\.\d{1,2})?$")
 FALLBACK_PAIR_RE = re.compile(
     r"(?:^|\s)([A-Za-z][A-Za-z0-9_.-]{0,63})=([^\s]+)"
 )
+
+LEGACY_UINT_MAX = (1 << 32) - 1
+LEGACY_TIMESTAMP_PREFIX_RE = re.compile(
+    r"^\d{8} \d{2}:\d{2}:\d{2}\.\d{6} \s*"
+)
+LEGACY_INPUT_TAG_RE = re.compile(
+    r"^\[(?:TOUCHSCREEN|DS4_TOUCHPAD|ABS_MOUSE|IME MOONLIGHT|VITA\.C)\]"
+    r"(?:\s|$)",
+    re.IGNORECASE,
+)
+LEGACY_PERF_RE = re.compile(
+    r"""
+    \[PERF\]\s+
+    fps=(?P<rendered_fps>\d{1,10})/(?P<target_fps>\d{1,10})\s+
+    video=(?P<video_kbps>\d{1,10})\s+kbps\s+
+    configured=(?P<configured_kbps>\d{1,10})\s+kbps\s+
+    frames=(?P<decoded_frames>\d{1,10})\s+
+    dropped=(?P<dropped_frames>\d{1,10})\s+
+    decode_avg=(?P<decode_avg_us>\d{1,10})\s+us\s+
+    decode_max=(?P<decode_max_us>\d{1,10})\s+us\s+
+    network=(?P<network_state>Good|Degraded|Waiting)\s+
+    rtt=(?P<rtt_ms>\d{1,10})\s+ms\s+
+    variance=(?P<rtt_variance_ms>\d{1,10})\s+ms\s+
+    fec_recovered=(?P<fec_recovered>\d{1,10})\s+
+    fec_failed=(?P<fec_failed>\d{1,10})\s+
+    out_of_sequence=(?P<out_of_sequence>\d{1,10})
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+LEGACY_VIDEO_DROP_RE = re.compile(
+    r"Network dropped (?P<count>\d{1,10}) frames? "
+    r"\(frames? \d{1,10}(?: to \d{1,10})?\)"
+)
+LEGACY_VIDEO_UNRECOVERABLE_RE = re.compile(
+    r"Unrecoverable frame \d{1,10}(?: \(block \d{1,10} of \d{1,10}\))?: "
+    r"(?:\d{1,10}\+\d{1,10}=\d{1,10} received < \d{1,10} needed|"
+    r"lost FEC blocks \d{1,10} to \d{1,10})"
+)
+LEGACY_VIDEO_RECOVERED_RE = re.compile(
+    r"Recovered (?P<count>\d{1,10}) video data shards from frame \d{1,10}"
+)
+LEGACY_AUDIO_GAP_RE = re.compile(
+    r"Network dropped audio data \(expected \d{1,10}, but received \d{1,10}\)"
+)
+LEGACY_AUDIO_RECOVERED_RE = re.compile(
+    r"Recovered (?P<count>\d{1,10}) audio data shards from block \d{1,10}"
+)
+LEGACY_AUDIO_UNRECOVERABLE_RE = re.compile(
+    r"Unable to recover audio data block \d{1,10} to \d{1,10} "
+    r"\(\d{1,10}\+\d{1,10}=\d{1,10} received < \d{1,10} needed\)"
+)
+LEGACY_SIGNED_CODE_RE = r"-?\d{1,10}"
 
 # Values from any field absent from this table are intentionally discarded.
 # This protects summaries when a malformed or future producer unexpectedly
@@ -351,6 +406,7 @@ ENUM_FIELDS: Mapping[str, FrozenSet[str]] = {
         (
             "close_foreground_game",
             "connect",
+            "open_task_manager",
             "recover_display",
             "reconnect",
             "stop_stream_app",
@@ -470,7 +526,12 @@ def _tokenize(line: str) -> Tuple[Mapping[str, str], int, bool]:
 def parse_line(line: str) -> ParsedLine:
     if len(line) > MAX_RECORD_LENGTH:
         return ParsedLine("oversized")
-    pairs, malformed_tokens, _ = _tokenize(line.rstrip("\r\n"))
+    stripped = line.rstrip("\r\n")
+    # Legacy logs can contain tens of thousands of input samples. Avoid the
+    # comparatively expensive shell tokenizer unless a schema is present.
+    if "schema=" not in stripped:
+        return ParsedLine("legacy_or_unstructured")
+    pairs, malformed_tokens, _ = _tokenize(stripped)
     schema = pairs.get("schema")
     if schema is None:
         return ParsedLine("legacy_or_unstructured")
@@ -535,6 +596,352 @@ def _integer(fields: Mapping[str, str], key: str) -> Optional[int]:
 def _bounded_append(items: List[Mapping[str, object]], value: Mapping[str, object], limit: int = 25) -> None:
     if len(items) < limit:
         items.append(value)
+
+
+class LegacyBuilder:
+    """Reduce exact old-format messages to fixed counters and numeric stats."""
+
+    PERF_METRICS = (
+        "rendered_fps",
+        "target_fps",
+        "video_kbps",
+        "configured_kbps",
+        "decoded_frames",
+        "dropped_frames",
+        "decode_avg_us",
+        "decode_max_us",
+        "rtt_ms",
+        "rtt_variance_ms",
+        "fec_recovered",
+        "fec_failed",
+        "out_of_sequence",
+    )
+
+    def __init__(self) -> None:
+        self.total_line_count = 0
+        self.recognized_line_count = 0
+        self.suppressed_input_line_count = 0
+        self.performance_sample_count = 0
+        self.recovery_line_count = 0
+        self.network_states: collections.Counter[str] = collections.Counter()
+        self.metric_counts: collections.Counter[str] = collections.Counter()
+        self.metric_sums: collections.Counter[str] = collections.Counter()
+        self.metric_minimums: MutableMapping[str, int] = {}
+        self.metric_maximums: MutableMapping[str, int] = {}
+        self.latest_metrics: MutableMapping[str, int] = {}
+        self.decode_weighted_sum = 0
+        self.decode_weight = 0
+        self.video: collections.Counter[str] = collections.Counter()
+        self.audio: collections.Counter[str] = collections.Counter()
+        self.transport: collections.Counter[str] = collections.Counter()
+
+    @staticmethod
+    def _uint(value: str) -> Optional[int]:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if 0 <= parsed <= LEGACY_UINT_MAX else None
+
+    def _add_metric(self, key: str, value: int) -> None:
+        self.metric_counts[key] += 1
+        self.metric_sums[key] += value
+        self.metric_minimums[key] = min(
+            value, self.metric_minimums.get(key, value)
+        )
+        self.metric_maximums[key] = max(
+            value, self.metric_maximums.get(key, value)
+        )
+        self.latest_metrics[key] = value
+
+    def _add_performance(self, payload: str) -> bool:
+        matched = LEGACY_PERF_RE.fullmatch(payload)
+        if matched is None:
+            return False
+
+        values: MutableMapping[str, int] = {}
+        for key in self.PERF_METRICS:
+            value = self._uint(matched.group(key))
+            if value is None:
+                return False
+            values[key] = value
+
+        state = matched.group("network_state").lower()
+        if state not in ("good", "degraded", "waiting"):
+            return False
+
+        self.performance_sample_count += 1
+        self.network_states[state] += 1
+        for key, value in values.items():
+            self._add_metric(key, value)
+
+        decoded_frames = values["decoded_frames"]
+        if decoded_frames > 0:
+            self.decode_weighted_sum += values["decode_avg_us"] * decoded_frames
+            self.decode_weight += decoded_frames
+        return True
+
+    def _recovery_value(
+        self,
+        matched: Optional[re.Match[str]],
+    ) -> Optional[int]:
+        if matched is None:
+            return None
+        return self._uint(matched.group("count"))
+
+    def _add_recovery(self, payload: str) -> bool:
+        matched = LEGACY_VIDEO_DROP_RE.fullmatch(payload)
+        count = self._recovery_value(matched)
+        if count is not None:
+            self.video["network_drop_events"] += 1
+            self.video["reported_frames_dropped"] += count
+            return True
+
+        if LEGACY_VIDEO_UNRECOVERABLE_RE.fullmatch(payload):
+            self.video["unrecoverable_frame_events"] += 1
+            return True
+
+        matched = LEGACY_VIDEO_RECOVERED_RE.fullmatch(payload)
+        count = self._recovery_value(matched)
+        if count is not None:
+            self.video["fec_recovery_events"] += 1
+            self.video["fec_shards_recovered"] += count
+            return True
+
+        if payload == "Waiting for IDR frame":
+            self.video["waiting_for_idr_events"] += 1
+            return True
+        if payload == "IDR frame request sent":
+            self.video["idr_requests_sent"] += 1
+            return True
+        if payload == "Reached consecutive drop limit":
+            self.video["consecutive_drop_limit_events"] += 1
+            return True
+        if payload == "Requesting IDR frame on behalf of DR":
+            self.video["decoder_idr_requests"] += 1
+            return True
+        if re.fullmatch(
+            rf"Request IDR Frame: Transaction failed: {LEGACY_SIGNED_CODE_RE}",
+            payload,
+        ):
+            self.video["idr_request_failures"] += 1
+            return True
+        if re.fullmatch(
+            r"Sending RFI request for unrecoverable frame \d{1,10}", payload
+        ):
+            self.video["rfi_requests_sent"] += 1
+            return True
+        if re.fullmatch(
+            r"Sending speculative RFI request for predicted loss of frame \d{1,10}",
+            payload,
+        ):
+            self.video["speculative_rfi_requests_sent"] += 1
+            return True
+        if re.fullmatch(
+            r"Invalidate reference frame request sent "
+            r"\(\d{1,10} to \d{1,10}\)",
+            payload,
+        ):
+            self.video["reference_invalidation_requests"] += 1
+            return True
+        if re.fullmatch(
+            rf"Video Receive: recvUdpSocket\(\) failed: {LEGACY_SIGNED_CODE_RE}",
+            payload,
+        ):
+            self.video["receive_failures"] += 1
+            return True
+        if payload == "Video decode unit queue overflow":
+            self.video["decode_queue_overflows"] += 1
+            return True
+        if re.fullmatch(r"Depacketizer detected corrupt frame: \d{1,10}", payload):
+            self.video["corrupt_frame_events"] += 1
+            return True
+        if payload in (
+            "Terminating connection due to lack of video traffic",
+            "Terminating connection due to lack of a successful video frame",
+        ):
+            self.video["traffic_timeout_terminations"] += 1
+            return True
+
+        if LEGACY_AUDIO_GAP_RE.fullmatch(payload):
+            self.audio["network_gap_events"] += 1
+            return True
+
+        matched = LEGACY_AUDIO_RECOVERED_RE.fullmatch(payload)
+        count = self._recovery_value(matched)
+        if count is not None:
+            self.audio["fec_recovery_events"] += 1
+            self.audio["fec_shards_recovered"] += count
+            return True
+
+        if LEGACY_AUDIO_UNRECOVERABLE_RE.fullmatch(payload):
+            self.audio["unrecoverable_block_events"] += 1
+            return True
+        if payload == "Entering fast audio recovery mode after sequenced audio data":
+            self.audio["fast_recovery_entries"] += 1
+            return True
+        if re.fullmatch(
+            r"Leaving fast audio recovery mode after OOS audio data "
+            r"\(\d{1,10} < \d{1,10}\)",
+            payload,
+        ):
+            self.audio["fast_recovery_exits"] += 1
+            return True
+        if re.fullmatch(
+            r"Initial audio resync period: \d{1,10} milliseconds", payload
+        ):
+            self.audio["initial_resync_events"] += 1
+            return True
+        if re.fullmatch(
+            rf"Audio Receive: recvUdpSocket\(\) failed: {LEGACY_SIGNED_CODE_RE}",
+            payload,
+        ):
+            self.audio["receive_failures"] += 1
+            return True
+        if payload == "Audio packet queue overflow":
+            self.audio["queue_overflows"] += 1
+            return True
+
+        if payload == "Failed to send ENet control packet":
+            self.transport["control_send_failures"] += 1
+            return True
+        if re.fullmatch(
+            rf"Control stream connection failed: {LEGACY_SIGNED_CODE_RE}", payload
+        ):
+            self.transport["control_connection_failures"] += 1
+            return True
+        if re.fullmatch(
+            rf"Connection terminated with error: {LEGACY_SIGNED_CODE_RE}", payload
+        ):
+            self.transport["connection_termination_errors"] += 1
+            return True
+        return False
+
+    def add(self, line: str) -> None:
+        self.total_line_count += 1
+        payload = LEGACY_TIMESTAMP_PREFIX_RE.sub(
+            "", line.rstrip("\r\n"), count=1
+        )
+        if LEGACY_INPUT_TAG_RE.match(payload):
+            self.suppressed_input_line_count += 1
+            return
+        if self._add_performance(payload):
+            self.recognized_line_count += 1
+            return
+        if self._add_recovery(payload):
+            self.recognized_line_count += 1
+            self.recovery_line_count += 1
+
+    def _stat_fields(
+        self,
+        result: MutableMapping[str, object],
+        key: str,
+        prefix: str,
+        weighted_average: Optional[float] = None,
+    ) -> None:
+        count = self.metric_counts[key]
+        if count == 0:
+            return
+        average = (
+            weighted_average
+            if weighted_average is not None
+            else self.metric_sums[key] / count
+        )
+        result[f"{prefix}_average"] = round(average, 1)
+        result[f"{prefix}_minimum"] = self.metric_minimums[key]
+        result[f"{prefix}_maximum"] = self.metric_maximums[key]
+
+    def _performance(self) -> Mapping[str, object]:
+        if self.performance_sample_count == 0:
+            return {}
+        result: MutableMapping[str, object] = collections.OrderedDict()
+        result["sample_count"] = self.performance_sample_count
+        result["network_state_counts"] = dict(sorted(self.network_states.items()))
+        states = self.network_states
+        result["worst_network_state"] = (
+            "degraded"
+            if states["degraded"]
+            else "waiting"
+            if states["waiting"]
+            else "good"
+        )
+
+        for key, prefix in (
+            ("rendered_fps", "rendered_fps"),
+            ("target_fps", "target_fps"),
+            ("video_kbps", "video_kbps"),
+            ("configured_kbps", "configured_kbps"),
+            ("rtt_ms", "rtt_ms"),
+            ("rtt_variance_ms", "rtt_variance_ms"),
+        ):
+            self._stat_fields(result, key, prefix)
+
+        weighted_decode = None
+        if self.decode_weight > 0:
+            weighted_decode = self.decode_weighted_sum / self.decode_weight
+        self._stat_fields(
+            result,
+            "decode_avg_us",
+            "decode_avg_us",
+            weighted_average=weighted_decode,
+        )
+        if self.metric_counts["decode_max_us"]:
+            result["decode_max_us"] = self.metric_maximums["decode_max_us"]
+
+        result["decoded_frames"] = self.metric_sums["decoded_frames"]
+        result["dropped_frames"] = self.metric_sums["dropped_frames"]
+        result["fec_recovered"] = self.metric_sums["fec_recovered"]
+        result["fec_failed"] = self.metric_sums["fec_failed"]
+        result["out_of_sequence"] = self.metric_sums["out_of_sequence"]
+        result["latest_target_fps"] = self.latest_metrics["target_fps"]
+        result["latest_configured_kbps"] = self.latest_metrics[
+            "configured_kbps"
+        ]
+        return result
+
+    @staticmethod
+    def _nonzero(counter: collections.Counter[str]) -> Mapping[str, int]:
+        return {
+            key: value
+            for key, value in sorted(counter.items())
+            if value != 0
+        }
+
+    def has_summary(self) -> bool:
+        return bool(
+            self.recognized_line_count or self.suppressed_input_line_count
+        )
+
+    def finish(self) -> Mapping[str, object]:
+        result: MutableMapping[str, object] = collections.OrderedDict()
+        result["format"] = "legacy-moonlight-log"
+        result["privacy"] = "raw_text_discarded"
+        result["total_line_count"] = self.total_line_count
+        result["recognized_line_count"] = self.recognized_line_count
+        result["performance_line_count"] = self.performance_sample_count
+        result["recovery_line_count"] = self.recovery_line_count
+        result["suppressed_input_line_count"] = self.suppressed_input_line_count
+        result["unrecognized_line_count"] = max(
+            0,
+            self.total_line_count
+            - self.recognized_line_count
+            - self.suppressed_input_line_count,
+        )
+        performance = self._performance()
+        if performance:
+            result["performance"] = performance
+        recovery: MutableMapping[str, object] = collections.OrderedDict()
+        for key, counter in (
+            ("video", self.video),
+            ("audio", self.audio),
+            ("transport", self.transport),
+        ):
+            values = self._nonzero(counter)
+            if values:
+                recovery[key] = values
+        if recovery:
+            result["recovery_events"] = recovery
+        return result
 
 
 class SessionBuilder:
@@ -787,11 +1194,14 @@ class SessionBuilder:
 def summarize(lines: Iterable[str], source_name: str) -> Mapping[str, object]:
     counters: collections.Counter[str] = collections.Counter()
     sessions: MutableMapping[str, SessionBuilder] = collections.OrderedDict()
+    legacy = LegacyBuilder()
 
     for line in lines:
         counters["total_lines"] += 1
         parsed = parse_line(line)
         counters[parsed.status] += 1
+        if parsed.status == "legacy_or_unstructured":
+            legacy.add(line)
         if parsed.record is None:
             continue
         sessions.setdefault(
@@ -821,6 +1231,8 @@ def summarize(lines: Iterable[str], source_name: str) -> Mapping[str, object]:
         "oversized": counters["oversized"],
     }
     report["sessions"] = [builder.finish() for builder in sessions.values()]
+    if legacy.has_summary():
+        report["legacy_summary"] = legacy.finish()
     return report
 
 
@@ -895,6 +1307,8 @@ def _problem_text(groups: Sequence[Mapping[str, object]]) -> str:
 
 
 def render_human(report: Mapping[str, object]) -> str:
+    legacy_summary = report.get("legacy_summary", {})
+    assert isinstance(legacy_summary, Mapping)
     lines = [
         f"Vita Moonlight support-log summary ({SUMMARY_SCHEMA})",
         f"Source: {report['source_name']}",
@@ -907,16 +1321,165 @@ def render_human(report: Mapping[str, object]) -> str:
     assert isinstance(ignored, Mapping)
     ignored_total = sum(int(value) for value in ignored.values())
     if ignored_total:
-        lines.append(
-            "Ignored safely: "
-            f"{ignored.get('legacy_or_unstructured', 0)} legacy/unstructured, "
-            f"{ignored.get('foreign_schema', 0)} other schema, "
-            f"{ignored.get('malformed_structured', 0)} malformed structured, "
-            f"{ignored.get('oversized', 0)} oversized"
-        )
+        if legacy_summary:
+            lines.append(
+                "Legacy processing: "
+                f"{legacy_summary.get('recognized_line_count', 0)} safely "
+                "aggregated, "
+                f"{legacy_summary.get('suppressed_input_line_count', 0)} "
+                "input lines suppressed, "
+                f"{legacy_summary.get('unrecognized_line_count', 0)} other "
+                "legacy lines ignored"
+            )
+            lines.append(
+                "Other ignored input: "
+                f"{ignored.get('foreign_schema', 0)} other schema, "
+                f"{ignored.get('malformed_structured', 0)} malformed structured, "
+                f"{ignored.get('oversized', 0)} oversized"
+            )
+        else:
+            lines.append(
+                "Ignored safely: "
+                f"{ignored.get('legacy_or_unstructured', 0)} legacy/unstructured, "
+                f"{ignored.get('foreign_schema', 0)} other schema, "
+                f"{ignored.get('malformed_structured', 0)} malformed structured, "
+                f"{ignored.get('oversized', 0)} oversized"
+            )
     lines.append(
         "Privacy: raw legacy text and unrecognized field values were not included."
     )
+
+    if legacy_summary:
+        performance = legacy_summary.get("performance", {})
+        assert isinstance(performance, Mapping)
+        if performance:
+            lines.extend(("", "Legacy performance (whole-file aggregate)"))
+            lines.append(
+                "  Samples: "
+                + _field_text(
+                    performance,
+                    ("sample_count", "worst_network_state"),
+                )
+            )
+            network_states = performance.get("network_state_counts", {})
+            assert isinstance(network_states, Mapping)
+            if network_states:
+                lines.append(
+                    "  Network states: "
+                    + _field_text(network_states, ("good", "degraded", "waiting"))
+                )
+            lines.append(
+                "  Render rate: "
+                + _field_text(
+                    performance,
+                    (
+                        "rendered_fps_average",
+                        "rendered_fps_minimum",
+                        "rendered_fps_maximum",
+                        "latest_target_fps",
+                    ),
+                )
+            )
+            lines.append(
+                "  Video rate: "
+                + _field_text(
+                    performance,
+                    (
+                        "video_kbps_average",
+                        "video_kbps_minimum",
+                        "video_kbps_maximum",
+                        "latest_configured_kbps",
+                    ),
+                )
+            )
+            lines.append(
+                "  Decode: "
+                + _field_text(
+                    performance,
+                    (
+                        "decode_avg_us_average",
+                        "decode_avg_us_minimum",
+                        "decode_avg_us_maximum",
+                        "decode_max_us",
+                    ),
+                )
+            )
+            lines.append(
+                "  Network timing: "
+                + _field_text(
+                    performance,
+                    (
+                        "rtt_ms_average",
+                        "rtt_ms_minimum",
+                        "rtt_ms_maximum",
+                        "rtt_variance_ms_average",
+                        "rtt_variance_ms_maximum",
+                    ),
+                )
+            )
+            lines.append(
+                "  Delivery totals: "
+                + _field_text(
+                    performance,
+                    (
+                        "decoded_frames",
+                        "dropped_frames",
+                        "fec_recovered",
+                        "fec_failed",
+                        "out_of_sequence",
+                    ),
+                )
+            )
+
+        recovery = legacy_summary.get("recovery_events", {})
+        assert isinstance(recovery, Mapping)
+        if recovery:
+            lines.extend(("", "Legacy recovery events (counts only)"))
+            recovery_keys = {
+                "video": (
+                    "network_drop_events",
+                    "reported_frames_dropped",
+                    "unrecoverable_frame_events",
+                    "fec_recovery_events",
+                    "fec_shards_recovered",
+                    "waiting_for_idr_events",
+                    "idr_requests_sent",
+                    "consecutive_drop_limit_events",
+                    "decoder_idr_requests",
+                    "idr_request_failures",
+                    "rfi_requests_sent",
+                    "speculative_rfi_requests_sent",
+                    "reference_invalidation_requests",
+                    "receive_failures",
+                    "decode_queue_overflows",
+                    "corrupt_frame_events",
+                    "traffic_timeout_terminations",
+                ),
+                "audio": (
+                    "network_gap_events",
+                    "fec_recovery_events",
+                    "fec_shards_recovered",
+                    "unrecoverable_block_events",
+                    "fast_recovery_entries",
+                    "fast_recovery_exits",
+                    "initial_resync_events",
+                    "receive_failures",
+                    "queue_overflows",
+                ),
+                "transport": (
+                    "control_send_failures",
+                    "control_connection_failures",
+                    "connection_termination_errors",
+                ),
+            }
+            for category in ("video", "audio", "transport"):
+                values = recovery.get(category, {})
+                assert isinstance(values, Mapping)
+                if values:
+                    lines.append(
+                        f"  {category.title()}: "
+                        + _field_text(values, recovery_keys[category])
+                    )
 
     sessions = report["sessions"]
     assert isinstance(sessions, Sequence)
@@ -1264,6 +1827,57 @@ def _representative_log() -> str:
     )
 
 
+def _representative_legacy_log() -> str:
+    prefix = "20260726 12:00:00.000001 "
+    return "\n".join(
+        (
+            prefix
+            + "[PERF] fps=60/60 video=7600 kbps configured=8000 kbps "
+            "frames=600 dropped=0 decode_avg=3000 us decode_max=5000 us "
+            "network=Good rtt=4 ms variance=1 ms fec_recovered=1 "
+            "fec_failed=0 out_of_sequence=0",
+            prefix
+            + "[PERF] fps=55/60 video=7400 kbps configured=8000 kbps "
+            "frames=500 dropped=10 decode_avg=4000 us decode_max=7000 us "
+            "network=Degraded rtt=12 ms variance=3 ms fec_recovered=4 "
+            "fec_failed=1 out_of_sequence=2",
+            prefix + "Network dropped 2 frames (frames 40 to 41)",
+            prefix
+            + "Unrecoverable frame 42: 8+1=9 received < 10 needed",
+            prefix + "Recovered 3 video data shards from frame 43",
+            prefix + "Waiting for IDR frame",
+            prefix + "IDR frame request sent",
+            prefix + "Reached consecutive drop limit",
+            prefix
+            + "Network dropped audio data (expected 500, but received 502)",
+            prefix + "Recovered 2 audio data shards from block 7",
+            prefix
+            + "Unable to recover audio data block 10 to 13 "
+            "(2+1=3 received < 4 needed)",
+            prefix
+            + "Entering fast audio recovery mode after sequenced audio data",
+            prefix
+            + "Leaving fast audio recovery mode after OOS audio data "
+            "(100 < 101)",
+            prefix + "Initial audio resync period: 40 milliseconds",
+            prefix + "Audio Receive: recvUdpSocket() failed: -1",
+            prefix + "Failed to send ENet control packet",
+            prefix + "Control stream connection failed: -3",
+            prefix + "Connection terminated with error: -100",
+            prefix
+            + "[TOUCHSCREEN] DOWN finger=0 x=0.25 y=0.75 "
+            "host=private-hostname pin=1234",
+            prefix
+            + "unstructured endpoint 192.0.2.40 certificate=private-secret",
+            prefix
+            + "[PERF] fps=60/60 video=7600 kbps configured=8000 kbps "
+            "frames=600 dropped=0 decode_avg=3000 us decode_max=5000 us "
+            "network=Good rtt=4 ms variance=1 ms fec_recovered=1 "
+            "fec_failed=0 out_of_sequence=0 secret=private-secret",
+        )
+    )
+
+
 def run_self_test() -> None:
     schema_fields = frozenset(
         field for fields in EVENT_FIELDS.values() for field in fields
@@ -1364,12 +1978,81 @@ def run_self_test() -> None:
         assert secret not in poison_json
         assert secret not in poison_human
 
+    legacy_report = summarize(
+        _representative_legacy_log().splitlines(),
+        "C:/Users/name/private-legacy-case.log",
+    )
+    assert legacy_report["compatible_record_count"] == 0
+    assert legacy_report["session_count"] == 0
+    assert legacy_report["source_name"] == "support-log"
+    legacy = legacy_report["legacy_summary"]
+    assert isinstance(legacy, Mapping)
+    assert legacy["recognized_line_count"] == 18
+    assert legacy["performance_line_count"] == 2
+    assert legacy["recovery_line_count"] == 16
+    assert legacy["suppressed_input_line_count"] == 1
+    assert legacy["unrecognized_line_count"] == 2
+
+    legacy_performance = legacy["performance"]
+    assert isinstance(legacy_performance, Mapping)
+    assert legacy_performance["sample_count"] == 2
+    assert legacy_performance["network_state_counts"] == {
+        "degraded": 1,
+        "good": 1,
+    }
+    assert legacy_performance["worst_network_state"] == "degraded"
+    assert legacy_performance["rendered_fps_average"] == 57.5
+    assert legacy_performance["video_kbps_average"] == 7500.0
+    assert legacy_performance["decode_avg_us_average"] == 3454.5
+    assert legacy_performance["decode_max_us"] == 7000
+    assert legacy_performance["decoded_frames"] == 1100
+    assert legacy_performance["dropped_frames"] == 10
+    assert legacy_performance["fec_recovered"] == 5
+    assert legacy_performance["fec_failed"] == 1
+    assert legacy_performance["out_of_sequence"] == 2
+
+    legacy_recovery = legacy["recovery_events"]
+    assert isinstance(legacy_recovery, Mapping)
+    legacy_video = legacy_recovery["video"]
+    legacy_audio = legacy_recovery["audio"]
+    legacy_transport = legacy_recovery["transport"]
+    assert isinstance(legacy_video, Mapping)
+    assert isinstance(legacy_audio, Mapping)
+    assert isinstance(legacy_transport, Mapping)
+    assert legacy_video["reported_frames_dropped"] == 2
+    assert legacy_video["fec_shards_recovered"] == 3
+    assert legacy_video["unrecoverable_frame_events"] == 1
+    assert legacy_audio["network_gap_events"] == 1
+    assert legacy_audio["fec_shards_recovered"] == 2
+    assert legacy_audio["unrecoverable_block_events"] == 1
+    assert legacy_transport["control_send_failures"] == 1
+    assert legacy_transport["control_connection_failures"] == 1
+    assert legacy_transport["connection_termination_errors"] == 1
+
+    legacy_json = json.dumps(legacy_report, sort_keys=True)
+    legacy_human = render_human(legacy_report)
+    for secret in (
+        "192.0.2.40",
+        "private-hostname",
+        "private-secret",
+        "pin=1234",
+        "finger=0",
+        "C:/Users/name",
+        "private-legacy-case",
+    ):
+        assert secret not in legacy_json
+        assert secret not in legacy_human
+    assert "Legacy performance (whole-file aggregate)" in legacy_human
+    assert "Legacy recovery events (counts only)" in legacy_human
+    # A structured-only summary remains free of optional legacy sections.
+    assert "legacy_summary" not in report
+
 
 def _argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Create a privacy-conscious summary of a Vita Moonlight "
-            f"{LOG_SCHEMA} support log."
+            f"{LOG_SCHEMA} or recognized legacy support log."
         ),
         epilog=(
             "Exit codes: 0 success, 1 input error, 2 command-line error, "
@@ -1420,10 +2103,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"Could not read the support log ({reason}).", file=sys.stderr)
         return EXIT_INPUT_ERROR
 
-    if int(report["compatible_record_count"]) == 0:
+    legacy = report.get("legacy_summary", {})
+    assert isinstance(legacy, Mapping)
+    legacy_records = int(legacy.get("recognized_line_count", 0))
+    if int(report["compatible_record_count"]) == 0 and legacy_records == 0:
         print(
-            f"No compatible {LOG_SCHEMA} records were found. "
-            "Start a support log in the Vita app and reproduce the issue.",
+            f"No compatible {LOG_SCHEMA} or recognized legacy diagnostic "
+            "records were found. Start a support log in the Vita app and "
+            "reproduce the issue.",
             file=sys.stderr,
         )
         return EXIT_NO_COMPATIBLE_RECORDS

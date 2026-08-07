@@ -28,7 +28,11 @@ for details.
 1. Download `Vita-Moonlight-Host-Setup-win-x64.exe` and `moonlight.vpk` from
    the same GitHub release.
 2. Save open work and keep a keyboard connected to the PC.
-3. Run the Windows installer and accept the recommended components.
+3. Sign in to the Administrator Windows account you will use for streaming,
+   then run the installer and accept the recommended components. This beta
+   cannot install its interactive recovery safeguards from a standard account
+   by supplying a different Administrator account at the UAC prompt; setup
+   detects that case and stops before changing the PC.
 4. Restart Windows if asked.
 5. Open **Vita Moonlight Host** from the Start menu. Choose
    **Restart as Administrator** if that button appears.
@@ -63,8 +67,9 @@ physical display before changing installed host components.
 
 If you previously chose **Pause Vita host features**, setup updates the
 installed files but preserves that paused state. It does not re-enable the
-virtual display or recovery tasks. Shared Sunshine/Apollo is never stopped by
-Pause. Safe controller/runtime repairs run immediately; selected streaming-host
+virtual display or recovery tasks. Sunshine and any pre-existing Apollo
+installation are never stopped by Pause; Apollo itself is not configured or
+supported by the public beta. Safe controller/runtime repairs run immediately; selected streaming-host
 and virtual-display work is saved in protected state and completes only when
 you later choose **Enable Vita host features**. If completion fails or requires
 a restart, Vita host features return to Paused and the saved work can be
@@ -108,7 +113,8 @@ while. The action:
 - restores and verifies a physical-only Windows display layout;
 - stops and removes the two Vita Moonlight background safeguards;
 - persistently disables the managed VDD device without uninstalling it; and
-- leaves shared Sunshine/Apollo installed and reachable. A client pinned to
+- leaves Sunshine and any pre-existing Apollo installation untouched and
+  reachable. The public beta configures Sunshine only. A client pinned to
   the disabled Vita VDD may need Vita host features enabled again or a physical
   output selected in its streaming-host configuration.
 
@@ -120,15 +126,16 @@ safe to run again and require Administrator approval.
 
 Do not use Windows Device Manager or Task Scheduler to reproduce this state by
 hand. The control panel journals the exact Vita task and managed-device state.
-Sunshine and Apollo remain reachable while paused, so disconnect the Vita first
+Sunshine and any pre-existing Apollo installation remain reachable while paused, so disconnect the Vita first
 and do not treat this control as a network-access block.
 
 ### Streaming
 
 Most users should keep the defaults:
 
-- **Streaming service:** Sunshine, unless the PC is intentionally using
-  Apollo.
+- **Streaming service:** Sunshine. Older Apollo selections are migrated to
+  Sunshine during repair; Apollo itself and unrelated Apollo settings are
+  preserved, but Apollo integration is not public-beta qualified.
 - **Preferred virtual display:** blank for automatic selection. Enter a name
   only if the health check finds more than one virtual display.
 - **Use the Vita display with every streamed application:** enabled. This
@@ -217,8 +224,10 @@ compatibility and 1280x720 for games with a 720p minimum.
 
 Changing resolution, FPS, bitrate, or network mode during a session requires
 **Apply resolution + reconnect**. The video connection renegotiates while the
-Windows game stays open. Changing Xbox/DS4 controller capabilities requires
-**Apply input changes + reconnect**.
+Windows game stays open. On the supported Sunshine configuration this uses the
+ordinary GameStream launch mode; it does not send or require the legacy
+Ctrl+Alt+Shift+F8/F9/F10 shortcuts. Changing Xbox/DS4 controller capabilities
+requires **Apply input changes + reconnect**.
 
 See the [Vita settings guide](../docs/VITA_SETTINGS_GUIDE.md) for presets,
 controller profiles, gyro, graphical mapping, front-touch zones, PS behavior,
@@ -228,9 +237,11 @@ and performance tradeoffs.
 
 If the Vita menu still draws over a black game:
 
-1. Choose **Close Windows game** and confirm it twice. The host protects
-   Sunshine, Steam, Explorer, and critical Windows processes.
-2. If Steam does not return, choose **End Sunshine app**.
+1. Choose **Open Windows Task Manager**, select the stuck game, and use
+   **End task**. This is an ordinary Windows decision made by the user; Vita
+   Moonlight never guesses which foreground process to terminate.
+2. If that is not practical, choose **End Sunshine app** to end the authenticated
+   GameStream application session.
 3. If the captured display is still unusable, choose
    **Recover host display**.
 
@@ -276,6 +287,11 @@ host or its recovery safeguards. By default it keeps:
 These components may be used by other software. Select their removal only when
 you are certain they are no longer needed. Removing the VDD also removes its
 managed Vita display configuration.
+
+Unlike setup/repair, uninstall may be approved with a different Administrator
+account. It verifies the exact executable and arguments of each Vita-owned
+scheduled task before removing it; an unexpected same-name task is retained and
+uninstall stops with an explanation.
 
 When shared components are kept, uninstall leaves Sunshine unchanged and the
 VDD device usable but inactive. It

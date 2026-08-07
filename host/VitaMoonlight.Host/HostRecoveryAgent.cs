@@ -67,6 +67,10 @@ internal static class HostRecoveryAgentManager
 
     internal static IReadOnlyList<HostModeHotkeyStatus> GetModeHotkeyReadiness()
     {
+        if (!LegacyModeHotkeysRequired(HostSettings.Load()))
+        {
+            return Array.Empty<HostModeHotkeyStatus>();
+        }
         var agentReady = IsRunning();
         return VitaDisplayModes.Supported
             .Select(mode => new HostModeHotkeyStatus(
@@ -74,6 +78,10 @@ internal static class HostRecoveryAgentManager
                 agentReady && IsEventSignaled(ModeHotkeyReadyEventName(mode))))
             .ToArray();
     }
+
+    internal static bool LegacyModeHotkeysRequired(HostSettings settings) =>
+        !string.Equals(settings.HostMode, "sunshine", StringComparison.OrdinalIgnoreCase) ||
+        !settings.IntegrateAllSunshineApps;
 
     internal static string ModeHotkeyReadyEventName(VitaDisplayMode mode) =>
         $@"Local\VitaMoonlight.StreamRescueAgent.Mode.{mode.Width}x{mode.Height}x{mode.Fps}";
@@ -116,10 +124,17 @@ internal static class HostRecoveryAgentManager
 
     internal static void Install(string executablePath)
     {
+        ScheduledTaskAccount.RequireCurrentInteractiveUser(
+            "Installing the stream rescue agent");
         var existing = GetInstallationState();
         ExactScheduledTaskManager.RequireKnown(existing, TaskName);
         if (existing.State == ExactScheduledTaskState.Present)
         {
+            ExactScheduledTaskManager.RequireOwnedInteractiveTask(
+                TaskName,
+                executablePath,
+                "agent run --background",
+                requireInteractiveHighest: false);
             ExactScheduledTaskManager.StopExact(TaskName);
         }
         StopCurrentSessionAgent();
@@ -129,12 +144,17 @@ internal static class HostRecoveryAgentManager
             "/TN", TaskName,
             "/TR", taskCommand,
             "/SC", "ONLOGON",
+            "/IT",
             "/RL", "HIGHEST");
         if (createExitCode != 0)
         {
             throw new InvalidOperationException("Windows could not create the stream rescue agent task.");
         }
         ConfigurePersistentTask();
+        ExactScheduledTaskManager.RequireOwnedInteractiveTask(
+            TaskName,
+            executablePath,
+            "agent run --background");
         if (RunTask("/Run", "/TN", TaskName) != 0)
         {
             throw new InvalidOperationException("Windows created the stream rescue agent but could not start it.");
@@ -143,7 +163,7 @@ internal static class HostRecoveryAgentManager
         if (!IsRunning())
         {
             throw new InvalidOperationException(
-                "Windows started the stream rescue task, but its mandatory close-game and display-recovery hotkeys did not become ready.");
+                "Windows started the stream rescue task, but its mandatory display-recovery hotkey did not become ready.");
         }
     }
 
@@ -153,6 +173,13 @@ internal static class HostRecoveryAgentManager
         ExactScheduledTaskManager.RequireKnown(existing, TaskName);
         if (existing.State == ExactScheduledTaskState.Present)
         {
+            ExactScheduledTaskManager.RequireOwnedInteractiveTask(
+                TaskName,
+                Environment.ProcessPath ?? Path.Combine(
+                    AppContext.BaseDirectory,
+                    "VitaMoonlight.Host.exe"),
+                "agent run --background",
+                requireInteractiveHighest: false);
             ExactScheduledTaskManager.StopExact(TaskName);
         }
         StopCurrentSessionAgent();
@@ -408,7 +435,6 @@ internal sealed class HostRecoveryHotkeyWindow : NativeWindow, IDisposable
     private const int WmHotkey = 0x0312;
     private const int PbtApmSuspend = 0x0004;
     private const int PbtApmResumeAutomatic = 0x0012;
-    private const int CloseForegroundHotkeyId = 1;
     private const int RecoverDisplayHotkeyId = 2;
     private const int Mode960x540HotkeyId = 3;
     private const int Mode960x544HotkeyId = 4;
@@ -418,7 +444,6 @@ internal sealed class HostRecoveryHotkeyWindow : NativeWindow, IDisposable
     private const uint ModShift = 0x0004;
     private const uint ModNoRepeat = 0x4000;
     private const uint VkF11 = 0x7A;
-    private const uint VkF12 = 0x7B;
     private const uint VkF8 = 0x77;
     private const uint VkF9 = 0x78;
     private const uint VkF10 = 0x79;
@@ -431,8 +456,7 @@ internal sealed class HostRecoveryHotkeyWindow : NativeWindow, IDisposable
         TimeSpan.FromMilliseconds(1500);
     private const int ResumeSampleAttempts = 12;
     private const int SuspendActionWaitMilliseconds = 500;
-    private const int NonDisplayActionRunning = 1;
-    private const int DisplayActionRunning = 2;
+    private const int DisplayActionRunning = 1;
     private readonly HashSet<int> registeredHotkeys = new();
     private readonly List<EventWaitHandle> modeReadinessEvents = new();
     private readonly object resumeInspectionSync = new();
@@ -451,23 +475,25 @@ internal sealed class HostRecoveryHotkeyWindow : NativeWindow, IDisposable
         var modifiers = ModAlt | ModControl | ModShift | ModNoRepeat;
         try
         {
-            RegisterRequiredHotkey(CloseForegroundHotkeyId, modifiers, VkF12, "close-game");
             RegisterRequiredHotkey(RecoverDisplayHotkeyId, modifiers, VkF11, "display-recovery");
-            RegisterOptionalModeHotkey(
-                Mode960x540HotkeyId,
-                modifiers,
-                VkF8,
-                new VitaDisplayMode(960, 540, 60));
-            RegisterOptionalModeHotkey(
-                Mode960x544HotkeyId,
-                modifiers,
-                VkF9,
-                VitaDisplayModes.Native);
-            RegisterOptionalModeHotkey(
-                Mode1280x720HotkeyId,
-                modifiers,
-                VkF10,
-                new VitaDisplayMode(1280, 720, 60));
+            if (HostRecoveryAgentManager.LegacyModeHotkeysRequired(HostSettings.Load()))
+            {
+                RegisterOptionalModeHotkey(
+                    Mode960x540HotkeyId,
+                    modifiers,
+                    VkF8,
+                    new VitaDisplayMode(960, 540, 60));
+                RegisterOptionalModeHotkey(
+                    Mode960x544HotkeyId,
+                    modifiers,
+                    VkF9,
+                    VitaDisplayModes.Native);
+                RegisterOptionalModeHotkey(
+                    Mode1280x720HotkeyId,
+                    modifiers,
+                    VkF10,
+                    new VitaDisplayMode(1280, 720, 60));
+            }
         }
         catch
         {
@@ -532,19 +558,11 @@ internal sealed class HostRecoveryHotkeyWindow : NativeWindow, IDisposable
             else
             {
                 var competingAction = Volatile.Read(ref actionRunning);
-                if (competingAction == NonDisplayActionRunning)
-                {
-                    // Closing a foreground app never owns session.lock. Do
-                    // not let its bounded process wait prevent the independent
-                    // physical-only sleep transaction.
-                    HostRecoveryActions.PrepareDisplaysForSuspend(
-                        SuspendDisplayLeaseBudget);
-                }
-                else if (competingAction == 0 &&
-                         Interlocked.CompareExchange(
-                             ref actionRunning,
-                             DisplayActionRunning,
-                             0) == 0)
+                if (competingAction == 0 &&
+                    Interlocked.CompareExchange(
+                        ref actionRunning,
+                        DisplayActionRunning,
+                        0) == 0)
                 {
                     try
                     {
@@ -599,9 +617,7 @@ internal sealed class HostRecoveryHotkeyWindow : NativeWindow, IDisposable
         if (message.Msg == WmHotkey)
         {
             var hotkeyId = message.WParam.ToInt32();
-            var actionKind = hotkeyId == CloseForegroundHotkeyId
-                ? NonDisplayActionRunning
-                : DisplayActionRunning;
+            var actionKind = DisplayActionRunning;
             if (Interlocked.CompareExchange(
                     ref actionRunning,
                     actionKind,
@@ -624,11 +640,7 @@ internal sealed class HostRecoveryHotkeyWindow : NativeWindow, IDisposable
             {
                 try
                 {
-                    if (hotkeyId == CloseForegroundHotkeyId)
-                    {
-                        HostRecoveryActions.CloseForegroundApplication();
-                    }
-                    else if (hotkeyId == RecoverDisplayHotkeyId)
+                    if (hotkeyId == RecoverDisplayHotkeyId)
                     {
                         HostRecoveryActions.RecoverDisplayAndStreamingHost(
                             suspendIsPending: () =>
@@ -1410,18 +1422,6 @@ internal static class HostRecoveryActions
 {
     private const long MaximumRescueLogBytes = 512 * 1024;
     private static int unfencedSuspendFallbackRunning;
-    private static readonly HashSet<string> ProtectedProcessNames = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "applicationframehost", "apollo", "apollosvc", "audiodg", "csrss", "ctfmon",
-        "dwm", "explorer", "fontdrvhost", "lockapp", "logonui", "lsass", "runtimebroker",
-        "searchhost", "searchindexer", "securityhealthservice", "securityhealthsystray",
-        "services", "shellexperiencehost", "sihost", "smss", "startmenuexperiencehost",
-        "steam", "sunshine", "sunshinesvc", "svchost", "system", "taskhostw", "taskmgr",
-        "textinputhost", "userinit", "VitaMoonlight.Host", "wininit", "winlogon",
-    };
-
-    internal static bool IsProtectedProcessName(string processName) => ProtectedProcessNames.Contains(processName);
-
     internal static void RecoverStaleSuspendIntentAtAgentStartup()
     {
         if (!File.Exists(DisplaySuspendIntentStore.IntentFile)) return;
@@ -1518,50 +1518,6 @@ internal static class HostRecoveryActions
                     0);
             }
         });
-    }
-
-    internal static HostRescueStatus CloseForegroundApplication()
-    {
-        try
-        {
-            var window = GetForegroundWindow();
-            if (window == IntPtr.Zero)
-            {
-                return Record("close-foreground", false, "Windows did not report a foreground application.");
-            }
-            GetWindowThreadProcessId(window, out var processId);
-            if (processId <= 4 || processId == Environment.ProcessId)
-            {
-                return Record("close-foreground", false, "The foreground process is protected and was not closed.");
-            }
-
-            using var process = Process.GetProcessById(checked((int)processId));
-            var processName = process.ProcessName;
-            if (IsProtectedProcessName(processName))
-            {
-                return Record("close-foreground", false, $"Refused to close protected process {processName}.");
-            }
-
-            var closedGracefully = process.CloseMainWindow() && process.WaitForExit(1500);
-            if (!closedGracefully && !process.HasExited)
-            {
-                process.Kill(entireProcessTree: true);
-                if (!process.WaitForExit(5000))
-                {
-                    return Record("close-foreground", false, $"Windows did not confirm that {processName} exited.");
-                }
-            }
-            return Record(
-                "close-foreground",
-                true,
-                closedGracefully
-                    ? $"Closed {processName} normally."
-                    : $"Force-closed {processName} and its child processes.");
-        }
-        catch (Exception error)
-        {
-            return Record("close-foreground", false, error.Message);
-        }
     }
 
     internal static HostRescueStatus ChangeVirtualDisplayMode(VitaDisplayMode mode)
@@ -1946,9 +1902,4 @@ internal static class HostRecoveryActions
         return status;
     }
 
-    [DllImport("user32.dll")]
-    private static extern IntPtr GetForegroundWindow();
-
-    [DllImport("user32.dll")]
-    private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
 }

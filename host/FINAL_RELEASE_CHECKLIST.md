@@ -36,12 +36,17 @@ release notes.
 - [ ] Repeat install, Steam Big Picture launch, normal disconnect, and
       emergency display recovery on a second clean Windows 10 build 19041+ or
       Windows 11 PC.
-- [ ] Test both split-token UAC and a standard streaming account that supplies
-      a different Administrator credential. After sign-out/sign-in, confirm
-      the recovery and rescue tasks run in the intended interactive streaming
-      session and that F8-F12 hotkeys are registered there. If alternate-admin
-      setup cannot meet this gate, document same-account setup as a release
-      requirement rather than claiming multi-user support.
+- [ ] Test split-token UAC from the intended Administrator streaming account.
+      Confirm both tasks use the interactive token, highest run level, and the
+      exact installed executable/arguments. F11 must register. On the supported
+      native Sunshine path F8-F10 must remain unregistered and absent from
+      readiness requirements; they may register only in an explicitly selected
+      legacy single-application fallback test.
+- [ ] From a standard streaming account, supply a different Administrator at
+      setup UAC. Setup must show the unsupported-account explanation and stop
+      before display, task, or file mutation. Then verify that an uninstall
+      approved by that Administrator still succeeds after exact task-action
+      ownership verification. Do not claim alternate-admin setup support.
 - [ ] Cover both Windows 10 and Windows 11 if testers are available; include a
       laptop/on-battery recovery pass and a multi-monitor recovery pass.
 - [ ] Cover at least two GPU/encoder families when testers are available (AMD,
@@ -74,8 +79,9 @@ release notes.
 - [ ] When the frame turns black, confirm whether the Vita-rendered overlay and
       audio remain active. An intact overlay means the client renderer is alive
       and does not by itself prove a VDD crash.
-- [ ] Use **Close Windows game**. The game must exit (forced if necessary), the
-      Moonlight session must stay connected, and Steam Big Picture must return.
+- [ ] Use **Open Windows Task Manager**, explicitly end the game, and confirm
+      the Moonlight session can remain connected and Steam Big Picture returns.
+      Vita Moonlight must not choose or kill a foreground process itself.
 - [ ] Use **End Sunshine app** in a separate run. The stream and Sunshine app
       session must end and the physical display must return.
 - [ ] Use **Recover host display** in a separate run. Within roughly ten
@@ -144,9 +150,9 @@ release notes.
 - [ ] A non-technical tester completes install, **Check readiness**, pairing,
       normal play, game close, and recovery using only the GUI documentation.
 - [ ] A first-run Vita shows Recommended 960x544/60/8 Mbps, H.264 Rec. 709
-      limited-range SDR, 1024-byte packets, packet-loss recovery, frame pacing,
-      fit scaling, vblank off, Maximum compatibility input, performance overlay
-      Off, and support log Not capturing.
+      limited-range SDR, 1024-byte packets, packet-loss recovery, immediate
+      presentation, fit scaling, vblank off, Maximum compatibility input,
+      performance overlay Off, and support log Not capturing.
 - [ ] Reliable, Recommended, High quality, Remote / VPN, and Custom preset
       detection pass. Each named preset restores its complete documented
       stream path, and Restore recommended defaults also restores input,
@@ -227,9 +233,10 @@ release notes.
       Choose **Enable Vita host features** and verify Sunshine remains unchanged and only the previously present Vita
       safeguards and managed VDD are restored. Repeat both actions to prove
       they are idempotent.
-- [ ] The close-game agent refuses Steam, Sunshine, Explorer, the companion,
-      and critical Windows processes; a disposable uncooperative app is
-      force-terminated successfully.
+- [ ] Source/contract checks prove the host has no foreground-process close or
+      kill action and no F12 rescue shortcut. **Open Windows Task Manager** must
+      send only Ctrl+Shift+Esc through Moonlight; **End Sunshine app** must use
+      the authenticated GameStream quit-app operation.
 - [ ] Uninstall removes both scheduled tasks and the background agent and does
       not leave the physical display disabled. Default and silent uninstall
       keep shared Sunshine, ViGEmBus, and VDD installations.
@@ -319,7 +326,7 @@ release notes.
 - [ ] Vita and Windows workflows pass on the frozen commit.
 - [ ] PR is merged into the `vita` release branch with the tested commit
       ancestry intact.
-- [ ] Create and push `v0.14.7` only after the hardware and safety gates pass.
+- [ ] Create and push `v0.14.8` only after the hardware and safety gates pass.
       The release workflow builds both platforms and publishes their artifacts.
 - [ ] Download the published release, verify hashes/signatures again, and run a
       short install/pair/stream/disconnect smoke test from those public assets.

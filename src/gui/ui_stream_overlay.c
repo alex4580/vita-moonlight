@@ -27,7 +27,7 @@ enum {
   MAIN_DIAGNOSTICS,
   MAIN_LOGGING,
   MAIN_KEYBOARD,
-  MAIN_CLOSE_GAME,
+  MAIN_TASK_MANAGER,
   MAIN_QUIT_APP,
   MAIN_RECOVER_HOST,
   MAIN_DISCONNECT,
@@ -41,11 +41,9 @@ enum {
   STREAM_FPS,
   STREAM_BITRATE,
   STREAM_NETWORK,
-  STREAM_FRAME_PACER,
   STREAM_PACKET_RECOVERY,
   STREAM_SCALING,
   STREAM_VBLANK,
-  STREAM_HOST_OPTIMIZE,
   STREAM_APPLY_RECONNECT,
   STREAM_ITEM_COUNT
 };
@@ -64,17 +62,17 @@ enum {
 
 static volatile bool overlay_open = false;
 static volatile bool disconnect_requested = false;
-static volatile bool close_game_requested = false;
+static volatile bool task_manager_requested = false;
 static volatile bool quit_app_requested = false;
 static volatile bool recover_host_requested = false;
 static volatile bool apply_display_requested = false;
 static volatile bool apply_input_requested = false;
-static int apply_display_virtual_key = 0;
 
 static OverlayPage page = OVERLAY_PAGE_MAIN;
 static int selected_item = MAIN_RESUME;
 static int confirmation_item = -1;
 static bool settings_changed = false;
+static bool settings_save_failed = false;
 
 static const int resolutions[][2] = {
   {960, 544},
@@ -137,16 +135,6 @@ static int find_value(const int values[], int count, int value) {
   return closest;
 }
 
-static int resolution_virtual_key(void) {
-  if (config.stream.width == 960 && config.stream.height == 540) {
-    return 0x77; // F8
-  }
-  if (config.stream.width == 1280 && config.stream.height == 720) {
-    return 0x79; // F10
-  }
-  return 0x78; // F9: native 960x544 and safe fallback
-}
-
 static int current_item_count(void) {
   switch (page) {
     case OVERLAY_PAGE_STREAM: return STREAM_ITEM_COUNT;
@@ -156,8 +144,27 @@ static int current_item_count(void) {
 }
 
 static void save_settings(void) {
-  if (config_path) config_save(config_path, &config);
+  /*
+   * Do not write flash storage on every D-pad edge while decoding video.
+   * Commit the accumulated changes once when the overlay closes.
+   */
   settings_changed = true;
+  settings_save_failed = false;
+}
+
+static bool flush_settings(void) {
+  if (!settings_changed) return true;
+  if (!config_path || !config_save(config_path, &config)) {
+    settings_save_failed = true;
+    vita_debug_event(
+        VITA_DEBUG_LEVEL_ERROR, "settings.save",
+        "state=error surface=stream_overlay reason=storage_write");
+    return false;
+  }
+  settings_changed = false;
+  settings_save_failed = false;
+  vita_debug_log_config_snapshot("stream_overlay_saved");
+  return true;
 }
 
 static void enter_page(OverlayPage next_page) {
@@ -232,10 +239,6 @@ static void adjust_stream_item(int direction) {
           (config.stream.streamingRemotely + (direction < 0 ? 2 : 1)) % 3;
       save_settings();
       break;
-    case STREAM_FRAME_PACER:
-      config.enable_frame_pacer = !config.enable_frame_pacer;
-      save_settings();
-      break;
     case STREAM_PACKET_RECOVERY:
       /* Informational row: Vita's SPS fixup requires IDR-based recovery. */
       config.enable_ref_frame_invalidation = false;
@@ -246,10 +249,6 @@ static void adjust_stream_item(int direction) {
       break;
     case STREAM_VBLANK:
       config.enable_vita_vblank_wait = !config.enable_vita_vblank_wait;
-      save_settings();
-      break;
-    case STREAM_HOST_OPTIMIZE:
-      config.sops = !config.sops;
       save_settings();
       break;
     default:
@@ -316,6 +315,7 @@ void stream_overlay_open(void) {
   if (overlay_open) return;
   return_to_main();
   settings_changed = false;
+  settings_save_failed = false;
   overlay_open = true;
   vitavideo_request_redraw();
 
@@ -324,25 +324,36 @@ void stream_overlay_open(void) {
   vita_debug_log("Stream menu opened");
 }
 
-void stream_overlay_close(void) {
+bool stream_overlay_close(void) {
+  if (!flush_settings()) {
+    /* Keep the menu visible so the failure is not silently lost. */
+    confirmation_item = -1;
+    vitavideo_request_redraw();
+    return false;
+  }
   ui_diagnostics_screen_close();
   overlay_open = false;
   vitavideo_request_redraw();
   vita_debug_log("Stream menu closed");
+  return true;
 }
 
 void stream_overlay_reset(void) {
+  if (!flush_settings()) {
+    /* Teardown cannot remain blocked on storage; the structured event above
+     * leaves a support-log breadcrumb when capture is enabled. */
+  }
   overlay_open = false;
   disconnect_requested = false;
-  close_game_requested = false;
+  task_manager_requested = false;
   quit_app_requested = false;
   recover_host_requested = false;
   apply_display_requested = false;
   apply_input_requested = false;
-  apply_display_virtual_key = 0;
   ui_diagnostics_screen_close();
   return_to_main();
   settings_changed = false;
+  settings_save_failed = false;
 }
 
 bool stream_overlay_take_disconnect_request(void) {
@@ -351,9 +362,9 @@ bool stream_overlay_take_disconnect_request(void) {
   return true;
 }
 
-bool stream_overlay_take_close_game_request(void) {
-  if (!close_game_requested) return false;
-  close_game_requested = false;
+bool stream_overlay_take_task_manager_request(void) {
+  if (!task_manager_requested) return false;
+  task_manager_requested = false;
   return true;
 }
 
@@ -369,11 +380,9 @@ bool stream_overlay_take_recover_host_request(void) {
   return true;
 }
 
-bool stream_overlay_take_apply_display_request(int *virtual_key) {
+bool stream_overlay_take_apply_display_request(void) {
   if (!apply_display_requested) return false;
   apply_display_requested = false;
-  if (virtual_key) *virtual_key = apply_display_virtual_key;
-  apply_display_virtual_key = 0;
   return true;
 }
 
@@ -408,7 +417,6 @@ static void confirm_main_action(void) {
   if (selected_item == MAIN_LOGGING) {
     bool enabled = !vita_debug_is_logging_enabled();
     vita_debug_set_logging_enabled(enabled);
-    save_settings();
     return;
   }
   if (selected_item == MAIN_KEYBOARD) {
@@ -416,8 +424,11 @@ static void confirm_main_action(void) {
     return;
   }
   if (selected_item == MAIN_DISCONNECT) {
-    disconnect_requested = true;
-    stream_overlay_close();
+    if (stream_overlay_close()) disconnect_requested = true;
+    return;
+  }
+  if (selected_item == MAIN_TASK_MANAGER) {
+    if (stream_overlay_close()) task_manager_requested = true;
     return;
   }
 
@@ -426,11 +437,11 @@ static void confirm_main_action(void) {
     return;
   }
 
-  if (selected_item == MAIN_CLOSE_GAME) close_game_requested = true;
-  if (selected_item == MAIN_QUIT_APP) quit_app_requested = true;
-  if (selected_item == MAIN_RECOVER_HOST) recover_host_requested = true;
+  int confirmed_item = selected_item;
   confirmation_item = -1;
-  stream_overlay_close();
+  if (!stream_overlay_close()) return;
+  if (confirmed_item == MAIN_QUIT_APP) quit_app_requested = true;
+  if (confirmed_item == MAIN_RECOVER_HOST) recover_host_requested = true;
 }
 
 void stream_overlay_handle_input(const SceCtrlData *pad,
@@ -441,6 +452,20 @@ void stream_overlay_handle_input(const SceCtrlData *pad,
 
   if (ui_diagnostics_screen_is_open()) {
     ui_diagnostics_screen_handle_input(pad, previous);
+    if (input_edge) vitavideo_request_redraw();
+    return;
+  }
+
+  if (settings_save_failed) {
+    if (pressed(pad, previous, config.btn_confirm)) {
+      stream_overlay_close();
+    } else if (pressed(pad, previous, config.btn_cancel)) {
+      /* Never trap the player in the overlay because storage is full or
+       * unavailable. The edited values remain active for this session. */
+      settings_changed = false;
+      settings_save_failed = false;
+      stream_overlay_close();
+    }
     if (input_edge) vitavideo_request_redraw();
     return;
   }
@@ -464,7 +489,6 @@ void stream_overlay_handle_input(const SceCtrlData *pad,
     } else if (page == OVERLAY_PAGE_MAIN &&
                selected_item == MAIN_LOGGING) {
       vita_debug_set_logging_enabled(!vita_debug_is_logging_enabled());
-      save_settings();
     } else if (page == OVERLAY_PAGE_STREAM) {
       adjust_stream_item(-1);
     } else if (page == OVERLAY_PAGE_INPUT) {
@@ -480,7 +504,6 @@ void stream_overlay_handle_input(const SceCtrlData *pad,
     } else if (page == OVERLAY_PAGE_MAIN &&
                selected_item == MAIN_LOGGING) {
       vita_debug_set_logging_enabled(!vita_debug_is_logging_enabled());
-      save_settings();
     } else if (page == OVERLAY_PAGE_STREAM) {
       adjust_stream_item(1);
     } else if (page == OVERLAY_PAGE_INPUT) {
@@ -515,13 +538,10 @@ void stream_overlay_handle_input(const SceCtrlData *pad,
     return_to_main();
   } else if (page == OVERLAY_PAGE_STREAM &&
              selected_item == STREAM_APPLY_RECONNECT) {
-    apply_display_virtual_key = resolution_virtual_key();
-    apply_display_requested = true;
-    stream_overlay_close();
+    if (stream_overlay_close()) apply_display_requested = true;
   } else if (page == OVERLAY_PAGE_INPUT &&
              selected_item == INPUT_APPLY_RECONNECT) {
-    apply_input_requested = true;
-    stream_overlay_close();
+    if (stream_overlay_close()) apply_input_requested = true;
   } else if (page == OVERLAY_PAGE_STREAM) {
     adjust_stream_item(1);
   } else {
@@ -599,7 +619,8 @@ static void draw_main_page(void) {
           : "Start support log",
       vita_debug_is_logging_enabled() ? "Capturing" : "Fresh file");
   draw_row(MAIN_KEYBOARD, first_y, row_height, "Open on-screen keyboard", "X");
-  draw_row(MAIN_CLOSE_GAME, first_y, row_height, "Close Windows game", "X");
+  draw_row(MAIN_TASK_MANAGER, first_y, row_height,
+           "Open Windows Task Manager", "X");
   draw_row(MAIN_QUIT_APP, first_y, row_height, "End Sunshine app", "X");
   draw_row(MAIN_RECOVER_HOST, first_y, row_height, "Recover host display", "X");
   draw_row(MAIN_DISCONNECT, first_y, row_height, "Disconnect stream", "X");
@@ -632,9 +653,6 @@ static void draw_stream_page(void) {
       STREAM_NETWORK, first_y, row_height, "Network mode",
       network_names[config.stream.streamingRemotely]);
   draw_row(
-      STREAM_FRAME_PACER, first_y, row_height, "Frame pacing",
-      config.enable_frame_pacer ? "On" : "Off");
-  draw_row(
       STREAM_PACKET_RECOVERY, first_y, row_height, "Packet-loss recovery",
       "Automatic IDR");
   draw_row(
@@ -643,9 +661,6 @@ static void draw_stream_page(void) {
   draw_row(
       STREAM_VBLANK, first_y, row_height, "Wait for Vita vblank",
       config.enable_vita_vblank_wait ? "On" : "Off");
-  draw_row(
-      STREAM_HOST_OPTIMIZE, first_y, row_height, "Host game optimization",
-      config.sops ? "On" : "Off");
   draw_row(
       STREAM_APPLY_RECONNECT, first_y, row_height,
       "Apply resolution + reconnect", "X");
@@ -679,8 +694,8 @@ static void draw_input_page(void) {
 }
 
 static const char *footer_text(void) {
-  if (confirmation_item == MAIN_CLOSE_GAME) {
-    return "Press X again to close the foreground Windows game. O: cancel";
+  if (settings_save_failed) {
+    return "Save failed. X: retry after freeing storage   O: resume unsaved";
   }
   if (confirmation_item == MAIN_QUIT_APP) {
     return "Press X again to end Sunshine's app and disconnect. O: cancel";
@@ -700,7 +715,7 @@ static const char *footer_text(void) {
         : "Start a fresh log, reproduce the issue, then stop and save";
   }
   if (settings_changed) {
-    return "Saved. D-pad changes values; stream-format changes need reconnect";
+    return "Changed. Settings save when this menu closes; formats need reconnect";
   }
   return "D-pad: navigate/change   X: select   O: resume/back";
 }

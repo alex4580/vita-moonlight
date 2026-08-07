@@ -82,6 +82,9 @@ def main() -> int:
     connection_header = read("src/connection.h")
     util = read("src/util.c")
     pair = function_body(client, "int gs_pair(", "int gs_applist(")
+    abort_pair = function_body(
+        client, "static int abort_pairing_session(", "int gs_pair("
+    )
     pairing_hash = function_body(
         client,
         "static bool hash_pairing_challenge_binding(",
@@ -179,11 +182,56 @@ def main() -> int:
         "libgamestream/http.c: HTTP response size must be bounded",
     )
     require(
-        "HTTP_TIMEOUT_PAIRING_USER_SECONDS 0L" in http_header
+        "HTTP_TIMEOUT_PAIRING_USER_SECONDS 120L" in http_header
+        and "HTTP_TIMEOUT_PAIRING_ABORT_SECONDS 5L" in http_header
         and "HTTP_TIMEOUT_ORDINARY_SECONDS 30L" in http_header
         and "HTTP_TIMEOUT_LAUNCH_SECONDS 120L" in http_header
         and "http_request_with_timeout" in http_header,
         "libgamestream/http.h: pairing, ordinary, and launch timeout profiles are required",
+    )
+    require(
+        "gs_refresh(server)" not in pair
+        and "gs_unpair(server)" not in pair,
+        "libgamestream/client.c: a committed Sunshine pairing must not be rolled back by a post-pair metadata refresh",
+    )
+    require(
+        '"pairing identity"' in pair
+        and pair.count("pairingUniqueId") >= 7
+        and "persist_unique_id_atomic(\n          unique_id_path, pairingUniqueId)"
+        in pair
+        and pair.find("phrase=pairchallenge")
+        < pair.find(
+            "persist_unique_id_atomic(\n          unique_id_path, pairingUniqueId)"
+        ),
+        "libgamestream/client.c: each PIN attempt must use a fresh identity and persist it only after the final pinned challenge",
+    )
+    pending_commit = pair.find(
+        "persist_unique_id_atomic(\n           pairing_pending_path, pairingUniqueId)"
+    )
+    first_pair_request = pair.find("phrase=getservercert")
+    invalid_pending_block = function_body(
+        pair,
+        "if (pendingState == PAIRING_PENDING_INVALID)",
+        "if (pendingState == PAIRING_PENDING_VALID",
+    )
+    require(
+        '#define PAIRING_PENDING_FILE_NAME "pairing-pending.dat"' in client
+        and "load_pairing_pending_id(abandonedPairingId)" in pair
+        and pair.find("abort_pairing_session(\n          server, abandonedPairingId")
+        < pending_commit
+        < first_pair_request
+        and "pairingSessionOpen = true;" in pair
+        and "if (pairingSessionOpen)" in pair
+        and "clear_pairing_pending_files();" in pair
+        and "clientpairingsecret=00" in abort_pair
+        and "HTTP_TIMEOUT_PAIRING_ABORT_SECONDS" in abort_pair
+        and "if ((ret = xml_status(" not in abort_pair,
+        "libgamestream/client.c: wrong, timed-out, and interrupted PIN attempts must journal and abort the exact Sunshine session before retry",
+    )
+    require(
+        "clear_pairing_pending_files" not in invalid_pending_block
+        and "forget this PC on the Vita" in invalid_pending_block,
+        "libgamestream/client.c: a damaged pending-session record must remain fail-closed until Sunshine is restarted and the saved PC is explicitly forgotten",
     )
     require(
         "HTTP_TIMEOUT_PAIRING_USER_SECONDS" in pair
@@ -340,6 +388,11 @@ def main() -> int:
         and "Sunshine returned an invalid numeric server field" not in client,
         "libgamestream/client.c: bounded appversion parsing must accept Sunshine's signed build sentinel and identify field failures",
     )
+    require(
+        "supported Sunshine host version" in client
+        and "Sunshine/Apollo host version" not in client,
+        "libgamestream/client.c: public compatibility errors must direct users to the supported Sunshine host",
+    )
     hex_decoder = function_body(
         client,
         "static int hex_nibble(",
@@ -391,7 +444,10 @@ def main() -> int:
         abort_section = abort_section.split("int connection_paired()", 1)[0]
     require(
         "int connection_abort_attempt();" in connection_header
-        and "connection_status != LI_READY" in abort_section
+        and (
+            "connection_status != LI_READY" in abort_section
+            or "connection_state_load() != LI_READY" in abort_section
+        )
         and "LI_DISCONNECTED" in abort_section
         and "LiStopConnection" not in abort_section,
         "src/connection: READY attempts need an abort transition without stream teardown",

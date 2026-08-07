@@ -11,6 +11,8 @@
 
 #define OVERLAY_CHORD_MASK (SCE_CTRL_START | SCE_CTRL_L1 | SCE_CTRL_R1)
 #define OVERLAY_CHORD_WINDOW_US 1000000
+#define KEYBOARD_CHORD_MASK (SCE_CTRL_START | SCE_CTRL_LEFT)
+#define KEYBOARD_CHORD_WINDOW_US 1000000
 
 enum overlay_chord_state {
     OVERLAY_CHORD_IDLE,
@@ -22,11 +24,21 @@ enum overlay_chord_state {
 static enum overlay_chord_state overlay_state = OVERLAY_CHORD_IDLE;
 static uint64_t overlay_started_at = 0;
 static uint32_t overlay_pending_buttons = 0;
+static bool keyboard_shortcut_consumed = false;
+static uint64_t keyboard_shortcut_started_at = 0;
+static int keyboard_shortcut_state = 0;
 
-void reset_physical_shortcuts(void) {
+static void reset_overlay_chord(void) {
     overlay_state = OVERLAY_CHORD_IDLE;
     overlay_started_at = 0;
     overlay_pending_buttons = 0;
+}
+
+void reset_physical_shortcuts(void) {
+    reset_overlay_chord();
+    keyboard_shortcut_consumed = false;
+    keyboard_shortcut_started_at = 0;
+    keyboard_shortcut_state = 0;
 }
 
 static bool open_stream_overlay(SceCtrlData* pad) {
@@ -96,43 +108,56 @@ static bool process_overlay_shortcut(SceCtrlData* pad, const SceCtrlData* pad_ol
 // Devuelve true si se ejecutó un acceso directo y se debe limpiar el input
 bool process_physical_shortcuts(SceCtrlData* pad, const SceCtrlData* pad_old) {
     // Shortcut Start+Left: detectar en cualquier orden y con margen de tiempo
-    static bool keyboard_shortcut_blocked = false;
-    static uint64_t shortcut_time = 0;
-    static int shortcut_state = 0; // 0: nada, 1: uno presionado, 2: ambos presionados
     // Snapshots eliminados: solo se usan en vita.c
     uint64_t now = sceKernelGetSystemTimeWide();
     bool start_now = (pad->buttons & SCE_CTRL_START);
     bool left_now = (pad->buttons & SCE_CTRL_LEFT);
     bool start_prev = (pad_old->buttons & SCE_CTRL_START);
-    bool left_prev = (pad_old->buttons & SCE_CTRL_LEFT);
 
-    // Detectar flanco de subida de cualquiera de los dos
-    if ((start_now && !start_prev) || (left_now && !left_prev)) {
-        shortcut_time = now;
-        shortcut_state = 1;
+    if (keyboard_shortcut_consumed) {
+        /* The IME is blocking. When it returns, consume the shortcut until
+         * both members are physically released so START/LEFT cannot reappear
+         * as remote input on the next 2 ms sample. */
+        uint32_t chord_buttons = pad->buttons & KEYBOARD_CHORD_MASK;
+        pad->buttons &= ~KEYBOARD_CHORD_MASK;
+        if (chord_buttons == 0) {
+            keyboard_shortcut_consumed = false;
+            keyboard_shortcut_state = 0;
+        }
+        return true;
     }
-    // Si ambos están presionados dentro de 300ms, activar shortcut
+
+    /* START is the leader. This avoids delaying ordinary D-pad Left input. */
+    if (start_now && !start_prev) {
+        keyboard_shortcut_started_at = now;
+        keyboard_shortcut_state = 1;
+    }
+    // If both shortcut members arrive within the one-second window, open it.
     if (start_now && left_now) {
-        if (shortcut_state == 1 && (now - shortcut_time) < 300000) {
-            if (!keyboard_shortcut_blocked) {
+        if (keyboard_shortcut_state == 1 &&
+            (now - keyboard_shortcut_started_at) <
+                KEYBOARD_CHORD_WINDOW_US) {
                 // Limpiar input local y en el host ANTES de abrir el teclado
                 // Snapshots eliminados: solo se usan en vita.c
                 // Obligatorio porque es bloqueante
                 memset((void*)pad, 0, sizeof(SceCtrlData));
                 LiSendMultiControllerEvent(0, 1, 0, 0, 0, 0, 0, 0, 0);
+                /* START may also be buffered by the overlay shortcut. Drop
+                 * that pending state so it cannot be replayed after IME. */
+                reset_overlay_chord();
                 keyboardsystem_open_keyboard();
-                keyboard_shortcut_blocked = true;
-                shortcut_state = 0;
+                keyboard_shortcut_consumed = true;
+                keyboard_shortcut_state = 0;
                 return true;
-            }
         }
-        shortcut_state = 2;
+        keyboard_shortcut_state = 2;
     }
-    if (!start_now && !left_now) {
-        if (keyboard_shortcut_blocked || shortcut_state != 0) {
-        }
-        keyboard_shortcut_blocked = false;
-        shortcut_state = 0;
+    if (!start_now) {
+        keyboard_shortcut_state = 0;
+    } else if (keyboard_shortcut_state == 1 &&
+               now - keyboard_shortcut_started_at >=
+                   KEYBOARD_CHORD_WINDOW_US) {
+        keyboard_shortcut_state = 2;
     }
     return process_overlay_shortcut(pad, pad_old);
 }

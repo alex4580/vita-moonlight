@@ -181,7 +181,6 @@ static uint64_t last_decoder_error_log_us = 0;
 static uint32_t suppressed_decoder_errors = 0;
 
 static uint32_t frame_count = 0;
-static uint32_t need_drop = 0;
 static uint32_t fps_snapshot = 0;
 float carry = 0;
 
@@ -199,10 +198,6 @@ static uint32_t atomic_exchange_u32(uint32_t *value, uint32_t next) {
 
 static void atomic_add_u32(uint32_t *value, uint32_t amount) {
   __atomic_fetch_add(value, amount, __ATOMIC_ACQ_REL);
-}
-
-static void atomic_sub_u32(uint32_t *value, uint32_t amount) {
-  __atomic_fetch_sub(value, amount, __ATOMIC_ACQ_REL);
 }
 
 static void atomic_store_fps(uint32_t rendered, uint32_t target) {
@@ -310,23 +305,24 @@ void update_scaling_settings(int width, int height) {
 static int vita_pacer_thread_main(SceSize args, void *argp) {
   int max_fps = config.stream.fps;
   uint64_t last_check_time = sceKernelGetSystemTimeWide();
-  atomic_store_u32(&need_drop, 0);
   atomic_store_u32(&frame_count, 0);
 
   while (atomic_load_u32(&active_pacer_thread)) {
     uint64_t now = sceKernelGetSystemTimeWide();
 
     if (now - last_check_time >= PACER_SAMPLE_INTERVAL_US) {
+      uint64_t elapsed_us = now - last_check_time;
       uint32_t curr_frame_count =
           atomic_exchange_u32(&frame_count, 0);
-
-      if (atomic_load_u32(&active_video_thread) &&
-          config.enable_frame_pacer &&
-          curr_frame_count > max_fps) {
-        atomic_add_u32(&need_drop, curr_frame_count - max_fps);
-      }
-
-      atomic_store_fps(curr_frame_count, (uint32_t)max_fps);
+      uint64_t normalized_fps = elapsed_us == 0
+          ? 0
+          : ((uint64_t)curr_frame_count * PACER_SAMPLE_INTERVAL_US +
+             elapsed_us / 2) / elapsed_us;
+      atomic_store_fps(
+          normalized_fps > UINT16_MAX
+              ? UINT16_MAX
+              : (uint32_t)normalized_fps,
+          (uint32_t)max_fps);
       last_check_time = now;
     }
 
@@ -486,7 +482,6 @@ static void vita_cleanup() {
   atomic_store_u32(&redraw_request_generation, 0);
   atomic_store_u32(&rendered_redraw_generation, 0);
   atomic_store_u32(&frame_count, 0);
-  atomic_store_u32(&need_drop, 0);
   atomic_store_fps(0, 0);
   atomic_store_u32(&poor_net_indicator_requested, 0);
   poor_net_indicator.alpha = 0;
@@ -551,7 +546,6 @@ static int vita_setup(int videoFormat, int width, int height, int redrawRate, vo
   atomic_store_u32(&redraw_request_generation, 0);
   atomic_store_u32(&rendered_redraw_generation, 0);
   atomic_store_u32(&frame_count, 0);
-  atomic_store_u32(&need_drop, 0);
   atomic_store_fps(0, 0);
   atomic_store_u32(&poor_net_indicator_requested, 0);
   poor_net_indicator.alpha = 0;
@@ -856,17 +850,16 @@ static int vita_submit_decode_unit(PDECODE_UNIT decodeUnit) {
   last_video_activity_us = sceKernelGetSystemTimeWide();
   bool presented = false;
 
-  //TODO: Seems silly to decode the unit if we're going to drop the frame?
-  // Find out why we decode or if we even need to
   if (atomic_load_u32(&active_video_thread)) {
-    uint32_t frames_to_drop = atomic_load_u32(&need_drop);
-    if (frames_to_drop > 0) {
-      // skip
-      atomic_sub_u32(&need_drop, 1);
-    } else {
-      draw_stream_surface(true);
-      presented = true;
-    }
+    /* Present each completed hardware-decoded frame immediately. The former
+     * one-second counter dropped an equal number of future frames whenever a
+     * sampling window happened to observe 61+ frames. That was neither frame
+     * pacing nor latency control; it converted harmless timer jitter into
+     * visible stutter. Sunshine already negotiates the requested cadence, and
+     * optional Vita vblank synchronization remains available for users who
+     * prefer tear control over the lowest presentation latency. */
+    draw_stream_surface(true);
+    presented = true;
   }
 
   if (collect_diagnostics) {

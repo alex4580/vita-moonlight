@@ -202,12 +202,31 @@ internal sealed class DisplayTopologyService
     internal IReadOnlyList<string> RecoverPhysicalDisplays(
         out PhysicalDisplayModeRepairResult modeRepair)
     {
-        var configuration = WindowsDisplayNative.Query(WindowsDisplayNative.QueryAllPaths);
-        var displays = Describe(configuration);
-        var selected = SelectPhysicalDisplaysForRecovery(displays);
+        DisplayConfiguration configuration = default!;
+        DisplayDescriptor[] selected = [];
+        const int inventoryAttempts = 5;
+        for (var attempt = 0; attempt < inventoryAttempts; attempt++)
+        {
+            configuration = WindowsDisplayNative.Query(
+                WindowsDisplayNative.QueryAllPaths);
+            selected = SelectPhysicalDisplaysForRecovery(
+                Describe(configuration));
+
+            // TargetAvailable can briefly fall to false while Windows handles
+            // PBT_APMSUSPEND. Prefer a freshly available physical target, but
+            // retain an already-active physical path as the bounded fallback
+            // instead of declaring that the machine has no physical display.
+            if (selected.Any(display => display.IsAvailable) ||
+                attempt == inventoryAttempts - 1)
+            {
+                break;
+            }
+            Thread.Sleep(100);
+        }
         if (selected.Length == 0)
         {
-            throw new InvalidOperationException("No available physical display was found for emergency recovery.");
+            throw new InvalidOperationException(
+                "No physical display path was found for emergency recovery after Windows display enumeration was retried.");
         }
 
         var indexes = selected.Select(display => display.PathIndex).ToHashSet();
@@ -285,6 +304,10 @@ internal sealed class DisplayTopologyService
                 var source = WindowsDisplayNative.GetSourceNameFor(path);
                 var current = WindowsDisplayNative.ReadCurrentSourceMode(
                     source.ViewGdiDeviceName);
+                if (!IsPotentialPhysicalModeDrift(current))
+                {
+                    continue;
+                }
                 var persisted = WindowsDisplayNative.ReadPersistedSourceMode(
                     source.ViewGdiDeviceName);
                 if (!IsClearPhysicalModeDrift(current, persisted))
@@ -373,6 +396,11 @@ internal sealed class DisplayTopologyService
         return resolutionDrift || refreshDrift;
     }
 
+    internal static bool IsPotentialPhysicalModeDrift(
+        AdvertisedDisplayMode current) =>
+        IsKnownFallbackResolution(current) ||
+        current.Fps is > 1 and <= 30;
+
     private static bool IsKnownFallbackResolution(
         AdvertisedDisplayMode mode) =>
         (mode.Width, mode.Height) is
@@ -390,11 +418,26 @@ internal sealed class DisplayTopologyService
 
     internal static DisplayDescriptor[] SelectPhysicalDisplaysForRecovery(IEnumerable<DisplayDescriptor> displays)
     {
-        var availablePhysical = displays
-            .Where(display => display.IsAvailable && !IsLikelyVirtualDisplay(display))
+        var physical = displays
+            .Where(display => !IsLikelyVirtualDisplay(display))
             .ToArray();
-        var activePhysical = availablePhysical.Where(display => display.IsActive).ToArray();
-        return activePhysical.Length > 0 ? activePhysical : availablePhysical;
+        var activeAvailable = physical
+            .Where(display => display.IsActive && display.IsAvailable)
+            .ToArray();
+        if (activeAvailable.Length > 0) return activeAvailable;
+
+        var available = physical
+            .Where(display => display.IsAvailable)
+            .ToArray();
+        if (available.Length > 0) return available;
+
+        // Windows can transiently clear TargetAvailable during suspend while
+        // leaving the physical path active. It remains safer to re-apply that
+        // known physical path than to leave the managed VDD as the sleep
+        // topology or to report that no physical monitor exists.
+        return physical
+            .Where(display => display.IsActive)
+            .ToArray();
     }
 
     internal void SaveRecovery(
@@ -661,7 +704,11 @@ internal sealed class DisplayTopologyService
                 display.FriendlyName.Contains(nameMatch, StringComparison.OrdinalIgnoreCase) ||
                 display.DevicePath.Contains(nameMatch, StringComparison.OrdinalIgnoreCase));
         }
-        return candidates.FirstOrDefault(IsManagedVirtualDisplay) ?? candidates.FirstOrDefault();
+        // Automatic selection is deliberately restricted to the VDD bundled
+        // and managed by this product. Other virtual displays (Apollo,
+        // Parsec, VR runtimes, etc.) must never be hijacked merely because the
+        // managed device is still enumerating.
+        return candidates.FirstOrDefault(IsManagedVirtualDisplay);
     }
 
     internal DisplayDescriptor ChangeActiveVirtualDisplayMode(
@@ -675,11 +722,7 @@ internal sealed class DisplayTopologyService
         var candidates = Describe(configuration)
             .Where(display => display.IsActive && IsLikelyVirtualDisplay(display))
             .ToArray();
-        var selected = !string.IsNullOrWhiteSpace(nameMatch)
-            ? candidates.FirstOrDefault(display =>
-                display.FriendlyName.Contains(nameMatch, StringComparison.OrdinalIgnoreCase) ||
-                display.DevicePath.Contains(nameMatch, StringComparison.OrdinalIgnoreCase))
-            : candidates.FirstOrDefault(IsManagedVirtualDisplay) ?? candidates.FirstOrDefault();
+        var selected = SelectVirtualDisplayForActivation(candidates, nameMatch);
         if (selected is null)
         {
             throw new InvalidOperationException(

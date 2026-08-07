@@ -1,6 +1,6 @@
 {
-  "schema": "vita-moonlight/host-client-contract/v1",
-  "contract_version": 1,
+  "schema": "vita-moonlight/host-client-contract/v2",
+  "contract_version": 2,
   "stream": {
     "resolutions": [
       {
@@ -41,34 +41,49 @@
   },
   "mode_control": {
     "authoritative_transport": "gamestream-launch-mode",
-    "shared_sunshine_hook": {
+    "native_sunshine_display_management": {
+      "scope": "all-applications",
+      "configuration_option": "ensure_only_display",
+      "resolution_option": "auto",
+      "refresh_rate_option": "manual",
+      "desktop_refresh_hz": 60,
+      "exact_contract_resolution_remapping": true,
+      "force_sdr_for_vita": true,
+      "revert_delay_ms": 500,
+      "revert_on_disconnect": true
+    },
+    "legacy_single_application_hook": {
       "command": "session hook-start",
       "recognized_contract_mode": "normalize-to-fixed-desktop-refresh",
       "unrecognized_mode": "pass-through-no-op"
     },
-    "legacy_unacknowledged_hotkeys": [
-      {
-        "width": 960,
-        "height": 540,
-        "desktop_refresh_hz": 60,
-        "key": "F8",
-        "windows_virtual_key": 119
-      },
-      {
-        "width": 960,
-        "height": 544,
-        "desktop_refresh_hz": 60,
-        "key": "F9",
-        "windows_virtual_key": 120
-      },
-      {
-        "width": 1280,
-        "height": 720,
-        "desktop_refresh_hz": 60,
-        "key": "F10",
-        "windows_virtual_key": 121
-      }
-    ]
+    "legacy_unacknowledged_hotkeys": {
+      "availability": "explicit-legacy-single-application-fallback-only",
+      "sent_by_current_client": false,
+      "modes": [
+        {
+          "width": 960,
+          "height": 540,
+          "desktop_refresh_hz": 60,
+          "key": "F8",
+          "windows_virtual_key": 119
+        },
+        {
+          "width": 960,
+          "height": 544,
+          "desktop_refresh_hz": 60,
+          "key": "F9",
+          "windows_virtual_key": 120
+        },
+        {
+          "width": 1280,
+          "height": 720,
+          "desktop_refresh_hz": 60,
+          "key": "F10",
+          "windows_virtual_key": 121
+        }
+      ]
+    }
   },
   "companion_control": {
     "transport": "moonlight-encrypted-keyboard-input",
@@ -94,13 +109,6 @@
         "windows_virtual_key": 122,
         "host_action": "display-recovery",
         "disconnect_after_send": true
-      },
-      {
-        "id": "close-foreground-game",
-        "key": "F12",
-        "windows_virtual_key": 123,
-        "host_action": "close-game",
-        "disconnect_after_send": false
       }
     ]
   }

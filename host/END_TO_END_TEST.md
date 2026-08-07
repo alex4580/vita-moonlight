@@ -20,6 +20,12 @@ Use:
 - `moonlight.vpk` and `Vita-Moonlight-Host-Setup-win-x64.exe` downloaded from
   the **same GitHub release**.
 
+For the deliberately unsigned beta preview, also download `SHA256SUMS` and
+`windows-signing-status.json`. The release warning must name the exact tag,
+the signing manifest must say `unsigned-beta-preview`, and Windows will show
+**Unknown publisher**. Do not continue if the release page, tag, checksum, and
+signing status disagree.
+
 Save open work before testing. The physical monitor can go blank while
 Sunshine captures the Vita virtual display. The normal disconnect path,
 recovery agent, and sign-in safeguard should restore it.
@@ -43,6 +49,7 @@ needs all of these paths; they may be split among testers:
 | Vita package lifecycle | Candidate VPK is installed over itself, removed from LiveArea, and installed again. |
 | Keep-dependencies uninstall | Host is uninstalled while Sunshine, ViGEmBus, and VDD are retained. |
 | Remove-dependencies uninstall | Disposable PC/snapshot where all three shared components can safely be removed. |
+| Different-account UAC | Disposable standard-user session where setup is approved with a different Administrator account; setup must fail before mutation, while later uninstall remains possible. |
 | Laptop | Internal panel, including a stream and recovery while on battery. |
 | Multiple monitors | Two or more connected physical displays. |
 
@@ -73,8 +80,8 @@ unexpected layout change much easier to diagnose.
 
 1. Confirm Vita Moonlight Host is absent from **Windows Settings > Apps >
    Installed apps** (Windows 11) or **Apps & features** (Windows 10).
-2. Run the candidate setup file as Administrator and accept the recommended
-   components.
+2. Sign in to the Administrator account that will be used for streaming. Run
+   the candidate setup file and accept the recommended components.
 3. Setup must not ask you to install an unknown root certificate. Any failed
    prerequisite must produce a visible explanation and stop later
    configuration.
@@ -87,6 +94,27 @@ unexpected layout change much easier to diagnose.
 
 No separate .NET runtime, SDK, PowerShell module, driver download, or command
 line should be required.
+
+### Different-account UAC safety and uninstall access
+
+Run this negative case on a disposable PC or snapshot; it is not a supported
+setup path.
+
+1. Sign in with a standard Windows account and start setup. At UAC, supply a
+   different Administrator account.
+2. Setup must stop with a message naming the mismatch and explaining that the
+   recovery tasks would target the wrong interactive account. It must do so
+   before display recovery, task removal/creation, or product-file replacement.
+3. Confirm the display topology, existing Vita tasks, installed version, and
+   existing pairing are unchanged.
+4. Sign in to the intended Administrator streaming account and rerun setup. It
+   must proceed normally and both Task Scheduler entries must use **Run only
+   when user is logged on**, **Run with highest privileges**, and the exact
+   installed `VitaMoonlight.Host.exe` action.
+5. From a standard-user session, approve **uninstall** with the different
+   Administrator account. Uninstall must still restore a physical display and
+   remove only the two exact Vita-owned task definitions; it must not reject
+   this cleanup merely because the interactive account differs.
 
 ### Upgrade from an older release
 
@@ -118,7 +146,9 @@ line should be required.
 2. Run the exact same candidate installer with the recommended components.
    The physical desktop must remain visible throughout. Setup must preserve the
    Paused preference, leave both Vita recovery tasks absent, and leave the
-   managed VDD disabled; shared Sunshine/Apollo must remain unchanged.
+   managed VDD disabled; Sunshine and any pre-existing Apollo installation
+   must remain unchanged. The public beta must not offer Apollo as a setup
+   choice.
 3. Restart if requested. Reopen the Administrator control panel and confirm it
    still says Paused rather than silently enabling host features.
 4. Choose **Enable Vita host features**. Setup work saved while paused must run
@@ -231,17 +261,25 @@ panel label.
    selected: 960x544, 60 FPS, 8 Mbps, H.264 SDR.
 3. Discover the PC. If discovery fails, test manual host entry and record the
    address type used.
-4. Select the PC and enter the displayed PIN in Sunshine's web page.
-5. Launch **Steam Big Picture**. Confirm Windows activates the dedicated VDD
+4. First exercise an interrupted pairing: enter an incorrect PIN in Sunshine
+   or cancel the attempt. Return to the Vita main screen and confirm the PC is
+   still listed under **Saved computers** as **Pairing required**.
+5. Select that same entry, enter the correct displayed PIN in Sunshine, and
+   confirm it appears paired under **Saved computers** immediately without an
+   app restart. Fully close and reopen Vita Moonlight and confirm the paired
+   entry remains.
+6. Launch **Steam Big Picture**. Confirm Windows activates the dedicated VDD
    at 960x544 and the Vita shows that display rather than merely mirroring a
    physical monitor.
-6. Confirm the image fills the Vita panel, is not 4:3, and is not washed out
+7. Confirm the image fills the Vita panel, is not 4:3, and is not washed out
    by HDR.
-7. Disconnect normally from the Vita menu. The physical display must return.
-8. Repeat with **Desktop** and one custom Sunshine game. The virtual-display
+8. Disconnect normally from the Vita menu. The physical display must return.
+9. Repeat with **Desktop** and one custom Sunshine game. The virtual-display
    lifecycle must cover every Sunshine application, not only Steam.
-9. Test deleting a saved host, rediscovery, manual entry, pairing again,
-   Wake-on-LAN if the PC supports it, and reconnect.
+10. Choose **Forget on this Vita**, restart the Vita app, and confirm the local
+    entry and credentials stay removed. This action must not claim to revoke
+    Sunshine's authorized-client entry. Then test rediscovery, manual entry,
+    pairing again, Wake-on-LAN if the PC supports it, and reconnect.
 
 ## 5. Check the Vita interface and stream controls
 
@@ -283,14 +321,19 @@ panel label.
 3. While a game is running, select 960x540, 960x544, and 1280x720 one at a
    time. After each selection choose **Apply resolution + reconnect**.
    Sunshine must reconnect at the selected desktop/encoder dimensions without
-   closing the Windows game.
+   closing the Windows game. The supported default configuration must begin an
+   ordinary controlled reconnect without sending a display-mode shortcut or
+   adding the former 750 ms pre-disconnect delay. **Check rescue shortcuts**
+   must report native launch-mode control and that legacy F8-F10 shortcuts are
+   not registered.
 4. Change the controller profile in-stream and choose
    **Apply input changes + reconnect**. This must recreate the controller
    without resetting the display.
 5. If a game goes black but the Vita-rendered menu still opens, select
-   **Close Windows game**. The first confirmation must be cancellable; after
-   confirming twice, only the foreground game should close and Steam should
-   remain.
+   **Open Windows Task Manager**. Verify Ctrl+Shift+Esc reaches Windows without
+   leaking a stuck controller state, then explicitly end the test game. Steam
+   should remain; Vita Moonlight must never infer or terminate a foreground
+   process itself.
 6. Test **End Sunshine app**. The session must end and the physical display
    must return.
 7. Test **Recover host display**. The stream should disconnect; within roughly

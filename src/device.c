@@ -16,11 +16,60 @@
 #define DEVICE_FILE "device.ini"
 
 
-#define INT(v) atoi((v))
 #define BOOL(v) strcmp((v), "true") == 0
-#define write_int(fd, key, value) fprintf(fd, "%s = %d\n", key, value)
-#define write_bool(fd, key, value) fprintf(fd, "%s = %s\n", key, value ? "true" : "false");
-#define write_string(fd, key, value) fprintf(fd, "%s = %s\n", key, value)
+
+static void copy_text(char *out, size_t out_size, const char *value) {
+  if (out == NULL || out_size == 0) return;
+  if (value == NULL) value = "";
+  strncpy(out, value, out_size - 1);
+  out[out_size - 1] = '\0';
+}
+
+static void copy_device(device_info_t *out, const device_info_t *info) {
+  if (out == info) return;
+  memset(out, 0, sizeof(*out));
+  copy_text(out->name, sizeof(out->name), info->name);
+  copy_text(out->display_name, sizeof(out->display_name),
+            info->display_name[0] ? info->display_name : info->name);
+  out->paired = info->paired;
+  copy_text(out->internal, sizeof(out->internal), info->internal);
+  copy_text(out->external, sizeof(out->external), info->external);
+  copy_text(out->mac, sizeof(out->mac), info->mac);
+  out->port = info->port;
+  out->prefer_external = info->prefer_external;
+}
+
+static bool valid_device_directory(const char *name) {
+  if (name == NULL || name[0] == '\0' || !strcmp(name, ".") ||
+      !strcmp(name, "..")) {
+    return false;
+  }
+  for (const unsigned char *p = (const unsigned char *)name; *p; ++p) {
+    if (*p < 0x20 || *p == 0x7f || *p == ':' || *p == '/' || *p == '\\') {
+      return false;
+    }
+  }
+  return true;
+}
+
+static bool valid_ini_value(const char *value) {
+  return value != NULL && strchr(value, '\r') == NULL &&
+         strchr(value, '\n') == NULL;
+}
+
+static bool device_directory_path(char *out, size_t out_size,
+                                  const char *name) {
+  if (out == NULL || out_size == 0 || !valid_device_directory(name)) {
+    return false;
+  }
+  if (config.key_dir[0] == '\0') return false;
+  size_t base_length = strlen(config.key_dir);
+  const char *separator =
+      base_length > 0 && config.key_dir[base_length - 1] == '/' ? "" : "/";
+  int written = snprintf(
+      out, out_size, "%s%s%s", config.key_dir, separator, name);
+  return written >= 0 && (size_t)written < out_size;
+}
 
 // Elimina la carpeta y el archivo del dispositivo
 bool remove_device(const char *name) {
@@ -35,31 +84,48 @@ bool remove_device(const char *name) {
     vita_debug_log("remove_device: device %s not found\n", name);
     return false;
   }
-  // Eliminar del arreglo
-  for (int i = idx; i < known_devices.count - 1; i++) {
-    known_devices.devices[i] = known_devices.devices[i + 1];
-  }
-  known_devices.count--;
-
   // Eliminar del disco
-  char dir_path[512];
-  snprintf(dir_path, sizeof(dir_path), "%s/%s", config.key_dir, name);
-  char file_path[512];
-  device_file_path(file_path, name);
+  char dir_path[DEVICE_PATH_CAPACITY];
+  char file_path[DEVICE_PATH_CAPACITY];
+  if (!device_directory_path(dir_path, sizeof(dir_path), name) ||
+      !device_file_path(file_path, sizeof(file_path), name)) {
+    vita_debug_log("remove_device: unsafe or overlong device path\n");
+    return false;
+  }
   sceIoRemove(file_path); // Elimina device.ini
+  bool storage_cleared = true;
   // Elimina todos los archivos dentro de la carpeta antes de borrar la carpeta
   SceIoDirent dirent;
   SceUID dfd = sceIoDopen(dir_path);
   if (dfd >= 0) {
     while (sceIoDread(dfd, &dirent) > 0) {
       if (strcmp(dirent.d_name, ".") == 0 || strcmp(dirent.d_name, "..") == 0) continue;
-      char full_path[512];
-      snprintf(full_path, sizeof(full_path), "%s/%s", dir_path, dirent.d_name);
-      sceIoRemove(full_path);
+      char full_path[DEVICE_PATH_CAPACITY];
+      int written = snprintf(
+          full_path, sizeof(full_path), "%s/%s", dir_path, dirent.d_name);
+      if (written >= 0 && (size_t)written < sizeof(full_path)) {
+        if (sceIoRemove(full_path) < 0) storage_cleared = false;
+      } else {
+        storage_cleared = false;
+      }
     }
     sceIoDclose(dfd);
   }
-  sceIoRmdir(dir_path);
+  if (dfd >= 0 && sceIoRmdir(dir_path) < 0) storage_cleared = false;
+  SceIoStat remaining = {0};
+  if (sceIoGetstat(file_path, &remaining) >= 0 ||
+      sceIoGetstat(dir_path, &remaining) >= 0) {
+    storage_cleared = false;
+  }
+  if (!storage_cleared) {
+    vita_debug_log("remove_device: local pairing files could not be removed\n");
+    return false;
+  }
+  // Remove the canonical in-memory record only after all paths are validated.
+  for (int i = idx; i < known_devices.count - 1; i++) {
+    known_devices.devices[i] = known_devices.devices[i + 1];
+  }
+  known_devices.count--;
   vita_debug_log("remove_device: device %s removed from memory and disk\n", name);
   return true;
 }
@@ -89,8 +155,18 @@ device_info_t* find_device_by_address(const char *address) {
   return NULL;
 }
 
-void device_file_path(char *out, const char *dir) {
-  snprintf(out, 512, "%s%s/%s", config.key_dir, dir, DEVICE_FILE);
+bool device_file_path(char *out, size_t out_size, const char *dir) {
+  if (out == NULL || out_size == 0 || !valid_device_directory(dir)) {
+    return false;
+  }
+  if (config.key_dir[0] == '\0') return false;
+  size_t base_length = strlen(config.key_dir);
+  const char *separator =
+      base_length > 0 && config.key_dir[base_length - 1] == '/' ? "" : "/";
+  int written = snprintf(
+      out, out_size, "%s%s%s/%s", config.key_dir, separator, dir,
+      DEVICE_FILE);
+  return written >= 0 && (size_t)written < out_size;
 }
 
 static int device_ini_handle(void *out, const char *section, const char *name,
@@ -99,27 +175,35 @@ static int device_ini_handle(void *out, const char *section, const char *name,
 
   if (strcmp(name, "paired") == 0) {
     info->paired = BOOL(value);
+  } else if (strcmp(name, "display_name") == 0) {
+    copy_text(info->display_name, sizeof(info->display_name), value);
   } else if (strcmp(name, "internal") == 0) {
-    strncpy(info->internal, value, 255);
+    copy_text(info->internal, sizeof(info->internal), value);
   } else if (strcmp(name, "external") == 0) {
-    strncpy(info->external, value, 255);
+    copy_text(info->external, sizeof(info->external), value);
   } else if (strcmp(name, "mac") == 0) {
-    strncpy(info->mac, value, 17);
-    info->mac[17] = '\0';
+    copy_text(info->mac, sizeof(info->mac), value);
   } else if (strcmp(name, "port") == 0) {
-    info->port = INT(value);
+    long port = strtol(value, NULL, 10);
+    if (port > 0 && port <= UINT16_MAX) info->port = (uint16_t)port;
   } else if (strcmp(name, "prefer_external") == 0) {
     info->prefer_external = BOOL(value);
   }
   return 1;
 }
 
-device_info_t* append_device(device_info_t *info) {
+device_info_t* append_device(const device_info_t *info) {
+  if (info == NULL || !valid_device_directory(info->name)) return NULL;
   if (find_device(info->name)) {
     vita_debug_log("append_device: device %s is already in the list\n", info->name);
     return NULL;
   }
-  // FIXME: need mutex
+  if (known_devices.count >= DEVICE_MAX_COUNT) {
+    vita_debug_log("append_device: saved device limit (%d) reached\n",
+                   DEVICE_MAX_COUNT);
+    return NULL;
+  }
+  // The UI stops the host scanner before mutating this collection.
   if (known_devices.size == 0) {
     vita_debug_log("append_device: allocating memory for the initial device list...\n");
     known_devices.devices = malloc(sizeof(device_info_t) * 4);
@@ -144,33 +228,39 @@ device_info_t* append_device(device_info_t *info) {
   }
   device_info_t *p = &known_devices.devices[known_devices.count];
 
-  strncpy(p->name, info->name, 255);
-  p->paired = info->paired;
-  strncpy(p->internal, info->internal, 255);
-  strncpy(p->external, info->external, 255);
-  strncpy(p->mac, info->mac, 17);
-  p->mac[17] = '\0';
-  p->port = info->port;
-  p->prefer_external = info->prefer_external;
+  copy_device(p, info);
   vita_debug_log("append_device: device %s is added to the list\n", p->name);
 
   known_devices.count++;
   return p;
 }
 
-bool update_device(device_info_t *info) {
+device_info_t* upsert_device(const device_info_t *info) {
+  if (info == NULL) return NULL;
   device_info_t *p = find_device(info->name);
-  if (p == NULL) {
-    return false;
-  }
+  if (p == NULL) return append_device(info);
 
-  //strncpy(p->name, info->name, 255);
-  p->paired = info->paired;
-  strncpy(p->internal, info->internal, 255);
-  strncpy(p->external, info->external, 255);
-  p->port = info->port;
-  p->prefer_external = info->prefer_external;
-  return true;
+  /* Discovery records are intentionally incomplete. Never let a rediscovery
+   * clear authentication, a user-facing alias, the learned external address,
+   * or a MAC address. Authoritative pairing code may update those fields on
+   * the returned canonical record after this merge. */
+  device_info_t merged = *info;
+  if (p->paired) merged.paired = true;
+  if (merged.display_name[0] == '\0' ||
+      !strcmp(merged.display_name, merged.name)) {
+    copy_text(merged.display_name, sizeof(merged.display_name),
+              p->display_name);
+  }
+  if (merged.external[0] == '\0') {
+    copy_text(merged.external, sizeof(merged.external), p->external);
+    merged.prefer_external = p->prefer_external;
+  }
+  if (merged.mac[0] == '\0') {
+    copy_text(merged.mac, sizeof(merged.mac), p->mac);
+  }
+  if (merged.port == 0) merged.port = p->port;
+  copy_device(p, &merged);
+  return p;
 }
 
 void load_all_known_devices() {
@@ -194,11 +284,14 @@ void load_all_known_devices() {
     }
 
     memset(&info, 0, sizeof(device_info_t));
-    strncpy(info.name, ent.d_name, 255);
+    copy_text(info.name, sizeof(info.name), ent.d_name);
     if (!load_device_info(&info)) {
       continue;
     }
-    append_device(&info);
+    if (info.display_name[0] == '\0') {
+      copy_text(info.display_name, sizeof(info.display_name), info.name);
+    }
+    upsert_device(&info);
   } while(true);
 
   sceIoDclose(dfd);
@@ -206,15 +299,38 @@ void load_all_known_devices() {
 }
 
 bool load_device_info(device_info_t *info) {
-  char path[512] = {0};
-  device_file_path(path, info->name);
+  char path[DEVICE_PATH_CAPACITY] = {0};
+  char backup_path[DEVICE_PATH_CAPACITY] = {0};
+  if (info == NULL || !device_file_path(path, sizeof(path), info->name)) {
+    return false;
+  }
+  int backup_length = snprintf(
+      backup_path, sizeof(backup_path), "%s.bak", path);
+  if (backup_length < 0 || (size_t)backup_length >= sizeof(backup_path)) {
+    return false;
+  }
   vita_debug_log("load_device_info: reading %s\n", path);
 
   // for backward compatibility
   info->port = 47989;
   int ret = ini_parse(path, device_ini_handle, info);
-  if (!ret) {
-    vita_debug_log("load_device_info: device found:\n", ret);
+  bool valid = ret == 0 && info->internal[0] != '\0' && info->port != 0;
+  if (!valid) {
+    /* Recover the last complete record if power was lost during promotion. */
+    char preserved_name[sizeof(info->name)];
+    copy_text(preserved_name, sizeof(preserved_name), info->name);
+    memset(info, 0, sizeof(*info));
+    copy_text(info->name, sizeof(info->name), preserved_name);
+    info->port = 47989;
+    ret = ini_parse(backup_path, device_ini_handle, info);
+    valid = ret == 0 && info->internal[0] != '\0' && info->port != 0;
+    if (valid) {
+      sceIoRemove(path);
+      sceIoRename(backup_path, path);
+    }
+  }
+  if (valid) {
+    vita_debug_log("load_device_info: device found\n");
     vita_debug_log("load_device_info:   info->name = %s\n", info->name);
     vita_debug_log("load_device_info:   info->paired = %s\n", info->paired ? "true" : "false");
     vita_debug_log("load_device_info:   info->internal = %s\n", info->internal);
@@ -228,38 +344,85 @@ bool load_device_info(device_info_t *info) {
   }
 }
 
-void save_device_info(const device_info_t *info) {
-  char path[512] = {0};
-  device_file_path(path, info->name);
+bool save_device_info(const device_info_t *info) {
+  char path[DEVICE_PATH_CAPACITY] = {0};
+  char temporary_path[DEVICE_PATH_CAPACITY] = {0};
+  char backup_path[DEVICE_PATH_CAPACITY] = {0};
+  if (info == NULL || !valid_ini_value(info->display_name) ||
+      !valid_ini_value(info->internal) || !valid_ini_value(info->external) ||
+      !valid_ini_value(info->mac) ||
+      !device_file_path(path, sizeof(path), info->name)) {
+    vita_debug_log("save_device_info: unsafe or overlong device path\n");
+    return false;
+  }
+  int temporary_length = snprintf(
+      temporary_path, sizeof(temporary_path), "%s.tmp", path);
+  int backup_length = snprintf(
+      backup_path, sizeof(backup_path), "%s.bak", path);
+  if (temporary_length < 0 ||
+      (size_t)temporary_length >= sizeof(temporary_path) ||
+      backup_length < 0 || (size_t)backup_length >= sizeof(backup_path)) {
+    vita_debug_log("save_device_info: device journal path is too long\n");
+    return false;
+  }
   vita_debug_log("save_device_info: device file path: %s\n", path);
 
   // Ya no se intenta obtener la MAC por ARP. Solo se guarda la que esté en info->mac.
 
-  FILE* fd = fopen(path, "w");
+  sceIoRemove(temporary_path);
+  FILE* fd = fopen(temporary_path, "w");
   if (!fd) {
-    // FIXME
     vita_debug_log("save_device_info: cannot open device file\n");
-    return;
+    return false;
   }
 
+  bool ok = true;
   vita_debug_log("save_device_info: paired = %s\n", info->paired ? "true" : "false");
-  write_bool(fd, "paired", info->paired);
+  ok &= fprintf(fd, "paired = %s\n", info->paired ? "true" : "false") >= 0;
+
+  vita_debug_log("save_device_info: display_name = %s\n", info->display_name);
+  ok &= fprintf(fd, "display_name = %s\n",
+                info->display_name[0] ? info->display_name : info->name) >= 0;
 
   vita_debug_log("save_device_info: internal = %s\n", info->internal);
-  write_string(fd, "internal", info->internal);
+  ok &= fprintf(fd, "internal = %s\n", info->internal) >= 0;
 
   vita_debug_log("save_device_info: external = %s\n", info->external);
-  write_string(fd, "external", info->external);
+  ok &= fprintf(fd, "external = %s\n", info->external) >= 0;
 
   vita_debug_log("save_device_info: mac = %s\n", info->mac);
-  write_string(fd, "mac", info->mac);
+  ok &= fprintf(fd, "mac = %s\n", info->mac) >= 0;
 
   vita_debug_log("save_device_info: port = %d\n", info->port);
-  write_int(fd, "port", info->port);
+  ok &= fprintf(fd, "port = %d\n", info->port) >= 0;
 
   vita_debug_log("save_device_info: prefer_external = %s\n", info->prefer_external ? "true" : "false");
-  write_bool(fd, "prefer_external", info->prefer_external);
+  ok &= fprintf(fd, "prefer_external = %s\n",
+                info->prefer_external ? "true" : "false") >= 0;
 
-  fclose(fd);
-  vita_debug_log("save_device_info: file closed\n");
+  ok &= fflush(fd) == 0;
+  ok &= fclose(fd) == 0;
+  if (!ok) {
+    sceIoRemove(temporary_path);
+    vita_debug_log("save_device_info: write failed\n");
+    return false;
+  }
+
+  SceIoStat existing = {0};
+  bool had_existing = sceIoGetstat(path, &existing) >= 0;
+  sceIoRemove(backup_path);
+  if (had_existing && sceIoRename(path, backup_path) < 0) {
+    sceIoRemove(temporary_path);
+    vita_debug_log("save_device_info: could not prepare existing file\n");
+    return false;
+  }
+  if (sceIoRename(temporary_path, path) < 0) {
+    if (had_existing) sceIoRename(backup_path, path);
+    sceIoRemove(temporary_path);
+    vita_debug_log("save_device_info: could not commit device file\n");
+    return false;
+  }
+  if (had_existing) sceIoRemove(backup_path);
+  vita_debug_log("save_device_info: file committed\n");
+  return true;
 }

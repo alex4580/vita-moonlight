@@ -16,6 +16,7 @@ typedef struct VitaMotionStatus {
 } VitaMotionStatus;
 
 bool vita_motion_init(void);
+bool vita_motion_shutdown(void);
 bool vita_motion_begin_stream(bool allow_motion);
 bool vita_motion_end_stream(void);
 void vita_motion_set_state(uint8_t motion_type, uint16_t report_rate);

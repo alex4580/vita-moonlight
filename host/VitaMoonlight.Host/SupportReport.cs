@@ -26,6 +26,7 @@ internal sealed record SupportReport(
     string Architecture,
     bool SupportedPlatform,
     bool Administrator,
+    bool ScheduledTaskAccountReady,
     string BackendStatus,
     string BackendDesiredState,
     bool BackendPreferencePersisted,
@@ -63,7 +64,7 @@ internal sealed record SupportReport(
 
 internal static class SupportReportExporter
 {
-    internal const int CurrentSchemaVersion = 2;
+    internal const int CurrentSchemaVersion = 3;
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -157,6 +158,7 @@ internal static class SupportReportExporter
             diagnostics.Architecture,
             diagnostics.IsSupportedPlatform,
             diagnostics.IsAdministrator,
+            diagnostics.ScheduledTaskAccountReady,
             diagnostics.BackendStatus.ToString(),
             diagnostics.BackendDesiredState.ToString(),
             diagnostics.BackendPreferencePersisted,

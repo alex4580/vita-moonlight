@@ -23,7 +23,7 @@ Presets are full configurations, not bitrate shortcuts. All four set:
 - 60 Hz Vita client timing;
 - host game optimization enabled;
 - automatic clean-keyframe (IDR) recovery compatible with the Vita decoder;
-- Vita frame pacing enabled;
+- immediate presentation without artificial future-frame drops;
 - Vita vblank wait disabled;
 - fit-entire-frame scaling instead of crop/fill;
 - Vita power-save suppression enabled.
@@ -61,15 +61,20 @@ already running.
 
 To change it remotely:
 
-1. Hold **START**, then press **L + R** to open the stream menu.
+1. Hold **START**, then press **L + R** within one second to open the stream
+   menu. All three shortcut buttons are consumed locally instead of being sent
+   to the PC.
 2. Open **Stream & virtual display**.
 3. Select **Stream + virtual display** and choose 960x544, 960x540, or
    1280x720.
 4. Select **Apply resolution + reconnect**.
 
-Moonlight tells the host agent to change the active VDD, disconnects only the
-video session, and resumes the same Sunshine application. The Windows game
-continues running. The reconnect renegotiates resolution, FPS, bitrate,
+Moonlight saves the selection, disconnects only the video session, and resumes
+the same Sunshine application. The ordinary GameStream launch request is the
+authoritative mode change: Sunshine's native display manager applies the
+requested Vita resolution to the dedicated display. The client does not send a
+separate display-mode hotkey or wait for a host-side transaction. The Windows
+game continues running. The reconnect renegotiates resolution, FPS, bitrate,
 network mode, and other stream-start settings with Sunshine's encoder. Expect
 a brief black screen while this happens.
 
@@ -87,7 +92,7 @@ configuration.
 | Settings category | Available before a stream | Matching in-stream access |
 |---|---|---|
 | **Stream quality** | Preset, managed resolution, FPS, and bitrate | **Stream & virtual display**, plus Apply resolution + reconnect |
-| **Advanced streaming** | Host optimization, packet recovery, network mode, display synchronization, frame pacing, and aspect scaling | **Stream & virtual display**, plus Apply resolution + reconnect |
+| **Advanced streaming** | Host optimization, packet recovery, network mode, optional display synchronization, and aspect scaling | **Stream & virtual display**, plus Apply resolution + reconnect |
 | **Controller** | Controller preset, gyro/sensitivity, sprint helper, PS behavior, shoulder swap, and graphical button mapping | **Controller & input**, plus Apply input changes + reconnect |
 | **Touch and keyboard** | Touch mode, front/rear zones, mouse acceleration, and keyboard layout | Core touch mode under **Controller & input**; keyboard on the main stream menu |
 | **System and support** | Performance overlay, Start/Stop support log, PC audio, Vita power behavior, and X/O layout | Performance overlay, Real-time diagnostics, and Start/Stop support log on the main stream menu |
@@ -105,10 +110,10 @@ Windows game.
 | **Video bitrate** | More bits reduce blocks, smearing, and lost detail during motion. | A rate above the sustainable link capacity causes queues, loss, freezes, and added input latency. The accepted range is 1-30 Mbps. |
 | **Network mode** | Auto detect chooses local/remote handling; Local only and Remote / VPN override it. | Forcing the wrong path can reduce responsiveness or reliability. Leave Auto detect selected unless the host path is known. |
 | **Packet-loss recovery** | Automatically requests a clean IDR keyframe when the decoder must recover. Reference-frame invalidation is intentionally disabled because the Vita hardware decoder requires a rewritten one-reference-frame SPS. | No user tuning is required. This avoids the corruption that reference invalidation can cause when the decoded reference structure differs from the host's original stream. |
-| **Frame pacing** | Drops late or excess frames instead of displaying an uneven queue. | Usually smoother. Turning it off can feel slightly more immediate in a special case but can introduce judder. |
+| **Presentation timing** | Displays each completed hardware-decoded frame immediately. | This is the lowest-latency policy and avoids turning harmless one-second timer jitter into future-frame drops. Use Vita vblank synchronization only if visible tearing matters more than minimum latency. |
 | **Wait for Vita vblank** | Synchronizes drawing to the Vita display. | May reduce tearing, but can add synchronization latency; presets leave it off. |
 | **Aspect scaling** | Fit shows the complete encoded frame; Crop / fill removes borders by trimming edges. | Crop can hide desktop UI and game HUD elements. Fit is the safe default. |
-| **Host game optimization** | Allows Sunshine's protocol to request game-oriented settings. | A game may rewrite its own graphics choices. Disable only for titles that repeatedly change them. |
+| **Virtual-display optimization** | Always enabled for the managed host. It lets Sunshine honor the Vita launch resolution and select the dedicated SDR display. | This is part of the host/client compatibility contract and is no longer exposed as a switch. Use a streaming preset or resolution control instead. |
 | **Local audio** | Keeps audio playing on the PC as well as the Vita. | Can cause echo in the room; presets leave it off. |
 
 The client requests H.264 only because the Vita has a hardware H.264 decoder.
@@ -212,7 +217,7 @@ optional Python summarizer.
 ## On-screen keyboard
 
 Focus a text field in the streamed Windows application first. Then either hold
-**START** and tap **D-pad Left** within 300 ms, or choose **Open on-screen
+**START** and tap **D-pad Left** within one second, or choose **Open on-screen
 keyboard** from the in-stream menu. Typed characters are forwarded
 immediately; Backspace, Left/Right, and Enter are sent as PC keys. Close or
 minimize the Vita keyboard to return to the stream.

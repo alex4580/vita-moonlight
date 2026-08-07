@@ -1,65 +1,305 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <changeinfo>
 <changes app_ver="00.14"><![CDATA[
+## 0.14.8<br>
+<br>
+* Fixed the Vita pairing retry path that could authorize the client in<br>
+Sunshine but leave the real saved-computer entry unpaired or hidden until a<br>
+restart. Failed and cancelled attempts now remain visible as **Pairing<br>
+required**, successful pairing is committed before the app continues, and<br>
+journaled device storage survives an interrupted write.<br>
+* Isolated every PIN attempt with a fresh Sunshine pairing session identity and<br>
+kept the final certificate-pinned pairing challenge authoritative. Aborted<br>
+attempts can be retried without inheriting stale Sunshine session state.<br>
+* Reworked discovery and saved-host health checks around one owned worker,<br>
+bounded probes, offline backoff, and stable saved identities. Idle or<br>
+unpaired entries no longer create a permanent polling load, and worker<br>
+shutdown is joined before pairing, suspension, or exit.<br>
+* Hardened Vita configuration, connection, input, motion, and power lifecycles<br>
+so partial startup and reconnect failures clean up in reverse order,<br>
+shortcuts remain local, released inputs cannot stick, and optional support<br>
+logging remains off until the user starts a capture.<br>
+* Made in-stream display changes reconnect through the ordinary GameStream<br>
+launch-mode contract without sending F8-F10 or adding a pre-disconnect delay.<br>
+The host registers and requires those legacy mode keys only for an explicitly<br>
+selected single-application fallback; default installs reserve only F11 for<br>
+physical-display recovery.<br>
+* Tightened Windows virtual-display selection and recovery. Automatic setup<br>
+selects only the managed MTT display, validates fresh post-restart Sunshine<br>
+inventory, rejects unhealthy driver devices, and restores a usable physical<br>
+mode after suspend without replacing a healthy desktop mode.<br>
+* Expanded release-contract checks and first-time community instructions for<br>
+clean install, in-place upgrade, same-version repair, Vita reinstall,<br>
+interrupted pairing retry, Pause/Enable, and both shared-component uninstall<br>
+choices.<br>
+* Moved the deliberately unsigned Windows preview exception to the exact<br>
+`v0.14.8-beta.1` tag. The workflow verifies its Unknown-publisher status,<br>
+paired artifact identity, SHA-256 manifest, and GitHub provenance; every<br>
+other public tag remains signing-required.<br>
+<br>
 ## 0.14.7<br>
-* Add host sleep/resume repair for physical monitors stuck at fallback resolution or refresh rate.<br>
-* Add reversible Vita host-feature pause/enable and safer upgrade/uninstall lifecycle handling.<br>
-* Expand privacy-safe Windows support reports with exact task, display-mode, and managed-VDD state.<br>
+<br>
+* Fixed Vita connections to current Sunshine builds whose bounded `appversion`<br>
+contains the legitimate signed build sentinel used by `7.1.431.-1`. Invalid<br>
+server numeric data now identifies the exact field instead of reporting a<br>
+generic numeric-field error.<br>
+* Restored Sunshine PIN pairing on Vita by replacing the embedded-runtime-<br>
+dependent `%hhx` certificate conversion with a strict ASCII hex decoder.<br>
+The decoder accepts only exact upper- or lowercase hex and permanently tests<br>
+Sunshine's PEM certificate envelope while rejecting odd or decorated input.<br>
+* Added a machine-checked Vita/host compatibility contract. Vita requests are<br>
+limited to 960x544, 960x540, or 1280x720 at 24/30/40/50/60 FPS while the<br>
+Windows virtual desktop remains at a driver-safe 60 Hz. Native Sunshine<br>
+display management covers all apps; the tolerant hook remains only for the<br>
+legacy single-application fallback.<br>
+* Secured Vita-to-Sunshine HTTPS with a certificate pin established by the PIN<br>
+exchange. Upgrades preserve valid unique client identities; the historical<br>
+shared identity is replaced only during the required one-time migration when<br>
+no authenticated host pin exists. Fresh installs generate a unique identity,<br>
+all cryptographic randomness is checked, and optional HTTP diagnostics no<br>
+longer print pairing secrets or response bodies.<br>
+* Removed blocking direct-submit audio/video callbacks from Moonlight's network<br>
+receive path, bounded SPS rewriting, disabled incompatible H.264 reference-<br>
+frame invalidation, and pinned the Vita-tested Moonlight common transport<br>
+fixes at `07c32c80f98bb0d7214c577bd080eea3ce64a856`.<br>
+* Bounded untrusted Sunshine XML, App lists, mode lists, and UI strings; fixed<br>
+empty-list menu indexing and optional legacy-host fields; and made failed<br>
+decoder, audio, motion, pairing, and reconnect lifecycles safe to retry.<br>
+* Made gyro sampling lazy and host-driven. No motion worker runs outside a<br>
+compatible PS/DS4 stream, one 64 KiB event-driven worker replaces two<br>
+permanent polling workers, and sensor setup failures no longer trap startup.<br>
+* Added a durable, reversible **Pause Vita host features** lifecycle that restores<br>
+the physical desktop, disables Vita background tasks and the managed VDD,<br>
+while leaving shared Sunshine/Apollo installed and reachable. Clients pinned<br>
+to the paused Vita VDD may need a physical host output. Enable restores only<br>
+the previously present Vita safeguards, and upgrades preserve pause.<br>
+* Added pre-sleep physical-display preparation and bounded post-resume<br>
+topology/mode recovery so interrupted streams cannot strand Windows on a<br>
+Vita-only, physical-plus-VDD, 800x600, or Vita-sized layout after wake.<br>
+* Made clean installs, upgrades, and repairs exclusive and crash-resumable.<br>
+Setup preserves the original paused/enabled intent and exact recovery-task<br>
+obligations across a killed installer, then restores them before clearing<br>
+its protected maintenance fence.<br>
+* Fixed in-place upgrades from older beta hosts that predate the<br>
+`uninstall prepare` command. The installer now relies on its embedded current<br>
+maintenance helper's already-completed physical-display safety check instead<br>
+of asking the legacy installed executable to run a command it does not have.<br>
+* Hardened uninstall with exact Task Scheduler COM verification, a second<br>
+physical-display safety gate, rollback of recovery safeguards on failure,<br>
+and allowlisted cleanup of current and legacy Vita-owned state.<br>
+* Expanded privacy-safe support reports with backend issue categories, exact<br>
+task states, managed-VDD state, and active display resolution/refresh data.<br>
 <br>
 ## 0.14.6<br>
-* Remove obsolete Circle/O transition counters from real-time diagnostics without changing normal Circle input or release safety.<br>
-* Fix clipped or overlapping menu text and make long help pages scrollable with UP/DOWN.<br>
-* Bound front-touch contacts and release mouse, DS4 touchpad, and tablet state safely across mode changes and disconnects.<br>
-* Correct the VPK package identity to 0.14.6 and harden release validation and checksums.<br>
-* Replace per-input logging with optional privacy-safe support sessions containing concise system, connection, decoder, and network summaries.<br>
-* Reorganize the Vita settings and Windows control panel around setup, streaming, controls, recovery, and support tasks.<br>
-* Add first-install, upgrade, repair, uninstall, community-testing, support-report, build, and release guidance to both Windows packages.<br>
+<br>
+* Removed obsolete Circle/O transition counters from real-time diagnostics.<br>
+Normal Circle input and disconnect release safety are unchanged.<br>
+* Fixed clipped and overlapping Vita menu text, made long help dialogs<br>
+scrollable, and hardened host-discovery labels and touch-zone previews.<br>
+* Bounded every stored front-touch contact, sanitized legacy touch geometry,<br>
+and released mouse, DS4-touchpad, and tablet contacts when changing modes,<br>
+entering a mapped corner, or ending a stream.<br>
+* Corrected the VPK build identity to 0.14.6 and added tag/version validation,<br>
+a one-time unsigned `v0.14.6-beta.1` bootstrap gate, signing enforcement for<br>
+every later tag, exact release-asset checks, SHA-256 manifests, and GitHub<br>
+provenance attestations to the publishing workflow.<br>
+* Rebuilt Windows uninstall around verified physical-display recovery. Shared<br>
+Sunshine, ViGEmBus, and VDD installations are retained by default, optional<br>
+removal is explicit, Vita-managed host state is cleaned, and silent<br>
+automation remains noninteractive.<br>
+* Added an on-device graphical controller mapper for every remote gamepad<br>
+button and a live front-touch-zone editor with gamepad, mouse, keyboard, and<br>
+local actions. Mapping changes apply immediately and use Vita-safe<br>
+journaled saves with interrupted-write recovery.<br>
+* Hardened the virtual-display driver's fixed configuration path. Install or<br>
+repair now replaces legacy entries without following them, creates the<br>
+protected directory atomically, pins its Windows file identity, and rejects<br>
+substitutions during reload, verification, or uninstall.<br>
+* Added the `emergency reset-display-driver` recovery alias and packaged the<br>
+beta smoke-test, build/fork, and signed-release guides with both Windows<br>
+distributions.<br>
+* Replaced input-by-input diagnostics with an optional, privacy-safe support<br>
+log. Each capture starts a fresh structured session, keeps one previous<br>
+capture, records concise system/connection/decoder/network summaries, and<br>
+can be converted into a shareable report with the bundled summarizer.<br>
+* Added structured public issue and pull-request templates plus signed GitHub<br>
+provenance attestations for the VPK, Windows packages, and checksum<br>
+manifest.<br>
+* Reorganized the Vita settings and Windows control panel around ordinary<br>
+setup, streaming, controller, touch, recovery, and support tasks instead of<br>
+developer diagnostics.<br>
+* Rewrote the quick start, minimum beta test, full end-to-end test, logging<br>
+guide, and community report template for clean installs, in-place upgrades,<br>
+same-version repairs, and both shared-component uninstall choices.<br>
+* Made the Windows installer lifecycle-aware, added a reviewable one-click host<br>
+support report, and packaged the matching user, testing, logging, build, and<br>
+release documentation with both Windows distributions.<br>
+* **Code signing policy:** see the<br>
+[public policy](../docs/CODE_SIGNING_POLICY.md)<br>
+and [privacy disclosure](../PRIVACY.md).<br>
 <br>
 ## 0.14.5<br>
-* Add visible in-stream menu controls for optional diagnostic file logging and the on-screen keyboard.<br>
-* Keep file logging off by default and retain the Triangle and START + Left shortcuts.<br>
+<br>
+* Added explicit **Diagnostic file logging** and **Open on-screen keyboard**<br>
+rows to the in-stream menu. Logging remains off by default and the existing<br>
+Triangle and START + Left shortcuts remain available.<br>
 <br>
 ## 0.14.4<br>
-* Wait for an existing virtual display to finish re-enumerating after an in-place driver repair.<br>
-* Keep physical displays active during that wait and distinguish a delayed target from a display-name mismatch.<br>
+<br>
+* Fixed repair installs racing Windows display-target re-enumeration after the<br>
+existing VDD device stack restarts. Native verification now waits up to 30<br>
+seconds for the already-installed target to return before changing any<br>
+display topology.<br>
+* Kept every physical display active during the new wait and added a specific<br>
+timeout that distinguishes a delayed/absent target from a real display-name<br>
+mismatch.<br>
 <br>
 ## 0.14.3<br>
-* Repair an already-installed VDD in place without assuming a clean install or losing the existing configuration.<br>
-* Remove duplicate effective refresh modes and apply temporary 960x544 verification non-persistently.<br>
-* Report the current and advertised Windows display modes when a live change is rejected.<br>
+<br>
+* Fixed **Apply recommended setup** on an existing VDD installation. Repair<br>
+now stages the driver package first, then reapplies and normalizes the<br>
+existing configuration so a real upgrade cannot overwrite Vita modes with<br>
+the stock XML.<br>
+* Removed duplicate effective modes created when a resolution contained an<br>
+explicit 60 Hz entry and the upstream driver also replicated global 60 Hz<br>
+onto it. Other user resolutions, refresh rates, and driver options remain<br>
+intact.<br>
+* Fixed native-mode verification using `CDS_UPDATEREGISTRY` on its temporary<br>
+extended-display topology. Verification now uses the same non-persistent<br>
+live change as streaming, which was validated against an upgraded<br>
+`ROOT\MttVDD` device at 960x544/60.<br>
+* Mode failures now distinguish an absent mode from a Windows rejection and<br>
+report the current mode plus the closest modes actually advertised by the<br>
+active display source.<br>
 <br>
 ## 0.14.2<br>
-* Keep every active physical monitor visible while setup verifies the Vita virtual display at native 960x544/60.<br>
-* Restore the original display topology once and report the actual Windows mode error instead of repeatedly requesting a reboot.<br>
+<br>
+* Fixed driver setup and repair temporarily making the Vita virtual display<br>
+the only active screen while checking 960x544. Verification now preserves<br>
+every active physical monitor, adds VDD as an extended display, retries the<br>
+native mode in place with a fresh driver mode enumeration, and restores the<br>
+exact original topology once.<br>
+* Replaced the generic ten-second enumeration failure and repeated restart<br>
+advice with the final Windows mode error. A failed native-mode check now<br>
+stops setup as a real error after restoring the physical desktop.<br>
 <br>
 ## 0.14.1<br>
-* Add native 960x544/60 virtual-display provisioning and controlled in-stream switching between 960x544, 960x540, and 1280x720.<br>
-* Add top-right Frame rate, Frame rate + network, and Advanced overlays with a translucent background.<br>
-* Move live diagnostics to a dedicated screen and make append-only file logging optional and off by default.<br>
-* Add complete Reliable, Recommended, High quality, and Remote / VPN presets with matching pre-stream and in-stream controls.<br>
-* Separate stream-resolution and input reconnect actions so controller changes do not reset the virtual display.<br>
-* Harden stalled-video rendering, reconnect cleanup, input suppression, Sunshine compatibility checks, and physical-display recovery.<br>
-* Expand the Windows GUI companion, installer, documentation, and release acceptance tests.<br>
+<br>
+* Added a dedicated real-time diagnostics screen and optional append-only Vita<br>
+log. Logging is off by default, opens no file until enabled, and can be<br>
+toggled before or during a stream.<br>
+* Added top-right performance overlays for frame rate, frame rate plus network,<br>
+and advanced stream/decode statistics. The overlays use a 50%-alpha<br>
+background and avoid extended metric collection when it is not needed.<br>
+* Replaced partial bitrate-only choices with complete Reliable, Recommended,<br>
+High quality, and Remote / VPN streaming presets. Added matching preset and<br>
+input controls before and during a stream, clearer tradeoff explanations, and<br>
+a full recommended-settings reset.<br>
+* Made native 960x544/60 the first-run client and virtual-display mode. Added<br>
+managed 960x540 and 1280x720 compatibility modes and a controlled in-stream<br>
+display change that updates the active VDD, reconnects Moonlight, and leaves<br>
+the Windows game running.<br>
+* Hardened virtual-display provisioning, verification, rescue hotkeys, and<br>
+physical-display recovery across clean installs and repair installs.<br>
+* Made the Windows installer and **Apply recommended setup** verify or repair<br>
+Sunshine, ViGEmBus, and native VDD readiness with checked failures and an<br>
+explicit stop-and-resume path when Windows requires a reboot.<br>
+* Fixed repair installs failing on Windows builds where PnPUtil reports error<br>
+50 for an already-enabled VDD. That result is accepted only for the<br>
+enable-device step and is followed by device restart and native-mode<br>
+verification. Installer failures now include the host's concrete error<br>
+breadcrumb instead of only a numeric exit code.<br>
 <br>
 ## 0.14.0<br>
-* Make START + L + R reliable in any button order with a longer START-led window.<br>
-* Keep single PS presses local by default while preserving double-PS LiveArea escape; add Safe Guide, Immediate Guide, and System modes.<br>
-* Fix virtual-display selection when the requested Vita mode was missing from VDD.<br>
-* Consume the START + L + R overlay chord locally instead of sending it to the PC.<br>
-* Add Reliable, Balanced, and High quality streaming presets with on-device help.<br>
-* Default new installs to Xbox compatibility, H.264 packet-loss recovery, 960x544/60, and 8 Mbps.<br>
-* Validate old configuration values and improve Windows host portability.<br>
-* Add an in-stream settings and disconnect overlay.<br>
-* Use the Vita virtual display for every Sunshine app, including Steam Big Picture.<br>
-* Force SDR during Vita virtual-display sessions.<br>
-* Raise the native 960x544/60 default to 8 Mbps for better motion quality.<br>
-* Add the redesigned GUI-first Windows host setup and recovery tool.<br>
+<br>
+* Added a Steam / DS4 controller preset that enables Vita gyro, DS4 touchpad,<br>
+and delayed Steam Guide behavior together while retaining double-PS as the<br>
+forced LiveArea escape. The in-stream overlay can also change PS behavior<br>
+independently.<br>
+* Fixed unsynchronized host motion requests and concurrent Vita sensor reads<br>
+that could leave Steam seeing a gyro-capable DS4 without receiving motion.<br>
+The stream overlay now reports requested/live/error gyro state.<br>
+* Hardened controller release handling: button flags use the protocol's full<br>
+width, stream start clears stale state, and pause/disconnect explicitly send<br>
+a neutral state and controller removal. Circle down/up counters in the<br>
+overlay make held-input faults observable during testing.<br>
+* Fixed START + L + R failing when a shoulder was sampled before START or the<br>
+original 300 ms window expired. The overlay now accepts any button order and<br>
+gives the non-leaking START-led sequence a one-second window.<br>
+* Changed the default PS-button policy so single presses remain local and can<br>
+no longer trigger Windows/Steam Guide shortcuts such as media play/pause.<br>
+Double-PS still provides the forced LiveArea escape. Added delayed Safe PC<br>
+Guide, legacy Immediate PC Guide, and direct System / LiveArea modes.<br>
+* Fixed Sunshine falling back to the physical monitor when the VDD lacked a<br>
+Vita-selectable mode such as 960x540/60. Existing and new installations now<br>
+provision the safe 960x540, 960x544, and 1280x720 desktop modes at 60 Hz;<br>
+client FPS remains independently configurable. Doctor verifies the runtime<br>
+mode set and rejects an incomplete Sunshine display mapping.<br>
+* The START, L, and R overlay chord is now captured locally. Holding START and<br>
+pressing L + R within one second opens the overlay without sending any of<br>
+those buttons to the Windows game; other button orders also open it.<br>
+* Added Reliable, Balanced, and High quality Vita streaming presets plus<br>
+on-device explanations for resolution, FPS, bitrate, frame pacing, vblank,<br>
+controller, and touch tradeoffs.<br>
+* New installations default to the compatibility-first Xbox/XInput controller,<br>
+H.264 at native 960x544/60 and 8 Mbps, frame pacing, and H.264 packet-loss<br>
+recovery. Existing explicit controller and video selections are preserved.<br>
+* Hardened legacy configuration parsing and validation so corrupt or obsolete<br>
+resolution, bitrate, packet-size, controller, touch, and motion values fall<br>
+back safely instead of destabilizing the Vita client.<br>
+* Improved Windows portability across custom Sunshine locations, reordered<br>
+display logs, laptops on battery, multiple physical monitors, and stale<br>
+rescue-agent processes. Doctor now rejects unsupported OS/architecture<br>
+combinations explicitly.<br>
+* Added Windows 2022/2025 build/self-test coverage and packaged compatibility<br>
+and Vita tuning guides.<br>
+* Added an in-stream Vita overlay opened with START + L + R. It provides<br>
+resume, disconnect, resolution, bitrate, frame-rate, controller, touch-mode,<br>
+and FPS-counter controls. Double-press PS remains the forced LiveArea escape.<br>
+* Added double-confirmed overlay actions to close or force-close the foreground<br>
+Windows game, end Sunshine's app session, or recover a failed display stack.<br>
+A protected highest-privilege agent handles the host actions without exposing<br>
+a network control service.<br>
+* Sunshine's native display lifecycle now covers every application by default,<br>
+including Desktop and Steam Big Picture, and restores the physical layout<br>
+when all clients disconnect even if the application stays open.<br>
+* Vita virtual-display sessions force SDR by default to prevent an HDR physical<br>
+desktop from appearing washed out on the Vita.<br>
+* Raised the 960x544/60 recommended bitrate from 5 Mbps to 8 Mbps and migrate<br>
+older native-resolution configurations to reduce motion artifacts.<br>
+* Reworked the Windows host control panel into task-oriented Overview,<br>
+Streaming, Displays, and Help & recovery pages.<br>
+* Added GUI settings for all-application integration, SDR enforcement, display<br>
+matching, safe display previews, and recovery.<br>
+* Rewrote the installation and end-to-end test documentation around the GUI<br>
+workflow and current release behavior.<br>
+]]></changes>
+<changes app_ver="00.13"><![CDATA[
+## 0.13.2<br>
+<br>
+* added PS button capture<br>
+- when enabled, double-pressing the PS button will open the menu, single press is passed as PS/Xbox button to Sunshine<br>
+- This required disabling the safe (-s) flag in `vita-make-fself` and adding the `SceShell` permission (0x2800000000000001)<br>
+* allow enabling/disabling touch zones independent of touch mode (separate setting)<br>
+- allows using front screen touch zones regardless of touch input mode. when a touch zone is pressed, the touch input is ignored. unused touch zones are ignored and function as normal touch area.<br>
+<br>
+Bug fixes:<br>
+* fixed front touch zone L2/R2 special keys not working<br>
+<br>
+Feature:<br>
+* feat: Implement MAC address handling for devices and remove deprecated MAC retrieval functions<br>
+<br>
+Refactor:<br>
+* fix: Update subproject commits for enet, inih, and moonlight-common-c<br>
+* split `vitainput_process` into multiple smaller functions for better code readability<br>
 <br>
 ## 0.13.1<br>
+<br>
 * fix: Split shortcuts into individual files for better code organization and maintainability.<br>
 * fix: Resolved ghost/phantom button presses when handling overlays and shortcuts. Button state is now correctly reset and restored.<br>
 <br>
 ## 0.13.0<br>
+<br>
 * You can now choose between three touchscreen modes: DS4 Touchpad, Absolute Mouse, and Tablet (Sunshine) from the settings menu.<br>
 * "DS4 Touchpad" mode lets you use the Vita screen as a DualShock 4-style multitouch touchpad, compatible with gestures and advanced controls in games and Steam Input.<br>
 * DS4 Touchpad mode is now more sensitive and precise for a smoother experience.<br>
@@ -70,8 +310,10 @@
 * Minor UI fixes and improved visual feedback in the host management menu.<br>
 * Fixed: Combos like L1+L2 and R1+R2 now work correctly even when used together with either touchscreen or backtouch. Pressing both at the same time no longer causes one to be lifted; both can be held simultaneously as expected.<br>
 * Fixed: In absolute touch mode, special button overlays no longer interfere with touch input. If a special button is detected, the corresponding touchscreen input is ignored, allowing for true absolute touch and making all screen corners usable.<br>
-<br>
+]]></changes>
+<changes app_ver="00.12"><![CDATA[
 ## 0.12.3<br>
+<br>
 * Moonlight now automatically selects and creates the best available folder for config and cache (supports ux0:/data/moonlight, ux0:/moonlight, uma0:/data/moonlight, and fallback to ux0:data).<br>
 * The chosen folder location is logged at startup for easier debugging.<br>
 * The config file (moonlight.conf) is always created in the selected folder, improving compatibility for users with missing folders.<br>
@@ -79,17 +321,18 @@
 * All folder and config path logic is now centralized and robust, reducing crashes and edge cases.<br>
 * Bugfix: Prevented crashes on startup due to buffer or path issues in folder selection logic.<br>
 * New Host Management menu: manage paired hosts with improved status display, unified status text, and direct actions (connect, force connect, change IP/name, delete).<br>
-  - Now allows:<br>
-    - Changing the host name<br>
-    - Changing the host IP<br>
-    - Forcing connection even if the host is not shown as online<br>
-    - Deleting hosts<br>
+- Now allows:<br>
+- Changing the host name<br>
+- Changing the host IP<br>
+- Forcing connection even if the host is not shown as online<br>
+- Deleting hosts<br>
 * The connection and host management menus now show the port next to the IP (uses httpPort if available, otherwise httpsPort).<br>
 * Host Management menu now shows host status (paired/unpaired, online/offline, IP changed) in a unified way, matching the main menu logic.<br>
 * Visual feedback and menu options for host management are now clearer and more robust.<br>
 * Internal refactor: main.c and check_dir.c now use a shared macro for path buffer size and a helper for folder selection.<br>
 <br>
 ## 0.12.2<br>
+<br>
 * Added option to swap L1/R1 and L2/R2 button functions from the settings menu.<br>
 * Added option to select gamepad type: Xbox or PlayStation layout, configurable from the settings menu.<br>
 * Improved host scan logic: scan is always restarted cleanly when returning to the main menu or after leaving any submenu.<br>
@@ -101,6 +344,7 @@
 * Many bugfixes and code cleanups.<br>
 <br>
 ## 0.12.1<br>
+<br>
 * Add support for multi-touch touchscreen mode (Sunshine compatible) and absolute mouse mode.<br>
 * New settings: choose between "Touch Mouse Absolute" (gestures, mouse) and "Touchscreen (Sunshine multitouch)" (tablet mode).<br>
 * In touchscreen mode: true multitouch, native gestures (e.g. zoom), no mouse cursor/ghost, no mouse clicks.<br>
@@ -111,6 +355,7 @@
 ]]></changes>
 <changes app_ver="00.11"><![CDATA[
 ## 0.11.4<br>
+<br>
 * Host status indicator dots: green (online), yellow (IP change pending), red (offline/disconnected).<br>
 * Robust host status checking with background scan thread and mDNS sniffer.<br>
 * Manual refresh of host status with TRIANGLE (△) in main menu and device search.<br>
@@ -120,13 +365,15 @@
 * UI and logic are now robust even if host fields are empty or uninitialized.<br>
 * All UI messages for search device and refresh are now in English.<br>
 * Added screenshots to documentation (see docs/):<br>
-  * keyboard.png: Floating keyboard in a Steam app using Moonlight.<br>
-  * ip1.png: Host waiting for IP update (yellow).<br>
-  * ip2.png: Host online (green).<br>
-  * ip3.png: Host offline/disconnected (red).<br>
-  * ip4.png: IP change confirmation dialog (shows old/new IP).<br>
-  * ip5.png: Search device function showing a found local device.<br>
+* keyboard.png: Floating keyboard in a Steam app using Moonlight.<br>
+* ip1.png: Host waiting for IP update (yellow).<br>
+* ip2.png: Host online (green).<br>
+* ip3.png: Host offline/disconnected (red).<br>
+* ip4.png: IP change confirmation dialog (shows old/new IP).<br>
+* ip5.png: Search device function showing a found local device.<br>
+<br>
 ## 0.11.2<br>
+<br>
 * More reliable and user-friendly automatic pairing.<br>
 * Experimental absolute touch controls (beta).<br>
 * Floating virtual keyboard that no longer covers the main screen.<br>
@@ -134,10 +381,21 @@
 * New modular UDP mDNS sniffer for device discovery (replaces legacy mdns code).<br>
 * Improved debug logging, especially for device search and reconnect flows.<br>
 * Cleanup of legacy code and dependencies.<br>
+<br>
+## 0.11.0<br>
+<br>
+* The hold L to activate gyro feature has been removed and replaced with gyro reporting.<br>
+This means that the client will try to get Sunshine to emulate a DS5 controller and gyro will<br>
+be reported. This opens up full configurability with steam input. Note this only works on Windows<br>
+or on Linux with Pre-release versions of Sunshine as of 1/10/25. This could be different in the future.<br>
+* Video slicing added back<br>
+* Logging added to pairing for debug<br>
+* An icon to indicate when the double tap sprinting has been enabled has been added<br>
 ]]></changes>
 <changes app_ver="00.10"><![CDATA[
 ## 0.10.1<br>
 * Fix pairing issue (Same one from v0.9.3)<br>
+<br>
 ## 0.10.0<br>
 * Add double tap to sprint option<br>
 * Add motion controls<br>
@@ -245,8 +503,7 @@ there is another option to use along the 21:9 resolution to only display the cen
 * Add new option for mouse acceleration (#63)<br>
 * Cleanup codes. (#60)<br>
 * Now remove alpha mark. but still lower version :) (#64)<br>
-]]></changes>
-<changes app_ver="00.00"><![CDATA[
+<br>
 ## alpha6<br>
 * Reimplement input & config process for the improve stability (#47)<br>
 * Fix little memory leaks (#47)<br>

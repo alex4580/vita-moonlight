@@ -31,6 +31,8 @@ static uint32_t gyro_events_sent = 0;
 static uint32_t accel_events_sent = 0;
 static int last_sensor_error = 0;
 static int motion_init_error = 0;
+static float stream_motion_scalar_x = 1.2f;
+static float stream_motion_scalar_y = 0.8f;
 
 static void lock_motion_state(void) {
   if (motion_mutex >= 0) sceKernelLockMutex(motion_mutex, 1, NULL);
@@ -117,6 +119,10 @@ bool vita_motion_begin_stream(bool allow_motion) {
 
   lock_motion_state();
   reset_motion_requests_locked();
+  /* Sensitivity changes are a reconnect setting. Snapshot them so the motion
+   * worker never races the UI's mutable global configuration. */
+  stream_motion_scalar_x = config.motion_controls_scalar_x;
+  stream_motion_scalar_y = config.motion_controls_scalar_y;
   gyro_events_sent = 0;
   accel_events_sent = 0;
   last_sensor_error = motion_resources_ready ? 0 : motion_init_error;
@@ -264,6 +270,22 @@ bool vita_motion_end_stream(void) {
   return true;
 }
 
+bool vita_motion_shutdown(void) {
+  if (!vita_motion_end_stream()) return false;
+  if (motion_event >= 0) {
+    int ret = sceKernelDeleteEventFlag(motion_event);
+    if (ret < 0) return false;
+    motion_event = -1;
+  }
+  if (motion_mutex >= 0) {
+    int ret = sceKernelDeleteMutex(motion_mutex);
+    if (ret < 0) return false;
+    motion_mutex = -1;
+  }
+  motion_resources_ready = false;
+  return true;
+}
+
 void vita_motion_set_state(uint8_t motion_type, uint16_t report_rate) {
   lock_motion_state();
   bool enabled = active_motion_threads && report_rate != 0;
@@ -299,7 +321,8 @@ void vita_motion_get_status(VitaMotionStatus *status) {
   unlock_motion_state();
 }
 
-static void motion_process_sample(bool send_gyro, bool send_accel) {
+static void motion_process_sample(bool send_gyro, bool send_accel,
+                                  float scalar_x, float scalar_y) {
   SceMotionState sample;
   int ret = sceMotionGetState(&sample);
   if (ret < 0) {
@@ -313,9 +336,9 @@ static void motion_process_sample(bool send_gyro, bool send_accel) {
     /* Vita angular velocity follows SDL axes and is radians/second;
      * Sunshine's controller protocol expects degrees/second. */
     float x = sample.angularVelocity.x *
-        RADIANS_TO_DEGREES * config.motion_controls_scalar_y;
+        RADIANS_TO_DEGREES * scalar_y;
     float y = sample.angularVelocity.y *
-        RADIANS_TO_DEGREES * config.motion_controls_scalar_x;
+        RADIANS_TO_DEGREES * scalar_x;
     float z = sample.angularVelocity.z * RADIANS_TO_DEGREES;
     LiSendControllerMotionEvent(0, LI_MOTION_TYPE_GYRO, x, y, z);
   }
@@ -348,6 +371,8 @@ int vitainput_motion_thread(SceSize args, void *argp) {
     bool accel_enabled = motion_state.motion_type_accel_enabled;
     uint16_t gyro_rate = motion_state.report_rate_gyro;
     uint16_t accel_rate = motion_state.report_rate_accel;
+    float scalar_x = stream_motion_scalar_x;
+    float scalar_y = stream_motion_scalar_y;
     unlock_motion_state();
 
     if (!stream_active) break;
@@ -362,7 +387,7 @@ int vitainput_motion_thread(SceSize args, void *argp) {
         accel_enabled && (next_accel_us == 0 || now >= next_accel_us);
 
     if (gyro_due || accel_due) {
-      motion_process_sample(gyro_due, accel_due);
+      motion_process_sample(gyro_due, accel_due, scalar_x, scalar_y);
       if (gyro_due) {
         next_gyro_us = advance_motion_deadline(
             next_gyro_us, now, motion_report_delay_us(gyro_rate));

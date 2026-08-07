@@ -7,6 +7,21 @@ developer tools, or existing installation is assumed.
 Use the [full end-to-end test](END_TO_END_TEST.md) for deeper feature testing.
 Read [Community testing](../docs/COMMUNITY_TESTING.md) before posting a result.
 
+## How much one tester needs to do
+
+A useful minimum result is:
+
+1. choose one real starting state;
+2. complete section A through the first support report;
+3. complete sections B and C; and
+4. report the result, including every item you did not test.
+
+That core pass is enough for one volunteer. The beta as a whole also needs the
+Pause/Enable, laptop, multi-monitor, Vita reinstall, and Windows uninstall
+variants below, but those can be divided among other testers. Only perform a
+shared-component removal or interruption test on a disposable PC or reversible
+snapshot.
+
 ## What to download
 
 Download these two files from the **same GitHub release**:
@@ -17,7 +32,7 @@ Download these two files from the **same GitHub release**:
 Also download `SHA256SUMS` and read the warning at the top of the release
 notes. If the release is labeled unsigned, Windows will show **Unknown
 publisher** and may show a Microsoft Defender SmartScreen warning. That is
-expected for the exact `v0.14.7-beta.1` release only when
+expected for the exact `v0.14.8-beta.1` release only when
 `windows-signing-status.json` says `unsigned-beta-preview`. Do not run a download
 whose checksum or stated signing status differs from the release.
 After those checks, choose **More info > Run anyway** if SmartScreen blocks
@@ -48,7 +63,10 @@ or a reversible test-machine snapshot.
 
 ## A. Install, upgrade, or repair
 
-1. Run the downloaded Windows setup file. Accept the recommended components.
+1. Sign in to the Administrator Windows account you will use for streaming,
+   then run the downloaded setup file and accept the recommended components.
+   Do not supply a different Administrator account from a standard-user UAC
+   prompt; this beta stops that unsupported setup before changing the PC.
    An upgrade must be run directly over the older version; do not uninstall it
    first. For a repair, rerun the exact same installer.
 2. If setup requests a restart, restart Windows. Open **Vita Moonlight Host**
@@ -67,9 +85,16 @@ or a reversible test-machine snapshot.
    report...** and save `before-pause.json`. In a text editor, confirm
    `backendStatus` is `Enabled`, `recoveryTaskStatus` and
    `rescueAgentTaskStatus` are `Present`, `rescueAgentRunning` is `true`, and
-   `backendManagedVddActive` is `false`.
+   `backendManagedVddActive` is `false`. `scheduledTaskAccountReady` must be
+   `true`.
    Also note `hostMode`, `sunshineInstalled`, `sunshineVersion`, and whether
    Sunshine's web page is reachable.
+
+### Assigned Pause/Enable variant
+
+Continue here only if you are covering the Pause/Enable lifecycle for the
+community matrix.
+
 7. Choose **Pause Vita host features**. Confirm the physical monitor remains
    visible and the page reports that Vita host features are paused. Restart
    Windows, reopen **Vita Moonlight Host** as Administrator, and confirm the
@@ -106,19 +131,26 @@ starting state.
    in VitaShell and install it. Installing it over an older Vita Moonlight app
    is the upgrade path.
 2. Start Vita Moonlight and leave the **Recommended** preset selected.
-3. Select the PC. If it is not paired, enter the PIN shown on the Vita in
-   Sunshine's web page.
-4. Launch **Steam Big Picture** or **Desktop**.
-5. Confirm the picture fills the Vita screen, is not 4:3, and is not washed
+3. On a newly added or deliberately forgotten test PC, select the PC and enter
+   one incorrect PIN in Sunshine, or cancel the first pairing attempt. After
+   the failure, return to the Vita main screen. The PC must remain under
+   **Saved computers** and say **Pairing required**; it must not disappear.
+4. Select that same saved entry, retry, and enter the correct PIN shown on the
+   Vita in Sunshine's web page. The PC must appear as paired under **Saved
+   computers** immediately, without closing Vita Moonlight.
+5. Fully close and reopen Vita Moonlight. The paired PC must still be saved.
+   Select it and launch **Steam Big Picture** or **Desktop**.
+6. Confirm the picture fills the Vita screen, is not 4:3, and is not washed
    out. The expected first-run mode is 960x544, 60 FPS, H.264 SDR, and 8 Mbps.
-6. Hold **START**, then press **L + R**. The in-stream menu must open without
+7. Hold **START**, then press **L + R** within one second. The in-stream menu
+   must open without
    those buttons reaching Windows.
-7. From the menu, briefly enable **Frame rate + network**. Move through a game
+8. From the menu, briefly enable **Frame rate + network**. Move through a game
    or Steam interface and confirm the menu remains responsive.
-8. Open the on-screen keyboard from the menu and type into a non-secret field.
-9. Press a face button once and confirm it is not stuck or repeated after
+9. Open the on-screen keyboard from the menu and type into a non-secret field.
+10. Press a face button once and confirm it is not stuck or repeated after
    release.
-10. Choose **Disconnect stream**. The physical PC display must return without
+11. Choose **Disconnect stream**. The physical PC display must return without
     a restart or sign-out.
 
 Result: **Pass / Fail**, including any incorrect resolution, color, input, or
@@ -156,7 +188,7 @@ PC display recovery separately.
 
 Result: **Automatic recovery / Hotkey recovery / Failed recovery**.
 
-## D. Laptop and multi-monitor coverage
+## D. Optional laptop and multi-monitor coverage
 
 These checks can be contributed by different testers.
 
@@ -179,7 +211,7 @@ These checks can be contributed by different testers.
 
 Result: **Pass / Fail / Not available** for each layout.
 
-## E. Reinstall and remove the Vita app
+## E. Assigned Vita reinstall and removal variant
 
 Complete this while the Windows host is still available:
 
@@ -197,7 +229,7 @@ Complete this while the Windows host is still available:
 
 Result: **Pass / Fail**.
 
-## F. Uninstall the Windows host while keeping shared components
+## F. Assigned Windows uninstall, keeping shared components
 
 Sunshine, ViGEmBus, and the MTT virtual-display driver can be used by other
 software. This is the normal uninstall path.
@@ -219,7 +251,7 @@ software. This is the normal uninstall path.
 
 Result: **Pass / Fail**.
 
-## G. Uninstall the Windows host while removing shared components
+## G. Lab-only uninstall, removing shared components
 
 Run this only on a PC or reversible test snapshot where Sunshine, ViGEmBus, and
 the virtual-display driver are not needed by anything else.

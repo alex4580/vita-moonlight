@@ -17,6 +17,10 @@ internal sealed record SunshineOwnedHook(
 internal sealed class SunshineOwnedLocation
 {
     public required string ConfigurationDirectory { get; init; }
+    // Older journals predate this discriminator. Their ordinary Program
+    // Files paths are inferred conservatively; the active HostSettings path
+    // is tagged explicitly before a host-mode migration or uninstall.
+    public string? HostMode { get; set; }
     public Dictionary<string, SunshineOwnedValue> Values { get; set; } =
         new(StringComparer.OrdinalIgnoreCase);
     public List<SunshineOwnedHook> Hooks { get; set; } = [];
@@ -100,6 +104,22 @@ internal static class SunshineOwnershipJournal
             RegistryValueKind.String);
     }
 
+    internal static SunshineOwnershipState Clone(
+        SunshineOwnershipState state) =>
+        Deserialize(JsonSerializer.Serialize(state, JsonOptions));
+
+    internal static void Replace(SunshineOwnershipState state)
+    {
+        if (state.Locations.Count == 0)
+        {
+            Delete();
+        }
+        else
+        {
+            Save(state);
+        }
+    }
+
     internal static void Delete()
     {
         if (testFilePath is not null)
@@ -132,8 +152,10 @@ internal static class SunshineOwnershipJournal
 
     internal static SunshineOwnedLocation GetOrAddLocation(
         SunshineOwnershipState state,
-        string configurationDirectory)
+        string configurationDirectory,
+        string hostMode = "sunshine")
     {
+        hostMode = NormalizeHostMode(hostMode);
         var normalized = Path.GetFullPath(configurationDirectory)
             .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
         var existing = state.Locations.FirstOrDefault(location =>
@@ -142,13 +164,74 @@ internal static class SunshineOwnershipJournal
                     .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
                 normalized,
                 StringComparison.OrdinalIgnoreCase));
-        if (existing is not null) return existing;
+        if (existing is not null)
+        {
+            existing.HostMode = hostMode;
+            return existing;
+        }
         var created = new SunshineOwnedLocation
         {
             ConfigurationDirectory = normalized,
+            HostMode = hostMode,
         };
         state.Locations.Add(created);
         return created;
+    }
+
+    internal static bool HasLocationForHost(
+        SunshineOwnershipState state,
+        string hostMode) =>
+        state.Locations.Any(location => LocationMatchesHost(location, hostMode));
+
+    internal static bool LocationMatchesHost(
+        SunshineOwnedLocation location,
+        string hostMode)
+    {
+        var expected = NormalizeHostMode(hostMode);
+        var recorded = string.IsNullOrWhiteSpace(location.HostMode)
+            ? InferLegacyHostMode(location.ConfigurationDirectory)
+            : NormalizeHostMode(location.HostMode);
+        return string.Equals(recorded, expected, StringComparison.Ordinal);
+    }
+
+    internal static bool TagExistingLocation(
+        SunshineOwnershipState state,
+        string configurationDirectory,
+        string hostMode)
+    {
+        var normalized = Path.GetFullPath(configurationDirectory)
+            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var location = state.Locations.FirstOrDefault(candidate =>
+            string.Equals(
+                Path.GetFullPath(candidate.ConfigurationDirectory)
+                    .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+                normalized,
+                StringComparison.OrdinalIgnoreCase));
+        if (location is null) return false;
+        location.HostMode = NormalizeHostMode(hostMode);
+        return true;
+    }
+
+    private static string InferLegacyHostMode(string configurationDirectory)
+    {
+        var components = Path.GetFullPath(configurationDirectory)
+            .Split(
+                [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
+                StringSplitOptions.RemoveEmptyEntries);
+        return components.Any(component => component.Equals(
+            "Apollo",
+            StringComparison.OrdinalIgnoreCase))
+            ? "apollo"
+            : "sunshine";
+    }
+
+    private static string NormalizeHostMode(string? hostMode)
+    {
+        var normalized = hostMode?.Trim().ToLowerInvariant();
+        return normalized is "sunshine" or "apollo"
+            ? normalized
+            : throw new InvalidDataException(
+                "Streaming-host ownership must identify Sunshine or Apollo.");
     }
 
     internal static string ValidateConfigurationDirectory(string path)

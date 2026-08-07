@@ -27,6 +27,7 @@ on:
       - "resources/changeinfo.xml"
       - "sce_sys/livearea/contents/template.xml"
       - "tools/check-version-consistency.py"
+      - "tools/check-release-contract.py"
       - "tools/check-host-client-contract.py"
       - "tools/check-windows-upgrade-contract.py"
       - "tools/summarize-vita-log.py"
@@ -58,6 +59,7 @@ on:
       - "resources/changeinfo.xml"
       - "sce_sys/livearea/contents/template.xml"
       - "tools/check-version-consistency.py"
+      - "tools/check-release-contract.py"
       - "tools/check-host-client-contract.py"
       - "tools/check-windows-upgrade-contract.py"
       - "tools/summarize-vita-log.py"
@@ -93,6 +95,8 @@ jobs:
           python-version: "3.x"
       - name: Verify release version consistency
         run: python tools/check-version-consistency.py
+      - name: Verify release packaging and policy contract
+        run: python tools/check-release-contract.py
       - name: Verify Vita/host compatibility contract
         run: python tools/check-host-client-contract.py
       - name: Verify safe in-place upgrade contract
@@ -109,7 +113,7 @@ jobs:
     runs-on: windows-2025
     env:
       IS_TAGGED_RELEASE: ${{ startsWith(github.ref, 'refs/tags/v') }}
-      IS_UNSIGNED_BETA_PREVIEW: ${{ github.repository == 'alex4580/vita-moonlight' && github.ref == 'refs/tags/v0.14.7-beta.1' }}
+      IS_UNSIGNED_BETA_PREVIEW: ${{ github.repository == 'alex4580/vita-moonlight' && github.ref == 'refs/tags/v0.14.8-beta.1' }}
       HAS_WINDOWS_CERTIFICATE_DATA: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 != '' }}
       HAS_WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD != '' }}
       HAS_WINDOWS_EXPECTED_SIGNER_SUBJECT: ${{ secrets.WINDOWS_EXPECTED_SIGNER_SUBJECT != '' }}
@@ -127,6 +131,8 @@ jobs:
           python-version: "3.x"
       - name: Verify release version consistency
         run: python tools/check-version-consistency.py
+      - name: Verify release packaging and policy contract
+        run: python tools/check-release-contract.py
       - name: Verify Vita/host compatibility contract
         run: python tools/check-host-client-contract.py
       - name: Verify safe in-place upgrade contract
@@ -140,7 +146,7 @@ jobs:
           }
           if ($env:IS_UNSIGNED_BETA_PREVIEW -eq 'true') {
             if ($env:GITHUB_REPOSITORY -ne 'alex4580/vita-moonlight' -or
-                $env:GITHUB_REF -ne 'refs/tags/v0.14.7-beta.1') {
+                $env:GITHUB_REF -ne 'refs/tags/v0.14.8-beta.1') {
               throw 'Unsigned beta-preview context validation failed.'
             }
             if ($env:HAS_WINDOWS_CERTIFICATE_DATA -eq 'true' -or
@@ -150,10 +156,10 @@ jobs:
             }
             $projectText = Get-Content -LiteralPath host/VitaMoonlight.Host/VitaMoonlight.Host.csproj -Raw
             $versionMatch = [regex]::Match($projectText, '<Version>([^<]+)</Version>')
-            if (-not $versionMatch.Success -or $versionMatch.Groups[1].Value -ne '0.14.7') {
-              throw 'The unsigned beta preview is restricted to project version 0.14.7.'
+            if (-not $versionMatch.Success -or $versionMatch.Groups[1].Value -ne '0.14.8') {
+              throw 'The unsigned beta preview is restricted to project version 0.14.8.'
             }
-            Write-Warning 'v0.14.7-beta.1 will be published unsigned. Windows will identify it as an unknown publisher.'
+            Write-Warning 'v0.14.8-beta.1 will be published unsigned. Windows will identify it as an unknown publisher.'
             @(
               '## Windows signing mode'
               ''
@@ -163,7 +169,7 @@ jobs:
             ) | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
           }
           elseif ($env:HAS_WINDOWS_SIGNING_CERTIFICATE -ne 'true') {
-            throw 'Every tagged release except v0.14.7-beta.1 requires both Windows signing certificate secrets.'
+            throw 'Every tagged release except v0.14.8-beta.1 requires both Windows signing certificate secrets.'
           }
           elseif ($env:HAS_WINDOWS_EXPECTED_SIGNER_SUBJECT -ne 'true') {
             throw 'Signed releases require WINDOWS_EXPECTED_SIGNER_SUBJECT.'

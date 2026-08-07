@@ -47,6 +47,29 @@ static void send_host_rescue_hotkey(int virtual_key) {
   LiSendKeyboardEvent(0x11, KEY_ACTION_UP, 0);
 }
 
+static int send_windows_task_manager_shortcut(void) {
+  int result = 0;
+#define SEND_TASK_MANAGER_KEY(key, action) do { \
+  int send_result = LiSendKeyboardEvent((key), (action), 0); \
+  if (send_result != 0 && result == 0) result = send_result; \
+} while (0)
+
+  /* Ctrl+Shift+Esc is handled entirely through Moonlight's encrypted input
+   * channel. Neutralize the controller first, then always send key-up events
+   * so a partial queue failure cannot intentionally leave modifiers held. */
+  if (LiSendMultiControllerEvent(0, 1, 0, 0, 0, 0, 0, 0, 0) != 0) {
+    result = -1;
+  }
+  SEND_TASK_MANAGER_KEY(0x11, KEY_ACTION_DOWN); // Control
+  SEND_TASK_MANAGER_KEY(0x10, KEY_ACTION_DOWN); // Shift
+  SEND_TASK_MANAGER_KEY(0x1B, KEY_ACTION_DOWN); // Escape
+  SEND_TASK_MANAGER_KEY(0x1B, KEY_ACTION_UP);
+  SEND_TASK_MANAGER_KEY(0x10, KEY_ACTION_UP);
+  SEND_TASK_MANAGER_KEY(0x11, KEY_ACTION_UP);
+#undef SEND_TASK_MANAGER_KEY
+  return result;
+}
+
 SERVER_DATA server;
 PAPP_LIST server_applist;
 int pos[2];
@@ -308,7 +331,10 @@ int ui_connect_loop(int id, void *context, const input_data *input) {
             strncpy(dev->mac, mac, 17);
             dev->mac[17] = '\0';
           }
-          save_device_info(dev);
+          if (!save_device_info(dev)) {
+            display_error("Pairing succeeded, but the Vita could not save it.\n"
+                          "Check free storage before restarting Moonlight.");
+          }
           // Notify user pairing succeeded: show a short message so the PIN dialog
           // (which was drawn earlier) is replaced by a success message.
           flash_message("Paired: %s", dev->name);
@@ -361,9 +387,7 @@ int ui_connect_loop(int id, void *context, const input_data *input) {
 
 //mainloop:
       while (connection_is_connected()) {
-        int display_virtual_key = 0;
-        bool apply_display =
-            stream_overlay_take_apply_display_request(&display_virtual_key);
+        bool apply_display = stream_overlay_take_apply_display_request();
         bool apply_input = stream_overlay_take_apply_input_request();
         if (apply_display || apply_input) {
           int reconnect_app = server.currentGame != 0
@@ -377,11 +401,6 @@ int ui_connect_loop(int id, void *context, const input_data *input) {
                 "fps=%d",
                 config.stream.width, config.stream.height, config.stream.fps);
 
-            // Change the active VDD first, then resume the same Sunshine app
-            // so both the Windows desktop and encoder renegotiate to this
-            // mode.
-            send_host_rescue_hotkey(display_virtual_key);
-            sceKernelDelayThread(750 * 1000);
           } else {
             vita_debug_event(
                 VITA_DEBUG_LEVEL_INFO, "stream.action",
@@ -432,11 +451,16 @@ int ui_connect_loop(int id, void *context, const input_data *input) {
               apply_display ? "display_settings" : "input_settings");
           continue;
         }
-        if (stream_overlay_take_close_game_request()) {
+        if (stream_overlay_take_task_manager_request()) {
+          int task_manager_result = send_windows_task_manager_shortcut();
           vita_debug_event(
-              VITA_DEBUG_LEVEL_INFO, "stream.action",
-              "action=close_foreground_game state=requested");
-          send_host_rescue_hotkey(0x7B); // F12
+              task_manager_result == 0
+                  ? VITA_DEBUG_LEVEL_INFO
+                  : VITA_DEBUG_LEVEL_ERROR,
+              "stream.action",
+              "action=open_task_manager state=%s code=%d",
+              task_manager_result == 0 ? "sent" : "failed",
+              task_manager_result);
         }
         if (stream_overlay_take_quit_app_request()) {
           vita_debug_event(
@@ -756,19 +780,28 @@ device_info_t* ui_connect_and_pairing(device_info_t *info) {
     return NULL;
   }
 
-  device_info_t *p = append_device(info);
-  if (p == NULL) {
-    ret = update_device(info);
-    if (ret == false) {
-      display_error("Could not update device info");
-    }
-
-  } else {
-    info = p;
+  /* Always continue with the canonical saved record. A failed attempt may
+   * already have created an unpaired entry with this name. Updating a
+   * transient discovery copy made successful retry pairings disappear from
+   * the main menu until the application restarted. */
+  info = upsert_device(info);
+  if (info == NULL) {
+    display_error("Could not save this PC in memory.\n"
+                  "Remove an unused saved PC and try again.");
+    release_host_client_state();
+    return NULL;
   }
+  /* gs_init() is the authoritative view for this exact pinned host. A saved
+   * flag is only a UI hint and must not override a required re-pair. */
+  info->paired = server.paired;
 
   // connectable address
-  save_device_info(info);
+  if (!save_device_info(info)) {
+    display_error("Could not save this PC on the Vita.\n"
+                  "Check free storage and try again.");
+    release_host_client_state();
+    return NULL;
+  }
   flash_message("PC saved: %s", info->name);
 
   if (server.paired) {
@@ -793,13 +826,8 @@ device_info_t* ui_connect_and_pairing(device_info_t *info) {
     return NULL;
   }
 paired:
-  if (connection_paired() != 0) {
-    display_error("Pairing completed, but the Vita connection state could not "
-                  "be updated. Please reconnect and try again.");
-    release_host_client_state();
-    return NULL;
-  }
-
+  /* Pairing is authoritative at this point. Persist it before any local
+   * connection-state transition that can fail independently. */
   info->paired = true;
   flash_message("Securely paired: %s", info->name);
 
@@ -809,7 +837,19 @@ paired:
     strncpy(info->mac, mac, 17);
     info->mac[17] = '\0';
   }
-  save_device_info(info);
+  if (!save_device_info(info)) {
+    display_error("Pairing succeeded, but the Vita could not save it.\n"
+                  "The PC is available for this session only. Check free "
+                  "storage before restarting Moonlight.");
+  }
+
+  if (connection_paired() != 0) {
+    display_error("Pairing succeeded and was saved, but this connection "
+                  "session could not continue.\n"
+                  "Return to Saved computers and connect again.");
+    release_host_client_state();
+    return info;
+  }
 
   if (connection_terminate()) {
     display_error("Reconnect failed: %d", -2);
@@ -837,7 +877,7 @@ void ui_connect_manual() {
   ui_connect_and_pairing(&info);
 }
 
-bool check_connection(const char *name, char *addr, uint16_t port) {
+bool check_connection(const char *name, const char *addr, uint16_t port) {
   // someone already connected
   if (connection_is_ready() || addr == NULL || addr[0] == '\0') {
     return false;
@@ -858,7 +898,7 @@ bool check_connection(const char *name, char *addr, uint16_t port) {
   int ret = gs_init(
       &probe, addr, port, key_dir, log_level,
       config.unsupported_version);
-  bool reachable = ret == GS_OK;
+  bool reachable = ret == GS_OK && probe.paired;
   gs_cleanup(&probe);
   return reachable;
 }
@@ -878,7 +918,11 @@ void ui_connect_paired_device(device_info_t *info) {
     addr = info->external;
   }
   info->prefer_external = addr == info->external;
-  save_device_info(info);
+  if (!save_device_info(info)) {
+    vita_debug_event(
+        VITA_DEBUG_LEVEL_WARNING, "host.state",
+        "action=save_preferred_address state=failed");
+  }
 
   if (addr == NULL) {
     display_error("Can't connect to server\n%s\n%s", info->name,

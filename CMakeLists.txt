@@ -1,5 +1,13 @@
 cmake_minimum_required(VERSION 3.2)
 
+# Vita packages are user-facing runtime artifacts. Single-configuration
+# generators otherwise default to an empty build type, which produces an
+# effectively unoptimized GCC build. Keep local/fork builds safe by default;
+# callers can still request Debug explicitly.
+if(NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE)
+  set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
+
 if(NOT DEFINED CMAKE_TOOLCHAIN_FILE)
   if(DEFINED ENV{VITASDK})
 	set(CMAKE_TOOLCHAIN_FILE "$ENV{VITASDK}/share/vita.toolchain.cmake" CACHE PATH "toolchain file")
@@ -7,9 +15,6 @@ if(NOT DEFINED CMAKE_TOOLCHAIN_FILE)
 	message(FATAL_ERROR "Please define VITASDK to point to your SDK path!")
   endif()
 endif()
-add_compile_options(-g3 -Wall -Wextra -Wno-unused-parameter -Wno-pointer-sign -Wno-sign-compare -Wno-switch)
-
-
 project(moonlight)
 
 include("$ENV{VITASDK}/share/vita.cmake" REQUIRED)
@@ -19,7 +24,7 @@ set(TITLE_ID "XYZZ00002")
 set(TITLE "Moonlight")
 set(VERSION_MAJOR "0")
 set(VERSION_MINOR "14")
-set(VERSION_PATCH "7")
+set(VERSION_PATCH "8")
 
 execute_process(COMMAND
 	python -c "print('%02d.%02d' % (${VERSION_MAJOR}, ${VERSION_MINOR}))"
@@ -30,10 +35,9 @@ string(REPLACE "\n" "" APP_VER "${APP_VER}")
 add_definitions(-DVERSION_MAJOR=${VERSION_MAJOR})
 add_definitions(-DVERSION_MINOR=${VERSION_MINOR})
 add_definitions(-DVERSION_PATCH=${VERSION_PATCH})
-
-set(CMAKE_C_FLAGS "-Wl,-q -g -std=c99 -D__vita__")
-
-
+# Bundled dependencies also select Vita-specific socket, UUID, and threading
+# implementations with this symbol, so the definition must remain global.
+add_definitions(-D__vita__)
 
 include_directories(
 	include/
@@ -93,10 +97,24 @@ add_executable(${PROJECT_NAME}.elf
 )
 
 target_compile_definitions(${PROJECT_NAME}.elf PRIVATE _POSIX_C_SOURCE=200809L)
+set_property(TARGET ${PROJECT_NAME}.elf PROPERTY C_STANDARD 99)
+set_property(TARGET ${PROJECT_NAME}.elf PROPERTY C_STANDARD_REQUIRED ON)
+set_property(TARGET ${PROJECT_NAME}.elf PROPERTY C_EXTENSIONS OFF)
+target_compile_options(${PROJECT_NAME}.elf PRIVATE
+	-Wall
+	-Wextra
+	-Wno-unused-parameter
+	-Wno-pointer-sign
+	-Wno-sign-compare
+	-Wno-switch
+	$<$<CONFIG:Debug>:-g3>
+	$<$<CONFIG:Release>:-O2>
+)
 
 
 # Por defecto, solo enlazamos curl y el resto de libs estándar:
 target_link_libraries(${PROJECT_NAME}.elf
+	-Wl,-q
 	-lexpat
 	-lcurl
 	-lzstd
@@ -171,5 +189,3 @@ option(USE_DIR_UMA0 "Forzar uso de uma0:data/moonlight como directorio de claves
 if(USE_DIR_UMA0)
   add_definitions(-DUSE_DIR_UMA0)
 endif()
-
-

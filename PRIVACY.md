@@ -3,8 +3,7 @@
 Last updated: July 26, 2026
 
 This policy covers the Vita Moonlight client and the Vita Moonlight Host
-companion maintained at
-<https://github.com/alex4580/vita-moonlight>.
+companion maintained in [this repository](.).
 
 ## Summary
 
@@ -105,7 +104,7 @@ SignPath.
 ## Questions and changes
 
 Ask a non-sensitive privacy question or report an inaccurate disclosure
-through [GitHub issues](https://github.com/alex4580/vita-moonlight/issues).
+through [GitHub issues](../../issues).
 Do not publish credentials or security-sensitive personal information.
 
 This policy will be updated when project-controlled collection, storage,

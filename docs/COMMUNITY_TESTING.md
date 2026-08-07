@@ -9,7 +9,9 @@ You do not need to be a developer. A clear partial test is useful.
 ## Pick a test
 
 - Use the [minimum public-beta test](../host/BETA_SMOKE_TEST.md) for the
-  shortest release-critical pass.
+  shortest release-critical pass. One volunteer can complete its core path
+  and leave the clearly marked lifecycle/hardware variants to other testers;
+  list every skipped variant in the report.
 - Use the [full end-to-end test](../host/END_TO_END_TEST.md) to exercise the
   complete UI, display lifecycle, controllers, gyro, touch, recovery, upgrade,
   repair, and uninstall paths.
@@ -62,7 +64,7 @@ A good report answers four questions:
 3. What was expected, and what happened instead?
 4. Could the user recover without rebooting or losing work?
 
-Open a [GitHub issue](https://github.com/alex4580/vita-moonlight/issues/new/choose)
+Open a [GitHub issue](../../../issues/new/choose)
 for a reproducible failure. Search existing issues first. Submit successful
 test passes in the release's testing discussion if one is provided, or use a
 GitHub issue when no collection thread exists.

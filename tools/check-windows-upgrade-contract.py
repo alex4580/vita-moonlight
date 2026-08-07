@@ -25,6 +25,18 @@ MAINTENANCE_PATH = (
     REPOSITORY_ROOT / "host/VitaMoonlight.Host/InstallerMaintenanceFence.cs"
 )
 UNINSTALL_PATH = REPOSITORY_ROOT / "host/VitaMoonlight.Host/UninstallManager.cs"
+RECOVERY_TASK_PATH = (
+    REPOSITORY_ROOT / "host/VitaMoonlight.Host/RecoveryTaskManager.cs"
+)
+RESCUE_AGENT_PATH = (
+    REPOSITORY_ROOT / "host/VitaMoonlight.Host/HostRecoveryAgent.cs"
+)
+TASK_ACCOUNT_PATH = (
+    REPOSITORY_ROOT / "host/VitaMoonlight.Host/ScheduledTaskAccount.cs"
+)
+BACKEND_LIFECYCLE_PATH = (
+    REPOSITORY_ROOT / "host/VitaMoonlight.Host/BackendLifecycleManager.cs"
+)
 LEGACY_HOSTS_PATH = REPOSITORY_ROOT / "host/tests/legacy-upgrade-hosts.json"
 
 
@@ -235,9 +247,11 @@ def check_installer_legacy_surface(installer: str) -> None:
         begin,
         [
             "ExtractMaintenanceHelper(ErrorText)",
+            "VitaMoonlight.Host.Maintenance.error.txt",
             "VitaMoonlight.Host.Maintenance.exe",
             "maintenance begin --owner-pid ",
             "if ResultCode <> 0 then",
+            "ReadMaintenanceHelperError",
             "MaintenanceFenceActive := True",
         ],
         "maintenance helper begin ordering",
@@ -251,6 +265,130 @@ def check_installer_legacy_surface(installer: str) -> None:
             "WithMaintenanceBypass('backend status --intent-exit-code')",
         ],
         "legacy rollback capability gate",
+    )
+
+
+def check_installer_failure_ux(installer: str) -> None:
+    """Keep expected host failures out of Pascal's runtime-error surface."""
+
+    require(
+        "RaiseException(" not in installer,
+        "ordinary installer failures must not escape as Inno Runtime error dialogs",
+    )
+    recorder = section(
+        installer,
+        "procedure RecordSetupFailure(const ErrorText: String);\nbegin",
+        "function PrepareToInstall(",
+        "RecordSetupFailure",
+    )
+    require_in_order(
+        recorder,
+        [
+            "SetupFailureRecorded := True",
+            "SetupFailureText :=",
+            "ConfigurationDeferredForRestart := True",
+            "TryRestoreUpgradeSafeguards",
+            "SetupFailurePage.RichEditViewer.Lines.Text := SetupFailureText",
+        ],
+        "post-copy setup failure recording and safeguard rollback",
+    )
+    require(
+        "No later host-configuration steps were run" in recorder,
+        "the controlled failure page must explain that fail-closed sequencing stopped",
+    )
+
+    page = section(
+        installer,
+        "procedure InitializeWizard;",
+        "function InitializeSetup: Boolean;",
+        "setup failure page",
+    )
+    require_in_order(
+        page,
+        [
+            "CreateOutputMsgMemoPage(",
+            "wpInstalling",
+            "Setup could not complete",
+            "Vita Moonlight Host stopped safely.",
+        ],
+        "normal post-copy setup failure page",
+    )
+
+    runner = section(
+        installer,
+        "function RunHostCommand(",
+        "function RunRequiredHostCommand(",
+        "post-copy host-command runner",
+    )
+    require(
+        runner.count("RecordSetupFailure(") >= 3,
+        "host launch failures and detailed/non-detailed nonzero exits must use "
+        "the controlled failure page",
+    )
+    require_in_order(
+        runner,
+        [
+            "LoadStringFromFile(ErrorPath, ErrorDetails)",
+            "ErrorText := Trim(ErrorDetails)",
+            "RecordSetupFailure(",
+            "Result := False",
+            "exit",
+        ],
+        "detailed host-command error capture",
+    )
+
+    postinstall = section(
+        installer,
+        "procedure CurStepChanged(CurStep: TSetupStep);",
+        "function ShouldSkipPage(PageID: Integer): Boolean;",
+        "post-copy setup orchestration",
+    )
+    require(
+        postinstall.count("RecordSetupFailure(") >= 3,
+        "direct readiness, lifecycle, and safeguard failures must use the "
+        "controlled failure page",
+    )
+    direct_failures = re.findall(
+        r"RecordSetupFailure\(.*?\);\s*exit;",
+        postinstall,
+        flags=re.DOTALL,
+    )
+    require(
+        len(direct_failures) == postinstall.count("RecordSetupFailure("),
+        "every direct post-copy failure must exit before any later setup step",
+    )
+
+    completion = section(
+        installer,
+        "function ShouldSkipPage(PageID: Integer): Boolean;",
+        "procedure CurPageChanged(CurPageID: Integer);",
+        "controlled setup completion",
+    )
+    require_in_order(
+        completion,
+        [
+            "PageID = SetupFailurePage.ID",
+            "not SetupFailureRecorded",
+            "PageID = wpFinished",
+            "SetupFailureRecorded",
+            "function GetCustomSetupExitCode: Integer",
+            "SetupHostConfigurationFailedExitCode",
+        ],
+        "failure-page routing and nonzero setup result",
+    )
+    require(
+        "SetupHostConfigurationFailedExitCode = 10" in installer,
+        "post-copy setup failures need a stable nonzero product exit code",
+    )
+    launch_gate = section(
+        installer,
+        "function CanLaunchControlPanel: Boolean;",
+        "function NeedRestart: Boolean;",
+        "postinstall control-panel launch gate",
+    )
+    require(
+        "not SetupFailureRecorded" in launch_gate,
+        "a failed setup must not offer the successful postinstall launch action",
     )
 
 
@@ -325,20 +463,225 @@ def check_helper_physical_proof(maintenance: str, uninstall: str) -> None:
     )
 
 
+def check_interactive_task_account_safety(
+    maintenance: str,
+    uninstall: str,
+    recovery_task: str,
+    rescue_agent: str,
+    task_account: str,
+    backend_lifecycle: str,
+) -> None:
+    begin = section(
+        maintenance,
+        "internal static InstallerMaintenanceState Begin(",
+        "internal static bool End(",
+        "InstallerMaintenanceFence.Begin",
+    )
+    require_in_order(
+        begin,
+        [
+            "ScheduledTaskAccount.RequireCurrentInteractiveUser(",
+            "RequireLiveProcessStart(ownerProcessId)",
+            ".RecoverPhysicalAndDiscardPendingTransactionForInstallerMaintenanceBootstrap(",
+        ],
+        "different-account UAC must fail before installer mutation",
+    )
+    snapshot = section(
+        maintenance,
+        "private static MaintenanceSafeguardSnapshot CaptureCurrentSnapshot()",
+        "private static MaintenanceSafeguardSnapshot NormalizeSnapshotForTakeover(",
+        "installer task snapshot",
+    )
+    require(
+        snapshot.count("ExactScheduledTaskManager.RequireOwnedInteractiveTask(") == 2,
+        "installer maintenance must reject same-name foreign tasks before an "
+        "older installed host can remove them",
+    )
+    require(
+        "WTSQuerySessionInformation" in task_account
+        and "WindowsIdentity.GetCurrent()" in task_account
+        and "different administrator password is intentionally rejected" in task_account,
+        "scheduled-task account guard must compare the elevated identity with "
+        "the interactive session and explain unsupported different-account UAC",
+    )
+    require(
+        "ScheduledTaskAccount" not in uninstall,
+        "uninstall must remain available to another elevated Administrator; "
+        "only task installation/repair is account-bound",
+    )
+    uninstall_prepare = section(
+        uninstall,
+        "internal static UninstallPreparationResult Prepare(",
+        "internal static UninstallPreparationResult\n        RecoverPhysicalAndDiscardPendingTransaction()",
+        "UninstallManager.Prepare",
+    )
+    require_in_order(
+        uninstall_prepare,
+        [
+            "BackendLifecycleStateStore.AcquireLock()",
+            "RequireOwnedFinalizationPreflight()",
+            "BackendLifecycleStateStore.BeginUninstallLocked(",
+            "RecoverPhysicalAndDiscardPendingTransaction()",
+            "operationLock.Dispose()",
+        ],
+        "uninstall must preflight exact owned cleanup before its durable mutation",
+    )
+    require(
+        uninstall_prepare.count(
+            "ExactScheduledTaskManager.RequireOwnedInteractiveTask("
+        ) == 2
+        and "SunshineConfigurator.RequireManagedIntegrationCleanupReady()"
+        in uninstall_prepare,
+        "uninstall preflight must verify both task actions and streaming-host cleanup",
+    )
+    enable = section(
+        backend_lifecycle,
+        "internal static BackendLifecycleReport EnableLocked(",
+        "/// <summary>",
+        "BackendLifecycleManager.EnableLocked",
+    )
+    require_in_order(
+        enable,
+        [
+            "ScheduledTaskAccount.RequireCurrentInteractiveUser(",
+            "BackendLifecycleStateStore.LoadForLifecycleAction(",
+            "BackendLifecycleStateStore.Save(transition)",
+            "RecoveryTaskManager.Install(",
+        ],
+        "enable must reject different-account UAC before lifecycle or task mutation",
+    )
+
+    for source, description in (
+        (recovery_task, "display-recovery task"),
+        (rescue_agent, "stream-rescue task"),
+    ):
+        install = section(
+            source,
+            "internal static void Install(string executablePath)",
+            "internal static void Uninstall()",
+            f"{description} install",
+        )
+        uninstall_task = section(
+            source,
+            "internal static void Uninstall()",
+            "private static int Run" if description == "display-recovery task" else "internal static HostRescueStatus? ReadLastStatus()",
+            f"{description} uninstall",
+        )
+        require_in_order(
+            install,
+            [
+                "ScheduledTaskAccount.RequireCurrentInteractiveUser(",
+                "if (existing.State == ExactScheduledTaskState.Present)",
+                "ExactScheduledTaskManager.RequireOwnedInteractiveTask(",
+                "requireInteractiveHighest: false",
+                '"/IT"',
+                '"/RL", "HIGHEST"',
+                "ExactScheduledTaskManager.RequireOwnedInteractiveTask(",
+            ],
+            f"{description} interactive/highest creation",
+        )
+        require_in_order(
+            uninstall_task,
+            [
+                "ExactScheduledTaskManager.RequireOwnedInteractiveTask(",
+                "ExactScheduledTaskManager.DeleteExact(",
+            ],
+            f"{description} exact-action deletion",
+        )
+
+
+def check_release_scope_and_rescue_surface(installer: str) -> None:
+    require(
+        'Name: "host\\sunshine"' in installer
+        and 'Name: "host\\sunshine\\virtualdriver"' not in installer
+        and 'Name: "host\\apollo"' not in installer,
+        "the public installer must expose one supported Sunshine + required VDD path",
+    )
+    require(
+        "deferred-setup save --host sunshine --virtual-driver true" in installer,
+        "paused Sunshine setup must retain the mandatory VDD plan",
+    )
+    program = read(REPOSITORY_ROOT / "host/VitaMoonlight.Host/Program.cs")
+    require_in_order(
+        program,
+        [
+            "TryWriteLastCommandError(errorDetails)",
+            "TryWriteMaintenanceHelperError(errorDetails)",
+            "private static void TryWriteMaintenanceHelperError(",
+            '"VitaMoonlight.Host.Maintenance.exe"',
+            "Path.GetRelativePath(",
+            '"VitaMoonlight.Host.Maintenance.error.txt"',
+        ],
+        "setup-private helper errors must explain pre-install account rejection",
+    )
+
+    forbidden = (
+        "Close Windows game",
+        "close-game",
+        "close-foreground",
+        "CloseForeground",
+        "VkF12",
+        "UI_ACTION_END_WINDOWS",
+    )
+    roots = (
+        REPOSITORY_ROOT / "README.md",
+        REPOSITORY_ROOT / "host",
+        REPOSITORY_ROOT / "docs",
+        REPOSITORY_ROOT / "protocol",
+        REPOSITORY_ROOT / "src",
+    )
+    candidates: list[Path] = []
+    for root in roots:
+        if root.is_file():
+            candidates.append(root)
+        else:
+            candidates.extend(
+                path
+                for path in root.rglob("*")
+                if path.is_file()
+                and path.suffix.lower()
+                in {".c", ".h", ".cs", ".iss", ".json", ".md", ".py"}
+                and "obj" not in path.parts
+                and "bin" not in path.parts
+        )
+    for path in candidates:
+        source = read(path)
+        for token in forbidden:
+            require(
+                token.lower() not in source.lower(),
+                f"unsafe foreground-close/F12 rescue surface remains in "
+                f"{path.relative_to(REPOSITORY_ROOT)}: {token}",
+            )
+
+
 def main() -> int:
     try:
-        check_installer_legacy_surface(read(INSTALLER_PATH))
+        installer = read(INSTALLER_PATH)
+        check_installer_legacy_surface(installer)
+        check_installer_failure_ux(installer)
         check_helper_physical_proof(
             read(MAINTENANCE_PATH),
             read(UNINSTALL_PATH),
         )
+        check_interactive_task_account_safety(
+            read(MAINTENANCE_PATH),
+            read(UNINSTALL_PATH),
+            read(RECOVERY_TASK_PATH),
+            read(RESCUE_AGENT_PATH),
+            read(TASK_ACCOUNT_PATH),
+            read(BACKEND_LIFECYCLE_PATH),
+        )
+        check_release_scope_and_rescue_surface(installer)
     except ContractFailure as exc:
         print(f"Windows upgrade contract check failed: {exc}", file=sys.stderr)
         return 1
 
     print(
         "Windows upgrade contract check passed: legacy installed-host commands "
-        "are compatible and the embedded helper proves physical-only safety."
+        "are compatible, expected setup failures use a normal failure page and "
+        "nonzero result, the embedded helper proves physical-only safety, "
+        "interactive tasks cannot bind to different-account UAC, uninstall "
+        "remains available, and no unsafe foreground-close rescue exists."
     )
     return 0
 

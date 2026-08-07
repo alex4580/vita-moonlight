@@ -64,6 +64,8 @@ internal static class InstallerMaintenanceFence
     internal static InstallerMaintenanceState Begin(int ownerProcessId)
     {
         RequireControllerProcess();
+        ScheduledTaskAccount.RequireCurrentInteractiveUser(
+            "Vita Moonlight setup or repair");
         var ownerStart = RequireLiveProcessStart(ownerProcessId);
         MachineStateSecurity.SecureContainer();
         using var commandGate = AcquireCommandGate();
@@ -478,6 +480,22 @@ internal static class InstallerMaintenanceFence
         ExactScheduledTaskManager.RequireKnown(
             recovery,
             RecoveryTaskManager.TaskName);
+        if (rescueAgent.State == ExactScheduledTaskState.Present)
+        {
+            ExactScheduledTaskManager.RequireOwnedInteractiveTask(
+                HostRecoveryAgentManager.TaskName,
+                InstallationTrust.ExpectedExecutablePath,
+                "agent run --background",
+                requireInteractiveHighest: false);
+        }
+        if (recovery.State == ExactScheduledTaskState.Present)
+        {
+            ExactScheduledTaskManager.RequireOwnedInteractiveTask(
+                RecoveryTaskManager.TaskName,
+                InstallationTrust.ExpectedExecutablePath,
+                "session recover",
+                requireInteractiveHighest: false);
+        }
         return new MaintenanceSafeguardSnapshot(
             backendWasEnabled,
             rescueAgent.State == ExactScheduledTaskState.Present,

@@ -31,8 +31,8 @@ extern struct host_status g_host_status[MAX_HOSTS];
 extern volatile int g_host_scan_thread_status;
 extern volatile int g_host_status_changed;
 
-void start_host_scan_thread();
-void stop_host_scan_thread();
+void start_host_scan_thread(void);
+void stop_host_scan_thread(void);
 bool find_host_ip_mdns(const char *hostname, char *out_ip, size_t out_len);
 
 #ifdef __cplusplus

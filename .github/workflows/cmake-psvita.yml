@@ -30,6 +30,9 @@ jobs:
       - name: Verify release version consistency
         run: python3 tools/check-version-consistency.py
 
+      - name: Verify release packaging and policy contract
+        run: python3 tools/check-release-contract.py
+
       - name: Verify Vita/host compatibility contract
         run: python3 tools/check-host-client-contract.py
 
@@ -38,6 +41,15 @@ jobs:
 
       - name: Verify Vita pairing and lifecycle security
         run: python3 tools/check-vita-security-contract.py
+
+      - name: Verify Vita saved-computer persistence
+        run: python3 tools/check-vita-device-contract.py
+
+      - name: Verify Vita host scanner lifecycle
+        run: python3 tools/check-vita-host-scan-contract.py
+
+      - name: Verify Vita client resilience and low-latency lifecycle
+        run: python3 tools/check-vita-client-resilience.py
 
       - name: Verify Sunshine XML response hardening
         run: python3 tools/check-xml-hardening.py
@@ -49,7 +61,10 @@ jobs:
         run: python3 tools/summarize-vita-log.py --self-test
 
       - name: Test VitaSDK dependency resolver
-        run: python3 tools/fetch-vitasdk-packages.py --self-test
+        run: >-
+          python3 tools/fetch-vitasdk-packages.py
+          --lock tools/vitasdk-packages.lock.json
+          --self-test
 
       - name: Set up dependencies
         run: |
@@ -83,6 +98,7 @@ jobs:
           mkdir -p "$package_dir"
           dependency_manifest="$GITHUB_WORKSPACE/vitasdk-dependencies.json"
           python3 tools/fetch-vitasdk-packages.py \
+            --lock tools/vitasdk-packages.lock.json \
             --output-dir "$package_dir" \
             --manifest "$dependency_manifest"
           python3 -c \
@@ -97,7 +113,7 @@ jobs:
 
       - name: Update submodules and build
         run: |
-          cmake -S . -B build -DCMAKE_TOOLCHAIN_FILE="${{ env.VITASDK }}/share/vita.toolchain.cmake"
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE="${{ env.VITASDK }}/share/vita.toolchain.cmake"
           cd build
           make
           cp ../vitasdk-dependencies.json .

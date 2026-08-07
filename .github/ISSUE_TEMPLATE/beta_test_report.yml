@@ -22,7 +22,7 @@ body:
     attributes:
       label: Beta release
       description: Enter the exact GitHub release tag shown on the download page.
-      placeholder: v0.14.7-beta.1
+      placeholder: v0.14.8-beta.1
     validations:
       required: true
   - type: dropdown

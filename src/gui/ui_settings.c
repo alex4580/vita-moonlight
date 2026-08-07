@@ -193,7 +193,6 @@ enum {
   SETTINGS_INPUT_HELP,
   SETTINGS_FPS,
   SETTINGS_BITRATE,
-  SETTINGS_SOPS,
   SETTINGS_ENABLE_FRAME_INVAL,
   SETTINGS_ENABLE_STREAM_OPTIMIZE,
   SETTINGS_ENABLE_VITA_VBLANK_WAIT,
@@ -207,7 +206,6 @@ enum {
   SETTINGS_JP_LAYOUT,
   SETTINGS_SHOW_FPS,
   SETTINGS_LOCAL_AUDIO,
-  SETTINGS_ENABLE_FRAME_PACER,
   SETTINGS_CENTER_REGION_ONLY,
   SETTINGS_ENABLE_MAPPING,
   SETTINGS_CONTROLLER_MAPPER,
@@ -227,7 +225,6 @@ enum {
   SETTINGS_VIEW_STREAM_PRESET,
   SETTINGS_VIEW_FPS,
   SETTINGS_VIEW_BITRATE,
-  SETTINGS_VIEW_SOPS,
   SETTINGS_VIEW_ENABLE_FRAME_INVAL,
   SETTINGS_VIEW_ENABLE_STREAM_OPTIMIZE,
   SETTINGS_VIEW_ENABLE_VITA_VBLANK_WAIT,
@@ -241,7 +238,6 @@ enum {
   SETTINGS_VIEW_JP_LAYOUT,
   SETTINGS_VIEW_SHOW_FPS,
   SETTINGS_VIEW_LOCAL_AUDIO,
-  SETTINGS_VIEW_ENABLE_FRAME_PACER,
   SETTINGS_VIEW_CENTER_REGION_ONLY,
   SETTINGS_VIEW_ENABLE_MAPPING,
   SETTINGS_VIEW_MAPPING_LOCATION,
@@ -323,11 +319,9 @@ static int settings_category_for_id(int id) {
     case SETTINGS_LOCAL_AUDIO:
       return SETTINGS_ROOT_SYSTEM_SUPPORT;
 
-    case SETTINGS_SOPS:
     case SETTINGS_ENABLE_FRAME_INVAL:
     case SETTINGS_ENABLE_STREAM_OPTIMIZE:
     case SETTINGS_ENABLE_VITA_VBLANK_WAIT:
-    case SETTINGS_ENABLE_FRAME_PACER:
     case SETTINGS_ADVANCED_STREAM_HELP:
       return SETTINGS_ROOT_ADVANCED;
 
@@ -375,7 +369,8 @@ static int settings_loop(int id, void *context, const input_data *input) {
     display_alert(
         "Presets reset the complete stream path: resolution, FPS, bitrate, "
         "packet size, network detection, H.264/SDR color, stereo audio, "
-        "host optimization, loss recovery, pacing, scaling, and power behavior.\n\n"
+        "host optimization, loss recovery, immediate presentation, scaling, "
+        "and power behavior.\n\n"
         "Recommended: native 960x544, 60 FPS, 8 Mbps.\n"
         "Reliable: 30 FPS/5 Mbps for unstable Wi-Fi.\n"
         "High quality: 12 Mbps for cleaner motion on a strong link.\n"
@@ -402,8 +397,8 @@ static int settings_loop(int id, void *context, const input_data *input) {
         "Bitrate improves detail during movement, but a value your Wi-Fi cannot "
         "sustain creates queues, delay, and packet loss. FPS 60 feels smoother "
         "and more responsive; FPS 30 halves the frame cadence and is easier to carry.\n\n"
-        "Frame pacing evens delivery. Packet-loss recovery requests clean reference "
-        "frames. Fit shows the whole desktop; Crop fills the panel by trimming edges. "
+        "Frames are presented immediately for the lowest latency. Packet-loss recovery "
+        "requests clean reference frames. Fit shows the whole desktop; Crop fills the panel by trimming edges. "
         "Vblank can reduce tearing but may add latency. Auto network mode is safest "
         "unless you know the host is local or reached through a VPN.",
         NULL, 1, NULL, NULL);
@@ -606,13 +601,6 @@ static int settings_loop(int id, void *context, const input_data *input) {
         }
       }
       break;
-    case SETTINGS_SOPS:
-      if ((input->buttons & config.btn_confirm) == 0 || input->buttons & SCE_CTRL_HOLD) {
-        break;
-      }
-      did_change = 1;
-      config.sops = !config.sops;
-      break;
     case SETTINGS_ENABLE_FRAME_INVAL:
       if ((input->buttons & config.btn_confirm) == 0 || input->buttons & SCE_CTRL_HOLD) {
         break;
@@ -781,13 +769,6 @@ static int settings_loop(int id, void *context, const input_data *input) {
       did_change = 1;
       config.localaudio = !config.localaudio;
       break;
-    case SETTINGS_ENABLE_FRAME_PACER:
-      if ((input->buttons & config.btn_confirm) == 0 || input->buttons & SCE_CTRL_HOLD) {
-        break;
-      }
-      did_change = 1;
-      config.enable_frame_pacer = !config.enable_frame_pacer;
-      break;
     case SETTINGS_CENTER_REGION_ONLY:
       if ((input->buttons & config.btn_confirm) == 0 || input->buttons & SCE_CTRL_HOLD) {
         break;
@@ -884,8 +865,6 @@ static int settings_loop(int id, void *context, const input_data *input) {
   sprintf(current, "%d", config.stream.bitrate);
   MENU_REPLACE(SETTINGS_VIEW_BITRATE, current);
 
-  MENU_REPLACE(SETTINGS_VIEW_SOPS, on_off(config.sops));
-
   MENU_REPLACE(
       SETTINGS_VIEW_ENABLE_FRAME_INVAL,
       "Automatic IDR");
@@ -926,10 +905,6 @@ static int settings_loop(int id, void *context, const input_data *input) {
   MENU_REPLACE(SETTINGS_VIEW_SHOW_FPS, current);
 
   MENU_REPLACE(SETTINGS_VIEW_LOCAL_AUDIO, on_off(config.localaudio));
-
-  MENU_REPLACE(
-      SETTINGS_VIEW_ENABLE_FRAME_PACER,
-      on_off(config.enable_frame_pacer));
 
   sprintf(current, "%s",
           config.center_region_only ? "Crop / fill" : "Fit entire frame");
@@ -1038,11 +1013,9 @@ static int ui_settings_category_menu(int category) {
   MENU_ACTION(SETTINGS_RESOLUTION_HELP, "Resolution and quality guide");
   MENU_ENTRY(SETTINGS_FPS, SETTINGS_VIEW_FPS, "Frame rate", ICON_LEFT_RIGHT_ARROWS);
   MENU_ENTRY(SETTINGS_BITRATE, SETTINGS_VIEW_BITRATE, "Video bitrate (Kbps)", "");
-  MENU_ENTRY(SETTINGS_SOPS, SETTINGS_VIEW_SOPS, "Optimize games for streaming", "");
   MENU_ENTRY(SETTINGS_ENABLE_FRAME_INVAL, SETTINGS_VIEW_ENABLE_FRAME_INVAL, "Packet-loss recovery", "");
   MENU_ENTRY(SETTINGS_ENABLE_STREAM_OPTIMIZE, SETTINGS_VIEW_ENABLE_STREAM_OPTIMIZE, "Network mode", ICON_LEFT_RIGHT_ARROWS);
   MENU_ENTRY(SETTINGS_ENABLE_VITA_VBLANK_WAIT, SETTINGS_VIEW_ENABLE_VITA_VBLANK_WAIT, "Sync video to Vita display", "");
-  MENU_ENTRY(SETTINGS_ENABLE_FRAME_PACER, SETTINGS_VIEW_ENABLE_FRAME_PACER, "Frame pacing", "");
   MENU_ENTRY(SETTINGS_CENTER_REGION_ONLY, SETTINGS_VIEW_CENTER_REGION_ONLY, "Aspect scaling", "");
   MENU_ACTION(SETTINGS_ADVANCED_STREAM_HELP, "Latency and recovery guide");
 
@@ -1182,7 +1155,7 @@ int ui_settings_menu() {
   ROOT_ENTRY(
       SETTINGS_ROOT_ADVANCED,
       "Advanced streaming",
-      "Network, pacing, loss recovery", ICON_RIGHT_ARROW);
+      "Network, timing, loss recovery", ICON_RIGHT_ARROW);
 
 #undef ROOT_ENTRY
 
@@ -1193,7 +1166,13 @@ int ui_settings_menu() {
 }
 
 void ui_settings_save_config() {
-  config_save(config_path, &config);
+  if (!config_path || !config_save(config_path, &config)) {
+    display_error(
+        "Settings could not be saved. The current choices remain active for "
+        "this run, but may be lost after closing Moonlight. Check free "
+        "storage space and try again.");
+    return;
+  }
   vita_debug_log_config_snapshot("settings_saved");
 }
 

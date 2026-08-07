@@ -27,11 +27,12 @@
 #define SERVER_PIN_FILE_NAME "server-pin.txt"
 
 /*
- * libcurl expresses these values in seconds. A zero total timeout is
- * intentional for Sunshine's first pairing request: that response is held
- * open while the user enters the PIN in Sunshine's UI.
+ * libcurl expresses these values in seconds. Sunshine holds the first pairing
+ * response while the user enters the PIN, but the Vita UI is synchronous and
+ * has no safe way to cancel an infinite request.
  */
-#define HTTP_TIMEOUT_PAIRING_USER_SECONDS 0L
+#define HTTP_TIMEOUT_PAIRING_USER_SECONDS 120L
+#define HTTP_TIMEOUT_PAIRING_ABORT_SECONDS 5L
 #define HTTP_TIMEOUT_ORDINARY_SECONDS 30L
 #define HTTP_TIMEOUT_LAUNCH_SECONDS 120L
 
