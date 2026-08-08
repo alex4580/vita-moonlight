@@ -223,7 +223,7 @@ internal sealed class HostControlPanel : Form
             "What happens next",
             "1. Install and open the Vita VPK.\n" +
             "2. Add this PC in Moonlight and approve the PIN in Sunshine.\n" +
-            "3. Launch Steam Big Picture, Desktop, or a game. The host switches to the Vita display for the stream and restores your physical display when the session ends."));
+            "3. Launch Steam Big Picture, Desktop, or a game. The host enables and switches to the Vita display for the stream, then restores your exact physical layout and disables the Vita display when the session ends."));
         AddPageControl(page, CreateInfoCard(
             "Recommended starting profile",
             "960 × 544  •  60 FPS  •  8 Mbps  •  H.264  •  SDR\n" +
@@ -289,9 +289,9 @@ internal sealed class HostControlPanel : Form
         AddCommandButton(actions, "Restore physical display now", ButtonKind.Warning,
             async () => { await RunCommandAsync(new[] { "emergency", "recover-display" }); }, 200,
             "End the current stream, restore the physical monitor, reload the Vita display driver, and restart Sunshine?");
-        AddCommandButton(actions, "Turn off idle Vita display", ButtonKind.Secondary,
+        AddCommandButton(actions, "Reconcile idle display now", ButtonKind.Secondary,
             async () => { await RunCommandAsync(new[] { "display", "disable-virtual" }); }, 210,
-            "Turn off only the idle Vita virtual monitor while keeping a physical monitor active?");
+            "Restore a physical desktop and disable the managed Vita virtual-display device now? Normal stream disconnect performs this automatically.");
         AddPageControl(page, actions);
         AddPageControl(page, CreateRecoveryHotkeyCard());
 
@@ -350,7 +350,7 @@ internal sealed class HostControlPanel : Form
         AddCommandButton(repairActions, "Repair sign-in display recovery", ButtonKind.Secondary,
             async () => { await RunCommandAsync(new[] { "recovery", "install" }); }, 210,
             "Install or repair the logon recovery task for interrupted display sessions?");
-        AddCommandButton(repairActions, "Repair stream rescue shortcuts", ButtonKind.Secondary,
+        AddCommandButton(repairActions, "Repair automatic handoff and recovery", ButtonKind.Secondary,
             async () => { await RunCommandAsync(new[] { "agent", "install" }); }, 210,
             "Install or repair the background hotkey agent used by the Vita overlay for game and display recovery?");
         AddCommandButton(repairActions, "Repair controller support", ButtonKind.Secondary,
@@ -359,7 +359,7 @@ internal sealed class HostControlPanel : Form
         AddCommandButton(repairActions, "Repair Sunshine", ButtonKind.Secondary,
             async () => { await RepairSunshineAsync(); }, 210,
             "Install or repair the packaged compatible Sunshine build? Active streams will end.");
-        AddCommandButton(repairActions, "Check rescue shortcuts", ButtonKind.Secondary,
+        AddCommandButton(repairActions, "Check automatic handoff", ButtonKind.Secondary,
             async () => { await RunCommandAsync(new[] { "agent", "status" }, allowNonZeroExit: true); }, 180,
             requiresAdministrator: false);
         AddPageControl(page, CreateSection(
@@ -585,7 +585,7 @@ internal sealed class HostControlPanel : Form
             ButtonKind.Warning,
             DisableBackendAsync,
             210,
-            "Pause Vita host features now? Disconnect the Vita first. Windows will restore the physical desktop, stop Vita Moonlight safeguards, and disable only the exact managed Vita display instances that are currently enabled. Sunshine and any pre-existing Apollo installation remain installed and reachable, but this beta supports streaming through Sunshine only. Clients pinned to the Vita virtual display may need these features enabled again or a physical host output. This does not block network access. Pairing, settings, and installed components are kept. The F11 rescue shortcut is unavailable during a complete Pause.");
+            "Pause Vita host features now? Disconnect the Vita first. Windows will restore the physical desktop, stop Vita Moonlight safeguards, and keep the exact managed Vita display instances disabled. Sunshine and any pre-existing Apollo installation remain installed and reachable, but this beta supports streaming through Sunshine only. This does not block network access. Pairing, settings, and installed components are kept. The F11 rescue shortcut is unavailable during a complete Pause.");
 
         var content = new TableLayoutPanel
         {
@@ -761,7 +761,7 @@ internal sealed class HostControlPanel : Form
                 BackendPreferenceState.Disabled =>
                     "Paused by you. The rescue agent and Ctrl + Alt + Shift + F11 shortcut are unavailable until you choose Enable Vita host features. Restart as Administrator to verify that every Vita-owned task and managed display instance is off.",
                 BackendPreferenceState.Enabled =>
-                    "Vita host features are enabled. Restart as Administrator to verify protected tasks and the managed display device.",
+                    "Vita host features are enabled. The managed display should remain disabled until a Vita stream begins. Restart as Administrator to verify the protected handoff and recovery safeguards.",
                 _ =>
                     "The protected Vita host-feature preference could not be read. Restart as Administrator for recovery details.",
             };
@@ -801,7 +801,7 @@ internal sealed class HostControlPanel : Form
         backendSummary.Text = report.Status switch
         {
             BackendLifecycleStatus.Enabled =>
-                "Enabled. Vita background functions are allowed to run. Check PC readiness below to verify that every installed component is ready.",
+                "Enabled. Automatic stream handoff and recovery are ready; the Vita display remains disabled while idle and is armed only for a journaled stream. Check PC readiness below to verify every component.",
             BackendLifecycleStatus.Disabled =>
                 "Paused. The physical desktop is active and Vita background functions are off; pairing, settings, and installed components are kept. The rescue agent and Ctrl + Alt + Shift + F11 shortcut are unavailable until you choose Enable Vita host features.",
             BackendLifecycleStatus.Partial =>
@@ -1044,7 +1044,51 @@ internal sealed class HostControlPanel : Form
     private async Task<bool> RepairDisplayDriverAsync()
     {
         if (!await RepairVisualCppRuntimeAsync()) return false;
-        return await RunCommandAsync(new[] { "driver", "install" });
+        bool adoptExisting;
+        string adoptionReason;
+        try
+        {
+            adoptExisting = ManagedVddOwnershipJournal
+                .RequiresExplicitAdoption(out adoptionReason);
+        }
+        catch (Exception error) when (
+            error is IOException or
+                UnauthorizedAccessException or
+                InvalidDataException or
+                InvalidOperationException or
+                System.ComponentModel.Win32Exception)
+        {
+            lastTechnicalOutput = error.ToString();
+            output.Text = lastTechnicalOutput;
+            MessageBox.Show(
+                this,
+                "Vita Moonlight could not safely identify one display device it is allowed to manage. " +
+                error.Message,
+                "Display driver needs attention",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+            return false;
+        }
+
+        if (adoptExisting)
+        {
+            var choice = MessageBox.Show(
+                this,
+                "Windows already has one MTT virtual-display device that is not owned by this Vita Moonlight installation. It may belong to DisplayWizard or another application.\n\n" +
+                "Allow Vita Moonlight to adopt only that exact device? Its current enabled/disabled state will be recorded and restored if Vita Moonlight is uninstalled. Choosing No leaves it unchanged.\n\n" +
+                adoptionReason,
+                "Use the existing virtual display?",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Question);
+            if (choice != DialogResult.Yes) return false;
+        }
+
+        var arguments = new List<string> { "driver", "install" };
+        if (adoptExisting)
+        {
+            arguments.Add("--adopt-existing-vdd");
+        }
+        return await RunCommandAsync(arguments.ToArray());
     }
 
     private Task<bool> RepairVisualCppRuntimeAsync() =>
@@ -1240,12 +1284,12 @@ internal sealed class HostControlPanel : Form
             "backend disable" => "Pausing Vita host features safely...",
             "backend status" => "Checking Vita host-feature state...",
             "display list" => "Detecting Windows displays…",
-            "display disable-virtual" => "Turning off the idle Vita display…",
+            "display disable-virtual" => "Restoring the idle physical display state…",
             "session test" => "Testing the Vita display safely…",
             "session status" => "Checking the current display session…",
             "recovery install" => "Repairing sign-in display recovery…",
-            "agent install" => "Repairing rescue shortcuts…",
-            "agent status" => "Checking rescue shortcuts…",
+            "agent install" => "Repairing automatic handoff and recovery…",
+            "agent status" => "Checking automatic handoff and recovery…",
             "emergency recover-display" => "Restoring the physical display…",
             "support export" => "Creating the support report…",
             _ => "Working…",

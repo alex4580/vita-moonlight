@@ -15,6 +15,15 @@ unless you are reproducing a problem. During a capture, entries are buffered
 and written in batches rather than forcing a storage write for every event. A
 capture never remains enabled across an app restart.
 
+The supported Windows all-app handoff also does not force Sunshine to INFO,
+tail `sunshine.log`, or parse global client events. Its authenticated stream
+generation, sparse heartbeat lease, matching stop, and exact Sunshine-process
+exit are the recovery signals. Setup preserves the user's Sunshine log level;
+an upgrade from a release that previously owned `min_log_level = info` restores
+the exact recorded prior value. Sunshine logging can still be enabled manually
+for a specific Sunshine investigation, but it is not required for ordinary
+streaming or display recovery.
+
 ## Create a clean Vita log
 
 1. First write down:
@@ -196,7 +205,7 @@ fields:
 | Requested lifecycle | `backendStatus`, `backendDesiredState`, `backendPreferencePersisted` | `Enabled` before, `Disabled` while paused, then `Enabled`; the preference is persisted after the first lifecycle choice. |
 | Recovery safeguards | `recoveryTaskStatus`, `rescueAgentTaskStatus`, `rescueAgentRunning` | Healthy Enabled reports use `Present`, `Present`, `true`; a complete Pause uses `Missing`, `Missing`, `false`; Enable restores the baseline. `Unknown` is a failed inspection, not the same as missing. |
 | Interactive task account | `scheduledTaskAccountReady` | `true` means the elevated process belongs to the interactive streaming account. `false` explains a setup/repair block caused by SYSTEM, a disconnected session, or different-account UAC without exposing either account name. |
-| Managed Vita display | `backendManagedVddDeviceCount`, `backendManagedVddEnabledCount`, `backendManagedVddActive` | Pause keeps the device count, changes the enabled count to `0`, and keeps it inactive. Enable restores the baseline enabled count while the idle display remains inactive. |
+| Managed Vita display | `backendManagedVddDeviceCount`, `backendManagedVddEnabledCount`, `backendManagedVddActive` | Healthy Enabled + Idle and Paused both keep the installed device count, report enabled count `0`, and keep the exact device PnP-disabled. An authenticated Vita preflight enables it for launch or resume; the matching stop returns it to `0`. |
 | Physical safety | `backendActivePhysicalDisplayCount`, `recoveryPending` | At least one active physical display and no pending transaction are expected while idle or paused. |
 | Shared host identity | `hostMode`, `sunshineInstalled`, `sunshineVersion` | These values must not change across Pause/Enable. |
 
@@ -213,9 +222,11 @@ prefer the saved JSON report when comparing multiple PCs.
 ## Read the sparse Windows rescue records
 
 The Windows companion keeps a small action record for display rescue,
-emergency hotkeys, and sleep/resume decisions. This is separate from the
-optional Vita support log. It does not sample input or continuously record a
-stream.
+emergency hotkeys, authenticated stream boundaries, and sleep/resume
+decisions. This is separate from the optional Vita support log. It does not
+sample input, continuously record a stream, or continuously tail Sunshine
+while Enabled + Idle. Sunshine lifecycle observation is a fallback only while
+a display transaction may need recovery after an abrupt disconnect or crash.
 
 Open it without a terminal:
 
@@ -236,7 +247,8 @@ Each `stream-rescue.log` line has four tab-separated fields:
 UTC timestamp    action    True/False    summary
 ```
 
-For a sleep/resume test, expect a successful
+For a sleep/resume test, first confirm the physical monitor has its normal mode
+and window placement and the managed device is PnP-disabled. Expect a successful
 `power-suspend-display-prepare` line followed after wake by either a successful
 `resume-display-check:` decision or a successful `recover-display-host` action
 whose summary says it was triggered by resume. A `resume-display-check:`
@@ -257,6 +269,10 @@ needed, and shared-host restart when it was already running.
 latest rescue result. Use `stream-rescue.log` when event order matters. The
 sparse log is capped at roughly 512 KiB and resets with a rotation record when
 that cap is reached.
+
+After wake, the physical layout and window sizes/positions should match the
+pre-sleep baseline, Windows should be normally responsive, no recovery
+transaction should remain, and the managed device should again be PnP-disabled.
 
 These files can contain display names and Windows error details. Review and
 redact them before sharing, just as you would a support report. Do not confuse

@@ -40,9 +40,8 @@ release notes.
 - [ ] Test split-token UAC from the intended Administrator streaming account.
       Confirm both tasks use the interactive token, highest run level, and the
       exact installed executable/arguments. F11 must register. On the supported
-      native Sunshine path F8-F10 must remain unregistered and absent from
-      readiness requirements; they may register only in an explicitly selected
-      legacy single-application fallback test.
+      authenticated handoff path F8-F10 must remain unregistered and absent
+      from readiness requirements.
 - [ ] From a standard streaming account, supply a different Administrator at
       setup UAC. Setup must show the unsupported-account explanation and stop
       before display, task, or file mutation. Then verify that an uninstall
@@ -61,7 +60,10 @@ release notes.
       Sunshine encoder dimensions, keep the same Windows game running, and
       retain disconnect/crash recovery.
 - [ ] Repeat normal disconnect, Vita suspend, Wi-Fi loss, and reconnect at least
-      three times each.
+      three times each. Include an immediate reconnect to the same running
+      Sunshine application so `/resume`, not only a fresh launch, is covered.
+      A delayed stop from an earlier generation must never tear down the newer
+      stream.
 - [ ] On physical Vita hardware, pause host capture without ending the session
       and verify the last-frame watchdog keeps the menu, overlay, and
       diagnostics responsive. Stress rapid menu navigation, repeated vblank
@@ -87,11 +89,14 @@ release notes.
       session must end and the physical display must return.
 - [ ] Use **Recover host display** in a separate run. Within roughly ten
       seconds at least one connected physical monitor must be active, VDD
-      inactive, Sunshine running, and the rescue status successful.
-- [ ] Attach `%ProgramFiles%\Sunshine\config\sunshine.log`,
+      PnP-disabled, Sunshine running, and the rescue status successful.
+- [ ] Attach
       `%ProgramFiles%\Vita Moonlight Host\state\Diagnostics\stream-rescue.log`,
       the optional Vita support log, the Windows host support JSON, and exact
-      timestamps/time zones to any remaining black-frame issue.
+      timestamps/time zones to any remaining black-frame issue. Include
+      `%ProgramFiles%\Sunshine\config\sunshine.log` only when Sunshine logging
+      was already enabled for that focused reproduction; the supported host
+      does not force INFO logging or tail that file.
 
 ## Input and usability gates
 
@@ -165,6 +170,17 @@ release notes.
 - [ ] A clean install includes Sunshine 2026.516.143833 or newer, ViGEmBus,
       Microsoft Visual C++ runtime 14.44.35211.0 or newer, the pinned signed VDD,
       recovery task, and running stream-rescue agent without manual downloads.
+- [ ] Readiness proves the authenticated Vita/host boundary is listening before
+      the rescue agent reports ready. A paired Vita certificate prepares both a
+      fresh launch and same-app resume; an unknown, disabled, expired, or
+      malformed client identity is rejected without enabling the VDD or writing
+      a recovery transaction. The endpoint exposes no unauthenticated status or
+      display action.
+- [ ] Exercise generation ownership directly: a valid prepare returns one
+      generation, its matching stop restores the exact physical baseline and
+      PnP-disables the VDD, a duplicate stop is harmless, and an older stop
+      cannot tear down a later prepared generation. Timeout and malformed-
+      request paths are bounded and fail to a visible physical desktop.
 - [ ] Corrupt or stop each prerequisite in a disposable test image. Installer
       and **Get started > Set up or repair this PC** must repair Sunshine,
       ViGEmBus, the Visual
@@ -206,25 +222,37 @@ release notes.
       unavailable. `doctor` remains non-mutating.
 - [ ] Upgrade install preserves Sunshine credentials and unrelated app
       commands, upgrades an older Sunshine build without installing a
-      duplicate, and removes obsolete Vita prep hooks.
-- [ ] Idle state is physical display active / VDD inactive. Normal disconnect
-      and emergency recovery both return to that state.
-- [ ] With no stream active, confirm the physical desktop is at its normal
-      saved resolution/refresh, then sleep and resume Windows three times.
+      duplicate, removes obsolete Vita prep hooks, and does not install a new
+      global hook as the display-lifecycle authority.
+- [ ] Upgrade from a release through 0.14.6 removes only the immutable allowlist
+      of obsolete root documentation and retired
+      `C:\ProgramData\VitaMoonlight` state. A planted unknown file is retained,
+      reparse/busy entries are not followed or broadly deleted, and an
+      incomplete cleanup safely retries rather than recording completion.
+- [ ] Healthy Enabled + Idle is an exact physical layout, no pending recovery
+      transaction, and the exact managed VDD PnP-disabled. Normal disconnect,
+      startup reconciliation, emergency recovery, and uninstall all return to
+      that state without manual display selection.
+- [ ] With no stream active, arrange several windows at recorded sizes and
+      positions. Turn the physical monitor off or let it enter power-save
+      **before** putting Windows to sleep, then resume Windows three times.
       Within 20 seconds after each wake, the physical desktop must be active at
-      that saved mode, the managed VDD inactive, and the bounded resume record
-      successful or contain only a structured non-fatal mode warning.
+      its saved mode, every window must retain its size/position, the managed
+      VDD must be PnP-disabled, and desktop animation/input must be normally
+      responsive without a restart. The bounded resume record may contain only
+      a structured non-fatal mode warning when the physical layout is correct.
 - [ ] With a disposable stream active, repeat sleep/resume three times after
       allowing the Vita virtual display to become primary. Do not require a
       physical-only topology before initiating sleep. After wake, verify the
       `power-suspend-display-prepare` record and confirm within 20 seconds that
-      the physical desktop wins, the VDD is inactive, and no window remains at
-      a 960x544 or 800x600 fallback mode. Reconnect manually afterward.
+      the physical desktop wins, the VDD is PnP-disabled, and no window remains
+      at a 960x544 or 800x600 fallback mode. Reconnect afterward and prove the
+      authenticated resume preflight can arm the device again.
 - [ ] Start **Test Vita display for 15 seconds** in one process and initiate
       Windows sleep while that process owns the display transaction. Vary the
       timing across three attempts. The durable suspend intent must prevent a
       post-notification VDD commit; after wake the physical saved mode must win,
-      VDD must be inactive, and the intent must clear without permanently
+      VDD must be PnP-disabled, and the intent must clear without permanently
       blocking the next session.
 - [ ] Choose **Pause Vita host features** during an enabled installation, restart
       Windows, and run an in-place upgrade/repair. The recovery tasks, rescue
@@ -240,11 +268,13 @@ release notes.
       send only Ctrl+Shift+Esc through Moonlight; **End Sunshine app** must use
       the authenticated GameStream quit-app operation.
 - [ ] Uninstall removes both scheduled tasks and the background agent and does
-      not leave the physical display disabled. Default and silent uninstall
-      keep shared Sunshine, ViGEmBus, and VDD installations.
+      not leave the physical display disabled. It also removes the authenticated
+      boundary listener/firewall ownership and leaves a retained managed VDD
+      PnP-disabled. Default and silent uninstall keep shared Sunshine,
+      ViGEmBus, and VDD installations.
 - [ ] Run uninstall once from an enabled backend and once from an intentionally
       paused backend. Cover default shared-dependency retention and explicit
-      removal in disposable snapshots. A forced late finalization failure must
+      display release / Sunshine / ViGEmBus removal in disposable snapshots. A forced late finalization failure must
       restore the exact pre-uninstall paused device state and any
       safeguard removed earlier; a retry must complete idempotently. Unknown
       files placed in the state directory must be retained and reported, never
@@ -284,6 +314,12 @@ release notes.
       published and retry once with host configuration selected and once with
       it cleared. Only the selected recovery tasks may remain, the physical
       desktop must be active, and the exact maintenance records must clear.
+- [ ] With a sole pre-existing MTT device on a disposable snapshot, interrupt
+      first setup after maintenance begins but before product copy. Setup must
+      not adopt, disable, or journal that device before copy. Complete a later
+      install with the disclosed Sunshine/display task selected, then prove
+      explicit display release restores the exact pre-install enabled state.
+      Repeat once for initially enabled and once for initially disabled.
 - [ ] Interrupt upgrade once after each pre-existing recovery task is removed,
       then retry with host configuration deselected. The durable pre-mutation
       snapshot—not current task absence—must restore exactly the safeguards
@@ -295,15 +331,15 @@ release notes.
       host to simulate post-finalize deletion, and retry: exact Finalized plus
       missing host resumes file-only cleanup. Missing host plus torn/InProgress
       must fail closed. Unknown fixture files must be retained.
-- [ ] In a disposable VM, explicitly selected Sunshine, ViGEmBus, and VDD
-      removals succeed or accurately request a reboot. A pending reboot keeps
+- [ ] In a disposable VM, explicitly selected Sunshine and ViGEmBus removals
+      plus exact Vita display release succeed or accurately request a reboot. A pending reboot keeps
       the host and safeguards until uninstall is rerun and verifies cleanup.
       Default `/VERYSILENT` uninstall does not remove dependencies; the
       explicit dependency switches do.
-- [ ] Remove the MTT display device instance while leaving its verified driver
-      package staged, then run explicit VDD removal. The orphaned MttVDD package
-      must be removed without matching or deleting any unrelated display
-      driver package.
+- [ ] Cover both exact display ownership kinds. Releasing an app-created node
+      removes that device; releasing an adopted node restores its recorded
+      enabled baseline. The verified MTT driver package remains staged in both
+      cases, and no unrelated display node or package is changed.
 - [ ] Installer and portable ZIP contain the same companion build, simple root
       README, `host` and `docs` guide trees (including community testing,
       logging/support, compatibility, Vita tuning, building, and releasing),

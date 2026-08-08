@@ -11,6 +11,12 @@ on:
       - "src/gui/ui_settings.c"
       - "src/gui/ui_stream_overlay.c"
       - "libgamestream/client.c"
+      - "libgamestream/client.h"
+      - "libgamestream/http.c"
+      - "libgamestream/http.h"
+      - "libgamestream/bridge_protocol.c"
+      - "libgamestream/bridge_protocol.h"
+      - "tests/stream_boundary_protocol_test.c"
       - "CMakeLists.txt"
       - "CHANGELOG.md"
       - "README.md"
@@ -43,6 +49,12 @@ on:
       - "src/gui/ui_settings.c"
       - "src/gui/ui_stream_overlay.c"
       - "libgamestream/client.c"
+      - "libgamestream/client.h"
+      - "libgamestream/http.c"
+      - "libgamestream/http.h"
+      - "libgamestream/bridge_protocol.c"
+      - "libgamestream/bridge_protocol.h"
+      - "tests/stream_boundary_protocol_test.c"
       - "CMakeLists.txt"
       - "CHANGELOG.md"
       - "README.md"
@@ -108,6 +120,8 @@ jobs:
         run: dotnet build host/VitaMoonlight.Host/VitaMoonlight.Host.csproj --configuration Release
       - name: Portable logic self-test
         run: dotnet run --project host/VitaMoonlight.Host/VitaMoonlight.Host.csproj --configuration Release --no-build -- self-test
+      - name: Install and upgrade cleanup contract tests
+        run: dotnet run --project host/VitaMoonlight.Host.ContractTests/VitaMoonlight.Host.ContractTests.csproj --configuration Release
 
   build:
     runs-on: windows-2025
@@ -184,6 +198,8 @@ jobs:
         run: dotnet build host/VitaMoonlight.Host/VitaMoonlight.Host.csproj --configuration Release
       - name: Self-test
         run: dotnet run --project host/VitaMoonlight.Host/VitaMoonlight.Host.csproj --configuration Release --no-build -- self-test
+      - name: Install and upgrade cleanup contract tests
+        run: dotnet run --project host/VitaMoonlight.Host.ContractTests/VitaMoonlight.Host.ContractTests.csproj --configuration Release
       - name: Publish
         run: dotnet publish host/VitaMoonlight.Host/VitaMoonlight.Host.csproj --configuration Release --runtime win-x64 --self-contained true -p:PublishSingleFile=true -p:DebugType=None -p:DebugSymbols=false --output artifacts/host
       - name: Restore host signing certificate

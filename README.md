@@ -57,9 +57,14 @@ On Sunshine's first launch, its web page may ask you to create a username and
 password. Those are local Sunshine administration credentials; the short PIN
 shown later on the Vita is a separate one-time pairing code.
 
-The virtual display is normally inactive when you are not streaming. During a
-stream, a physical PC monitor may go blank while Sunshine captures the
-Vita-sized display. It should return automatically after disconnecting.
+When you are not streaming, the Vita virtual-display device is stopped—not
+merely hidden from the desktop—so Windows cannot move your windows onto it
+when a physical monitor sleeps. Before both a new launch and a resume of the
+same Sunshine application, the paired Vita asks the Windows companion to arm
+the display automatically. A normal disconnect, Sunshine failure, Windows
+sleep, startup recovery, or uninstall restores the exact saved physical layout
+and stops the device again. You do not select or enable the Vita display by
+hand.
 
 ## Use it
 
@@ -130,16 +135,21 @@ Sunshine once; this is expected and does not assume a clean install.
 2. Open **Windows Settings > Apps > Installed apps** (Windows 11) or
    **Apps & features** (Windows 10), find **Vita Moonlight Host**, and choose
    **Uninstall**.
-3. Keep Sunshine, ViGEmBus, and the virtual-display driver unless you are sure
-   no other streaming or controller software uses them. They are shared
-   components and are kept by default.
+3. Keep the default choices for a normal uninstall. Sunshine, ViGEmBus, and
+   the shared MTT driver package are retained. The optional display choice
+   releases only this installation's exact device: a device created by Vita
+   Moonlight is removed, while an adopted existing device is restored to its
+   pre-install enabled state.
 4. To remove the Vita app, highlight it in LiveArea, press **Triangle**, and
    choose **Delete**.
 
 The Windows uninstaller works from either the enabled or paused state. It
 restores and verifies a physical display before removing recovery safeguards,
 removes Vita-owned settings and legacy state, and leaves shared components
-that you keep in place. If it asks for a restart,
+that you keep in place. By default the retained Vita display device is stopped,
+so it cannot take over when the physical monitor sleeps. The shared MTT driver
+package is never guessed to be exclusively owned and is not deleted. If
+uninstall asks for a restart,
 restart Windows and run the uninstaller again.
 
 Deleting the Vita app may leave its external settings and support-log files so

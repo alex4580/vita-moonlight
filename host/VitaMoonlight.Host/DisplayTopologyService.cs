@@ -49,6 +49,10 @@ internal sealed record DisplayRecoveryRecord(
     int RequestedHeight,
     int RequestedFps);
 
+internal sealed record PhysicalOnlyDisplaySnapshot(
+    DisplayConfiguration Configuration,
+    IReadOnlyList<string> PhysicalDisplays);
+
 internal static class HostStatePaths
 {
     internal static string Root
@@ -95,6 +99,49 @@ internal sealed class DisplayTopologyService
     {
         var configuration = WindowsDisplayNative.Query(WindowsDisplayNative.QueryAllPaths);
         return Describe(configuration);
+    }
+
+    /// <summary>
+    /// Captures the complete active physical configuration, including its
+    /// supplied mode array. Unlike the emergency recovery path, restoring this
+    /// snapshot preserves source positions, primary-display selection, clone
+    /// groups, and refresh rates instead of asking Windows to synthesize a new
+    /// layout.
+    /// </summary>
+    internal bool TryCaptureExactPhysicalOnlySnapshot(
+        out PhysicalOnlyDisplaySnapshot? snapshot)
+    {
+        var configuration = WindowsDisplayNative.Query(
+            WindowsDisplayNative.QueryOnlyActivePaths);
+        var described = Describe(configuration);
+        var physical = described.Where(display =>
+            display.IsActive &&
+            !IsLikelyVirtualDisplay(display)).ToArray();
+
+        // Describe deliberately omits unnamed/transient targets. Do not call a
+        // partially described configuration "physical only" because an
+        // unknown virtual path could otherwise be preserved in the snapshot.
+        if (configuration.Paths.Length == 0 ||
+            described.Count != configuration.Paths.Length ||
+            physical.Length != described.Count ||
+            physical.Any(display => !display.IsAvailable))
+        {
+            snapshot = null;
+            return false;
+        }
+
+        snapshot = new PhysicalOnlyDisplaySnapshot(
+            configuration,
+            physical.Select(DisplayLabel).ToArray());
+        return true;
+    }
+
+    internal void RestoreExactPhysicalOnlySnapshot(
+        PhysicalOnlyDisplaySnapshot snapshot)
+    {
+        ArgumentNullException.ThrowIfNull(snapshot);
+        WindowsDisplayNative.Restore(snapshot.Configuration);
+        UninstallManager.VerifyPhysicalOnlyTopology(this);
     }
 
     private static IReadOnlyList<DisplayDescriptor> Describe(DisplayConfiguration configuration)
@@ -158,7 +205,18 @@ internal sealed class DisplayTopologyService
 
     internal DisplayRecoveryRecord CaptureRecovery(int width, int height, int fps)
     {
-        var configuration = WindowsDisplayNative.Query(WindowsDisplayNative.QueryOnlyActivePaths);
+        // Recovery is an exact rollback transaction, so use the same strict
+        // completeness proof as idle reconciliation. Describe() intentionally
+        // skips unnamed/transient targets; accepting a merely partially
+        // described QueryDisplayConfig result could otherwise journal and
+        // later restore an unknown virtual path.
+        if (!TryCaptureExactPhysicalOnlySnapshot(out var exact) ||
+            exact is null)
+        {
+            throw new InvalidOperationException(
+                "Vita Moonlight refused to capture a display recovery baseline because Windows did not expose a complete, available, physical-only active layout.");
+        }
+        var configuration = exact.Configuration;
         return new DisplayRecoveryRecord(
             1,
             DateTimeOffset.UtcNow,
@@ -177,17 +235,24 @@ internal sealed class DisplayTopologyService
     internal bool DisableManagedVirtualDisplays()
     {
         var configuration = WindowsDisplayNative.Query(WindowsDisplayNative.QueryOnlyActivePaths);
-        var managedIndexes = Describe(configuration)
-            .Where(display => display.IsActive && IsManagedVirtualDisplay(display))
-            .Select(display => display.PathIndex)
-            .ToHashSet();
-        if (managedIndexes.Count == 0)
+        var activeDisplays = Describe(configuration)
+            .Where(display => display.IsActive)
+            .ToArray();
+        var selected = SelectUniqueExactVitaVirtualDisplayForMutation(
+            activeDisplays,
+            requireAvailable: false);
+        if (selected is null)
         {
+            if (activeDisplays.Any(IsExactVitaVirtualDisplay))
+            {
+                throw new InvalidOperationException(
+                    "The Vita virtual-display topology is ambiguous. Refusing to disable any display until exactly one MTT1337 target remains and no competing managed virtual target is active.");
+            }
             return false;
         }
 
         var remainingPaths = configuration.Paths
-            .Where((_, index) => !managedIndexes.Contains(index))
+            .Where((_, index) => index != selected.PathIndex)
             .ToArray();
         if (remainingPaths.Length == 0)
         {
@@ -458,7 +523,7 @@ internal sealed class DisplayTopologyService
             .ToArray();
         return active.Length == 1 &&
                active[0].IsAvailable &&
-               IsManagedVirtualDisplay(active[0])
+               IsExactVitaVirtualDisplay(active[0])
             ? active[0]
             : null;
     }
@@ -494,16 +559,22 @@ internal sealed class DisplayTopologyService
         int height,
         int fps,
         bool forceSdr = true,
-        bool persistMode = false)
+        bool persistMode = false,
+        bool requireExactVitaTarget = true)
     {
         var configuration = WindowsDisplayNative.Query(WindowsDisplayNative.QueryAllPaths);
         var displays = Describe(configuration);
-        var selected = SelectVirtualDisplayForActivation(displays, nameMatch);
+        var selected = SelectVirtualDisplayForActivation(
+            displays,
+            nameMatch,
+            requireExactVitaTarget);
 
         if (selected is null)
         {
             throw new InvalidOperationException(
-                "No virtual display was found. Run `display list` and configure its name with `configure --display-match <text>`."
+                requireExactVitaTarget
+                    ? "No unambiguous Vita MTT1337 display target was found. Vita Moonlight will not activate a legacy or third-party virtual display."
+                    : "No virtual display was found. Run `display list` and configure its name with `configure --display-match <text>`."
             );
         }
 
@@ -565,7 +636,10 @@ internal sealed class DisplayTopologyService
         // display target returns to QueryDisplayConfig. Do not mistake that
         // transient gap for a bad installation, and do not alter the active
         // topology while waiting for the target to finish enumerating.
-        var availableSelection = WaitForVirtualDisplay(nameMatch, enumerationAttempts);
+        var availableSelection = WaitForVirtualDisplay(
+            nameMatch,
+            enumerationAttempts,
+            requireExactVitaTarget: true);
         var availableConfiguration = availableSelection.Configuration;
         var selected = availableSelection.Display;
 
@@ -630,7 +704,8 @@ internal sealed class DisplayTopologyService
 
     private static VirtualDisplaySelection WaitForVirtualDisplay(
         string? nameMatch,
-        int attempts)
+        int attempts,
+        bool requireExactVitaTarget)
     {
         Exception? lastError = null;
         IReadOnlyList<DisplayDescriptor> lastDisplays = Array.Empty<DisplayDescriptor>();
@@ -640,7 +715,10 @@ internal sealed class DisplayTopologyService
             {
                 var configuration = WindowsDisplayNative.Query(WindowsDisplayNative.QueryAllPaths);
                 lastDisplays = Describe(configuration);
-                var selected = SelectVirtualDisplayForActivation(lastDisplays, nameMatch);
+                var selected = SelectVirtualDisplayForActivation(
+                    lastDisplays,
+                    nameMatch,
+                    requireExactVitaTarget);
                 if (selected is not null)
                 {
                     return new VirtualDisplaySelection(configuration, selected);
@@ -672,7 +750,9 @@ internal sealed class DisplayTopologyService
         throw new InvalidOperationException(
             $"The virtual display did not become available within {attempts * 0.5:0.#} seconds after its driver restart. " +
             $"{detail}{response} Keep the physical display enabled, wait a few seconds, then click " +
-            "Repair Vita display driver again. If more than one virtual display is listed, select the intended one under Streaming.");
+            (requireExactVitaTarget
+                ? "Repair Vita display driver again. Remove or disable any legacy Vita IddSampleDriver target; Vita Moonlight will only use one exact MTT1337 monitor path."
+                : "Repair Vita display driver again. If more than one virtual display is listed, select the intended one under Streaming."));
     }
 
     private static string DisplayIdentity(DisplayDescriptor display) =>
@@ -716,11 +796,22 @@ internal sealed class DisplayTopologyService
 
     internal static DisplayDescriptor? SelectVirtualDisplayForActivation(
         IEnumerable<DisplayDescriptor> displays,
-        string? nameMatch)
+        string? nameMatch,
+        bool requireExactVitaTarget = true)
     {
         var candidates = displays
             .Where(display => display.IsAvailable && IsLikelyVirtualDisplay(display))
             .ToArray();
+        if (requireExactVitaTarget)
+        {
+            // The supported Sunshine path is bound to the monitor identity
+            // exposed by the bundled MTT driver. Friendly names and user
+            // display-match text are not authority: another IDD can copy
+            // either. Ambiguity always fails closed.
+            return SelectUniqueExactVitaVirtualDisplayForMutation(
+                candidates,
+                requireAvailable: true);
+        }
         if (!string.IsNullOrWhiteSpace(nameMatch))
         {
             return candidates.FirstOrDefault(display =>
@@ -739,13 +830,17 @@ internal sealed class DisplayTopologyService
         int width,
         int height,
         int fps,
-        bool forceSdr = true)
+        bool forceSdr = true,
+        bool requireExactVitaTarget = true)
     {
         var configuration = WindowsDisplayNative.Query(WindowsDisplayNative.QueryOnlyActivePaths);
         var candidates = Describe(configuration)
             .Where(display => display.IsActive && IsLikelyVirtualDisplay(display))
             .ToArray();
-        var selected = SelectVirtualDisplayForActivation(candidates, nameMatch);
+        var selected = SelectVirtualDisplayForActivation(
+            candidates,
+            nameMatch,
+            requireExactVitaTarget);
         if (selected is null)
         {
             throw new InvalidOperationException(
@@ -806,5 +901,43 @@ internal sealed class DisplayTopologyService
                identity.Contains("MTT1337", StringComparison.OrdinalIgnoreCase) ||
                identity.Contains("MttVDD", StringComparison.OrdinalIgnoreCase) ||
                identity.Contains("IddSampleDriver", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Exact topology identity of the single monitor created by the bundled
+    /// MTT driver. Broad virtual-display heuristics are useful for inventory
+    /// and physical-safety classification, but never grant mutation authority.
+    /// </summary>
+    internal static bool IsExactVitaVirtualDisplay(DisplayDescriptor display) =>
+        !string.IsNullOrWhiteSpace(display.DevicePath) &&
+        display.DevicePath.StartsWith(
+            @"\\?\DISPLAY#MTT1337#",
+            StringComparison.OrdinalIgnoreCase);
+
+    internal static DisplayDescriptor?
+        SelectUniqueExactVitaVirtualDisplayForMutation(
+            IEnumerable<DisplayDescriptor> displays,
+            bool requireAvailable = true)
+    {
+        var candidates = displays
+            .Where(display => !requireAvailable || display.IsAvailable)
+            .ToArray();
+        var exact = candidates
+            .Where(IsExactVitaVirtualDisplay)
+            .ToArray();
+        if (exact.Length != 1)
+        {
+            return null;
+        }
+
+        // A second broad target from an old Vita build (notably
+        // IddSampleDriver) makes ownership-to-topology mapping ambiguous.
+        // Never deactivate, activate, or mode-change either target in that
+        // state. Unrelated virtual displays remain untouched.
+        return candidates.Any(display =>
+                !IsExactVitaVirtualDisplay(display) &&
+                IsManagedVirtualDisplay(display))
+            ? null
+            : exact[0];
     }
 }

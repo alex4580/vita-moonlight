@@ -130,8 +130,15 @@ def main() -> int:
     http_init = function_body(
         http, "int http_init_with_recovery(", "static const char *request_path("
     )
-    http_request = function_body(
-        http, "int http_request_with_timeout(", "int http_request(char*"
+    http_request_transport = function_body(
+        http,
+        "static int http_request_with_timeout_locked(",
+        "int http_request_with_timeout(",
+    )
+    http_request_wrapper = function_body(
+        http,
+        "int http_request_with_timeout(",
+        "HTTP_BRIDGE_RESULT http_bridge_request_with_timeout_ms(",
     )
     start_app = function_body(client, "int gs_start_app(", "int gs_quit_app(")
     load_cert = function_body(
@@ -293,7 +300,14 @@ def main() -> int:
         "HTTP_TIMEOUT_PAIRING_USER_SECONDS" in pair
         and "HTTP_TIMEOUT_LAUNCH_SECONDS" in start_app
         and "HTTP_TIMEOUT_ORDINARY_SECONDS" in start_app
-        and "CURLOPT_TIMEOUT, timeoutSeconds" in http_request,
+        and "CURLOPT_TIMEOUT, timeoutSeconds" in http_request_transport
+        and "http_request_with_timeout_locked(url, data, timeoutSeconds)"
+        in http_request_wrapper
+        and "pthread_mutex_lock(&httpRequestMutex);" in http_request_wrapper
+        and "pthread_mutex_unlock(&httpRequestMutex);" in http_request_wrapper
+        and re.search(r"\bhttp_request\s*\(", client) is None
+        and "int http_request(char*" not in http
+        and "int http_request(char*" not in http_header,
         "libgamestream: every user-pairing/launch/ordinary request must select its timeout explicitly",
     )
     require(
@@ -436,7 +450,8 @@ def main() -> int:
     authenticated_stage = pair.find("PAIRING_STAGE_AUTHENTICATED")
     authorizing_stage = pair.find("PAIRING_STAGE_AUTHORIZING", authenticated_stage)
     authorization_request = pair.find(
-        "if ((ret = http_request(url, data)) != GS_OK) goto cleanup;",
+        "http_request_with_timeout(\n"
+        "          url, data, HTTP_TIMEOUT_PAIRING_USER_SECONDS)",
         authorizing_stage,
     )
     authorization_stages = [
@@ -647,9 +662,12 @@ def main() -> int:
     )
     require(
         "GS_IDENTITY_CHANGED -11" in error_codes
-        and "return GS_IDENTITY_CHANGED;" in http_request
-        and "if ((ret = http_request(url, data)) != GS_OK) goto cleanup;"
-        in load_serverinfo
+        and "return GS_IDENTITY_CHANGED;" in http_request_transport
+        and re.search(
+            r"http_request_with_timeout\(\s*url,\s*data,\s*"
+            r"HTTP_TIMEOUT_ORDINARY_SECONDS\s*\)",
+            load_serverinfo,
+        )
         and "ret = GS_IO_ERROR" not in load_serverinfo
         and "HOST_PROBE_IDENTITY_CHANGED" in host_probe
         and "ret == GS_IDENTITY_CHANGED" in host_probe

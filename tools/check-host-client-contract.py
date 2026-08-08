@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
-SCHEMA = "vita-moonlight/host-client-contract/v2"
+SCHEMA = "vita-moonlight/host-client-contract/v4"
 
 
 class ContractFailure(Exception):
@@ -73,7 +73,7 @@ def _validate_contract(contract: dict[str, Any]) -> dict[str, Any]:
         "contract",
     )
     _require(contract["schema"] == SCHEMA, f"schema must be {SCHEMA}")
-    _require(contract["contract_version"] == 2, "contract_version must be 2 for schema v2")
+    _require(contract["contract_version"] == 4, "contract_version must be 4 for schema v4")
 
     stream = contract["stream"]
     _require(isinstance(stream, dict), "stream must be an object")
@@ -131,30 +131,83 @@ def _validate_contract(contract: dict[str, Any]) -> dict[str, Any]:
         mode_control,
         {
             "authoritative_transport",
-            "native_sunshine_display_management",
+            "authenticated_stream_boundary",
+            "sunshine_display_safety",
             "legacy_single_application_hook",
             "legacy_unacknowledged_hotkeys",
         },
         "mode_control",
     )
     _require(
-        mode_control["authoritative_transport"] == "gamestream-launch-mode",
-        "GameStream launch mode must remain authoritative",
+        mode_control["authoritative_transport"] == "mutual-tls-stream-boundary-v1",
+        "the mutually authenticated stream boundary must remain authoritative",
     )
-    _require(
-        mode_control["native_sunshine_display_management"] == {
-            "scope": "all-applications",
-            "configuration_option": "ensure_only_display",
-            "resolution_option": "auto",
-            "refresh_rate_option": "manual",
-            "desktop_refresh_hz": 60,
-            "exact_contract_resolution_remapping": True,
-            "force_sdr_for_vita": True,
-            "revert_delay_ms": 500,
-            "revert_on_disconnect": True,
+    boundary = mode_control["authenticated_stream_boundary"]
+    _require(isinstance(boundary, dict),
+             "authenticated_stream_boundary must be an object")
+    expected_boundary = {
+        "protocol": "vita-moonlight-stream-boundary/1",
+        "transport": "https-mutual-tls",
+        "port_offset_from_sunshine_http": 23,
+        "default_port": 48012,
+        "connect_timeout_ms": 1000,
+        "preauthentication_timeout_ms": 2000,
+        "reached_operation_timeout_ms": 65000,
+        "heartbeat_request_timeout_ms": 3000,
+        "heartbeat_interval_ms": 10000,
+        "prepared_lease_lifetime_ms": 240000,
+        "started_lease_lifetime_ms": 45000,
+        "heartbeat_checkpoint_interval_ms": 20000,
+        "maximum_response_bytes": 256,
+        "state_file_configuration_key": "file_state",
+        "server_identity": "paired-sunshine-spki-sha256",
+        "client_identity": "enabled-sunshine-named-device-certificate",
+        "firewall_remote_addresses": "*",
+        "prepare": {
+            "method": "GET",
+            "path": "/v1/prepare",
+            "parameters": ["width", "height", "fps"],
+            "success_body": (
+                "vita-moonlight-stream-boundary/1 prepared "
+                "generation=<32-lowercase-hex>"
+            ),
         },
-        "native Sunshine display management must select only the Vita output, "
-        "honor exact client modes at 60 Hz SDR, and restore on disconnect",
+        "started": {
+            "method": "GET",
+            "path": "/v1/started",
+            "parameters": ["generation"],
+            "success_body": "vita-moonlight-stream-boundary/1 started",
+        },
+        "heartbeat": {
+            "method": "GET",
+            "path": "/v1/heartbeat",
+            "parameters": ["generation"],
+            "success_body": "vita-moonlight-stream-boundary/1 heartbeat",
+        },
+        "stop": {
+            "method": "GET",
+            "path": "/v1/stop",
+            "parameters": ["generation"],
+            "success_body": "vita-moonlight-stream-boundary/1 stopped",
+        },
+        "generation": "128-bit-random-lowercase-hex",
+        "exact_generation_and_client_owner_required": True,
+        "generic_sunshine_fallback": "connection-refused-or-pre-tls-timeout-only",
+        "unauthenticated_endpoints": False,
+    }
+    _require(
+        boundary == expected_boundary,
+        "authenticated stream-boundary transport or downgrade policy drifted",
+    )
+    sunshine_safety = mode_control["sunshine_display_safety"]
+    _require(
+        sunshine_safety == {
+            "scope": "all-applications",
+            "native_display_management": "disabled",
+            "pinned_output": "empty-default-active-output",
+            "vita_global_prep_hook": "absent",
+        },
+        "Sunshine must leave display switching to the authenticated boundary",
     )
     _require(
         mode_control["legacy_single_application_hook"] == {
@@ -250,7 +303,8 @@ def _validate_contract(contract: dict[str, Any]) -> dict[str, Any]:
         "desktop_refresh": desktop_refresh,
         "capabilities": capabilities,
         "legacy": actual_legacy,
-        "native_display": mode_control["native_sunshine_display_management"],
+        "boundary": boundary,
+        "sunshine_safety": sunshine_safety,
         "legacy_hook": mode_control["legacy_single_application_hook"],
         "modifiers": expected_modifiers,
         "actions": expected_actions,
@@ -302,6 +356,9 @@ def _check_vita(root: Path, values: dict[str, Any]) -> None:
     overlay_header = _read(root, "src/gui/ui_stream_overlay.h")
     connect = _read(root, "src/gui/ui_connect.c")
     gamestream = _read(root, "libgamestream/client.c")
+    bridge_protocol = _read(root, "libgamestream/bridge_protocol.h")
+    bridge_parser = _read(root, "libgamestream/bridge_protocol.c")
+    http = _read(root, "libgamestream/http.c")
 
     resolutions = values["resolutions"]
     frame_rates = values["frame_rates"]
@@ -399,6 +456,109 @@ def _check_vita(root: Path, values: dict[str, Any]) -> None:
         "LiStartConnection(&server.serverInfo, &config.stream" in connect,
         "Vita connection must pass the same contracted stream configuration to Moonlight",
     )
+    boundary = values["boundary"]
+    expected_defines = {
+        "VITA_STREAM_BOUNDARY_PROTOCOL": f'"{boundary["protocol"]}"',
+        "VITA_STREAM_BOUNDARY_PREPARE_PATH": f'"{boundary["prepare"]["path"]}"',
+        "VITA_STREAM_BOUNDARY_STARTED_PATH": f'"{boundary["started"]["path"]}"',
+        "VITA_STREAM_BOUNDARY_HEARTBEAT_PATH": f'"{boundary["heartbeat"]["path"]}"',
+        "VITA_STREAM_BOUNDARY_STOP_PATH": f'"{boundary["stop"]["path"]}"',
+        "VITA_STREAM_BOUNDARY_PORT_OFFSET": (
+            f'{boundary["port_offset_from_sunshine_http"]}u'
+        ),
+        "VITA_STREAM_BOUNDARY_GENERATION_HEX_CHARS": "32u",
+        "VITA_STREAM_BOUNDARY_MAX_RESPONSE_BYTES": (
+            f'{boundary["maximum_response_bytes"]}u'
+        ),
+        "VITA_STREAM_BOUNDARY_HEARTBEAT_INTERVAL_MS": (
+            f'{boundary["heartbeat_interval_ms"]}u'
+        ),
+        "VITA_STREAM_BOUNDARY_HEARTBEAT_TIMEOUT_MS": (
+            f'{boundary["heartbeat_request_timeout_ms"]}L'
+        ),
+    }
+    for name, expected in expected_defines.items():
+        _require(
+            re.search(
+                rf"^#define\s+{re.escape(name)}\s+{re.escape(expected)}$",
+                bridge_protocol,
+                re.MULTILINE,
+            ) is not None,
+            f"Vita stream-boundary constant {name} drifted",
+        )
+    _require(
+        "stream_boundary_parse_prepared" in bridge_parser and
+        "is_lower_hex_generation" in bridge_parser and
+        "stream_boundary_parse_started" in bridge_parser and
+        "stream_boundary_parse_heartbeat" in bridge_parser and
+        "stream_boundary_parse_stopped" in bridge_parser and
+        "!tls_established" in bridge_parser and
+        "STREAM_BOUNDARY_TRANSPORT_TIMEOUT" in bridge_parser,
+        "Vita must parse exact versioned lease responses",
+    )
+    prepare_call = connect.find("gs_prepare_stream_boundary(")
+    launch_call = connect.find("gs_start_app(&server, &config.stream")
+    started_call = connect.find("gs_started_stream_boundary(")
+    heartbeat_start = connect.find("start_stream_boundary_heartbeat()")
+    media_call = connect.find("LiStartConnection(&server.serverInfo, &config.stream")
+    _require(
+        0 <= prepare_call < launch_call < started_call < heartbeat_start < media_call,
+        "Vita must prepare, launch/resume, confirm started, and arm heartbeat before media",
+    )
+    release_boundary = _extract_braced_block(
+        connect,
+        r"static\s+bool\s+release_stream_boundary\s*\(",
+        "Vita stream-boundary release",
+    )
+    _require(
+        release_boundary.find("stop_stream_boundary_heartbeat()") <
+        release_boundary.find("active_stream_boundary_generation[0] = '\\0';") <
+        release_boundary.find("gs_stop_stream_boundary(") and
+        "The Windows rescue agent will keep trying automatically." in
+        release_boundary,
+        "Vita must stop heartbeat, consume a generation once, and delegate failed restore to the host observer",
+    )
+    _require(
+        "ui_connect_release_stream_boundary(false);" in
+        _read(root, "src/main.c") and
+        "ui_connect_stream_boundary_local_cleanup_ready();" in
+        _read(root, "src/main.c") and
+        "if (!ui_connect_stream_boundary_local_cleanup_ready())" in connect and
+        "VITA_STREAM_BOUNDARY_HEARTBEAT_INTERVAL_MS" in connect and
+        "gs_heartbeat_stream_boundary(" in connect and
+        "sceKernelWaitEventFlag(" in connect,
+        "Vita process shutdown and the event-driven heartbeat worker must release the exact lease",
+    )
+    bridge_http = _extract_braced_block(
+        http,
+        r"HTTP_BRIDGE_RESULT\s+http_bridge_request_with_timeout_ms\s*\(",
+        "bounded bridge HTTP request",
+    )
+    _require(
+        "CURLOPT_CONNECTTIMEOUT_MS, 1000L" in bridge_http and
+        "CURLOPT_TIMEOUT_MS, timeoutMs" in bridge_http and
+        "CURLINFO_APPCONNECT_TIME_T" in bridge_http and
+        "STREAM_BOUNDARY_TRANSPORT_REFUSED" in bridge_http and
+        "STREAM_BOUNDARY_TRANSPORT_TIMEOUT" in bridge_http and
+        "HTTP_BRIDGE_RESULT_OPTIONAL_UNAVAILABLE" in bridge_http and
+        "CURLOPT_FORBID_REUSE, 0L" in bridge_http and
+        "CURLE_SSL_PINNEDPUBKEYNOTMATCH" in bridge_http,
+        "generic Sunshine fallback must be bounded to refusal/timeout and restore HTTP state",
+    )
+    optional_return = bridge_http.find(
+        "bridgeResult = HTTP_BRIDGE_RESULT_OPTIONAL_UNAVAILABLE;")
+    refused_check = bridge_http.find("result == CURLE_COULDNT_CONNECT")
+    timeout_check = bridge_http.find("result == CURLE_OPERATION_TIMEDOUT")
+    tls_check = bridge_http.find("failure, appConnectTime > 0")
+    _require(
+        0 <= refused_check < optional_return and
+        0 <= timeout_check < optional_return and
+        0 <= tls_check < optional_return and
+        "http_bridge_request_with_timeout_ms(\n      url, data, responseCode, 65000L)" in http and
+        "VITA_STREAM_BOUNDARY_HEARTBEAT_TIMEOUT_MS" in gamestream and
+        bridge_http.count("HTTP_BRIDGE_RESULT_OPTIONAL_UNAVAILABLE") == 1,
+        "no reached TLS/auth/protocol failure may downgrade to generic Sunshine",
+    )
     compact_gamestream = re.sub(r"\s+", " ", gamestream)
     _require(
         "mode=%dx%dx%d" in gamestream and
@@ -491,8 +651,11 @@ def _check_vita(root: Path, values: dict[str, Any]) -> None:
     _require(
         reconnect.find("connection_terminate();") < reconnect.find("gs_refresh(&server);") <
         reconnect.find("ui_connect_stream(reconnect_app);") and
+        reconnect.find("connection_terminate();") <
+        reconnect.find("release_stream_boundary(true)") <
+        reconnect.find("gs_refresh(&server);") and
         reconnect.find("connection_terminate();") >= 0,
-        "the Vita controlled reconnect must terminate, refresh, and resume the same app in order",
+        "the Vita controlled reconnect must terminate, restore, refresh, and resume in order",
     )
 
 
@@ -520,6 +683,9 @@ def _check_host(root: Path, values: dict[str, Any]) -> None:
     session = _read(root, "host/VitaMoonlight.Host/SessionManager.cs")
     sunshine = _read(root, "host/VitaMoonlight.Host/SunshineConfigurator.cs")
     hotkeys = _read(root, "host/VitaMoonlight.Host/HostRecoveryAgent.cs")
+    bridge = _read(root, "host/VitaMoonlight.Host/SunshineStreamBoundaryBridge.cs")
+    lease_journal = _read(root, "host/VitaMoonlight.Host/StreamBoundaryLeaseJournal.cs")
+    firewall = _read(root, "host/VitaMoonlight.Host/ManagedStreamBridgeFirewall.cs")
     program = _read(root, "host/VitaMoonlight.Host/Program.cs")
     host_settings = _read(root, "host/VitaMoonlight.Host/HostSettings.cs")
 
@@ -625,44 +791,6 @@ def _check_host(root: Path, values: dict[str, Any]) -> None:
         "recognized Vita hook modes must enter the strict normalized SessionManager path",
     )
 
-    remap_match = re.search(
-        r"private\s+const\s+string\s+VitaDisplayModeRemapping\s*=\s*(?P<value>.*?);",
-        sunshine,
-        re.DOTALL,
-    )
-    _require(remap_match is not None, "cannot find Sunshine Vita display-mode remapping")
-    remap_text = _decode_csharp_string_expression(
-        remap_match.group("value"),
-        "Sunshine VitaDisplayModeRemapping",
-    )
-    try:
-        remap = json.loads(remap_text)
-    except json.JSONDecodeError as error:
-        raise ContractFailure(f"Sunshine VitaDisplayModeRemapping is not valid JSON: {error}") from error
-    expected_remaps = [
-        {
-            "requested_resolution": f"{width}x{height}",
-            "final_resolution": f"{width}x{height}",
-        }
-        for width, height in values["resolutions"]
-    ]
-    _require(remap.get("mixed") == [] and remap.get("refresh_rate_only") == [],
-             "Sunshine remapping must not add mixed or refresh-only transforms")
-    actual_remaps = remap.get("resolution_only")
-    _require(isinstance(actual_remaps, list) and len(actual_remaps) == len(expected_remaps),
-             "Sunshine must have exactly one explicit remap per contracted resolution")
-    _require(
-        {
-            (entry.get("requested_resolution"), entry.get("final_resolution"))
-            for entry in actual_remaps
-            if isinstance(entry, dict)
-        } == {
-            (entry["requested_resolution"], entry["final_resolution"])
-            for entry in expected_remaps
-        },
-        f"Sunshine resolution remapping drifted: {actual_remaps} != {expected_remaps}",
-    )
-
     configure = _extract_braced_block(
         sunshine,
         r"internal\s+static\s+SunshineConfigurationResult\s+Configure\s*\(",
@@ -672,34 +800,142 @@ def _check_host(root: Path, values: dict[str, Any]) -> None:
     _require(
         'settings.HostMode == "sunshine" && settings.IntegrateAllSunshineApps' in
         compact_configure and
-        "useNativeDisplayManagement ? Array.Empty<JsonObject>()" in compact_configure and
+        "useAuthenticatedStreamBoundary ? Array.Empty<JsonObject>()" in compact_configure and
         "RemoveOwnedHooks(app, ownership.Hooks);" in configure and
         "RemoveLegacyGeneratedHooks(app);" in configure and
-        "ConfigureNativeDisplayManagement(" in configure,
-        "the default all-application path must remove legacy hooks and use native Sunshine display management",
+        "RemoveOwnedGlobalHooks(" in configure and
+        "RemoveLegacyGeneratedGlobalHooks(configurationLines);" in configure and
+        '"output_name", string.Empty' in compact_configure and
+        '"dd_configuration_option", "disabled"' in compact_configure and
+        '"dd_config_revert_on_disconnect", "disabled"' in compact_configure and
+        "RetireOwnedLifecycleConfigurationValue(" in configure and
+        '"min_log_level", "info"' in compact_configure and
+        "if (!useAuthenticatedStreamBoundary)" in configure,
+        "the default path must retire unsafe hooks and leave switching to the authenticated boundary",
     )
-    native_configuration = _extract_braced_block(
+    readiness = _extract_braced_block(
         sunshine,
-        r"private\s+static\s+void\s+ConfigureNativeDisplayManagement\s*\(",
-        "SunshineConfigurator.ConfigureNativeDisplayManagement",
+        r"internal\s+static\s+bool\s+IsAuthenticatedStreamBoundaryConfigurationReady\s*\(",
+        "Sunshine authenticated-boundary readiness",
     )
-    native_contract = values["native_display"]
-    required_native_fragments = [
-        '"output_name", displayDeviceId',
-        '"dd_configuration_option", "ensure_only_display"',
-        '"dd_resolution_option", "auto"',
-        '"dd_refresh_rate_option", "manual"',
-        f'"dd_manual_refresh_rate", "{native_contract["desktop_refresh_hz"]}"',
-        '"dd_mode_remapping", VitaDisplayModeRemapping',
-        '"dd_hdr_option", forceSdr ? "auto" : "disabled"',
-        f'"dd_config_revert_delay", "{native_contract["revert_delay_ms"]}"',
-        '"dd_config_revert_on_disconnect", "enabled"',
+    _require(
+        "ownership.GlobalHooks.Count != 0" in readiness and
+        "configuredOutput.Length != 0" in readiness and
+        "HasGeneratedGlobalLifecycleHook(lines)" in readiness and
+        'HasConfigurationValue(lines, "dd_configuration_option", "disabled")' in readiness and
+        "min_log_level" not in readiness,
+        "Sunshine readiness must reject a stale hook, pinned output, or native display switching",
+    )
+
+    boundary_contract = values["boundary"]
+    required_bridge_fragments = [
+        f'ProtocolIdentifier =\n        "{boundary_contract["protocol"]}"',
+        f'PreparePath = "{boundary_contract["prepare"]["path"]}"',
+        f'StartedPath = "{boundary_contract["started"]["path"]}"',
+        f'HeartbeatPath = "{boundary_contract["heartbeat"]["path"]}"',
+        f'StopPath = "{boundary_contract["stop"]["path"]}"',
+        "BridgePortOffset = 23",
+        "GenerationHexCharacters = 32",
+        'ClientCertificateRequired = true',
+        'EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13',
+        'CertificateRevocationCheckMode = X509RevocationMode.NoCheck',
+        'TryGetProperty("named_devices"',
+        'values.GetValueOrDefault("file_state")',
+        "settings.IntegrateAllSunshineApps",
+        "SunshinePairedClientCertificates.IsEnabledClient(",
+        "CryptographicOperations.FixedTimeEquals(",
+        "RandomNumberGenerator.GetBytes(16)",
+        "new SessionManager().Start(",
+        "StreamBoundaryLeaseJournal.PublishPrepared(",
+        "StreamBoundaryLeaseJournal.MarkStarted(",
+        "StreamBoundaryLeaseJournal.RenewHeartbeat(",
+        "new SessionManager().RestoreIfPending(",
+        "StreamBoundaryLeaseJournal.Assess(",
+        "new SessionManager().RecoverToIdle()",
+        "listenerFaulted();",
     ]
-    for fragment in required_native_fragments:
-        _require(
-            fragment in native_configuration,
-            f"native Sunshine display management is missing contracted fragment: {fragment}",
-        )
+    for fragment in required_bridge_fragments:
+        _require(fragment in bridge,
+                 f"host authenticated stream boundary is missing: {fragment}")
+    _require(
+        "TcpListener(IPAddress.IPv6Any, port)" in bridge and
+        "candidate.Server.DualMode = true" in bridge and
+        "PreAuthenticationTimeout =\n        TimeSpan.FromSeconds(2)" in bridge and
+        "OperationTimeout =\n        TimeSpan.FromSeconds(60)" in bridge and
+        "MaximumRequestHeaderBytes = 4096" in bridge and
+        "unknown endpoint" in bridge and
+        "durableCapturedAt is null" in bridge and
+        "assessment.RequiresRecovery" in bridge and
+        "assessment.AuthorizesActiveHandoff" in bridge and
+        "status" not in re.findall(
+            r'Path\s*=\s*"([^\"]+)"', bridge),
+        "host bridge must be bounded, dual-stack, and expose no status endpoint",
+    )
+    inspect_recovery = _extract_braced_block(
+        hotkeys,
+        r"private\s+void\s+InspectSunshineRecoveryMarker\s*\(",
+        "Sunshine exact-lease recovery observer",
+    )
+    _require(
+        "TimeSpan.FromSeconds(240)" in lease_journal and
+        "TimeSpan.FromSeconds(45)" in lease_journal and
+        "TimeSpan.FromSeconds(20)" in lease_journal and
+        "GetStreamBoundaryRecoveryDelay(" in hotkeys and
+        "lease.LeaseExpiresAtUtc - now" in hotkeys and
+        "DiscardStaleStreamBoundaryLease();" in hotkeys and
+        "!settings.IntegrateAllSunshineApps" in hotkeys and
+        "if (!legacySunshineLogObserverEnabled)" in inspect_recovery and
+        inspect_recovery.find("if (!legacySunshineLogObserverEnabled)") <
+        inspect_recovery.find("ArmSunshineLogWatcher()") and
+        "CancelScheduledSunshineRecovery();" not in
+        _extract_braced_block(
+            hotkeys,
+            r"private\s+void\s+ApplySunshineSessionLine\s*\(",
+            "Sunshine global session observer",
+        ),
+        "observer must honor exact lease expiry and never let unrelated Sunshine sessions suppress it",
+    )
+    _require(
+        'RuleName =\n        "Vita Moonlight authenticated stream boundary (managed)"' in firewall and
+        'rule.RemoteAddresses = "*";' in firewall and
+        "rule.EdgeTraversal = false;" in firewall and
+        "rule.ApplicationName = normalizedExecutable;" in firewall and
+        "RequireOwned(existing, normalizedExecutable);" in firewall and
+        "rule.Profiles != AllProfiles" in firewall and
+        'rule.InterfaceTypes,\n                    "All"' in firewall,
+        "the mTLS bridge firewall rule must be exact, all-profile/interface, and ownership-checked",
+    )
+    manager_install = _extract_braced_block(
+        hotkeys,
+        r"internal\s+static\s+void\s+Install\s*\(",
+        "HostRecoveryAgentManager.Install",
+    )
+    _require(
+        manager_install.find("ManagedStreamBridgeFirewall.InstallOrRepair(") <
+        manager_install.find('RunTask("/Run", "/TN", TaskName)') and
+        "ManagedStreamBridgeFirewall.RemoveOwned(executablePath);" in manager_install,
+        "agent install must repair the firewall before readiness and clean it outside Sunshine mode",
+    )
+    manager_uninstall = _extract_braced_block(
+        hotkeys,
+        r"internal\s+static\s+void\s+Uninstall\s*\(",
+        "HostRecoveryAgentManager.Uninstall",
+    )
+    _require(
+        "ManagedStreamBridgeFirewall.RemoveOwned(" in manager_uninstall,
+        "agent uninstall must remove the exact owned firewall rule",
+    )
+    agent_run = _extract_braced_block(
+        hotkeys,
+        r"internal\s+static\s+int\s+Run\s*\(",
+        "HostRecoveryAgentManager.Run",
+    )
+    _require(
+        agent_run.find("new HostRecoveryAgentContext()") <
+        agent_run.find("ready.Set();") and
+        "context.StreamBoundaryListenerFaulted ? 1 : 0" in agent_run,
+        "agent readiness must wait for TLS/state/certificate setup and listener bind",
+    )
     default_settings_match = re.search(
         r"HostSettings\s+Default[^=]*=\s*new\((?P<body>.*?)\)\s*;",
         host_settings,
@@ -715,7 +951,7 @@ def _check_host(root: Path, values: dict[str, Any]) -> None:
         compact_default_settings.startswith('"sunshine",') and
         compact_default_settings.endswith("CurrentFormatVersion,true,true") and
         "ForceSdr = true" in host_settings,
-        "fresh and upgraded host settings must default to native Sunshine all-app SDR sessions",
+        "fresh and upgraded host settings must default to authenticated Sunshine all-app SDR sessions",
     )
     build_start = _extract_braced_block(
         sunshine,
@@ -781,7 +1017,7 @@ def _check_host(root: Path, values: dict[str, Any]) -> None:
         "HostRecoveryHotkeyWindow constructor",
     )
     registration_gate = (
-        "if (HostRecoveryAgentManager.LegacyModeHotkeysRequired(HostSettings.Load()))"
+        "if (HostRecoveryAgentManager.LegacyModeHotkeysRequired(settings))"
     )
     _require(
         registration_gate in constructor and

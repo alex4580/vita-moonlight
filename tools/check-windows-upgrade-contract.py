@@ -44,6 +44,18 @@ DISPLAY_WIZARD_PATH = (
     REPOSITORY_ROOT / "host/VitaMoonlight.Host/DisplayWizardAdapter.cs"
 )
 PROGRAM_PATH = REPOSITORY_ROOT / "host/VitaMoonlight.Host/Program.cs"
+MACHINE_STATE_PATH = (
+    REPOSITORY_ROOT / "host/VitaMoonlight.Host/MachineStateSecurity.cs"
+)
+INSTALL_RESIDUE_PATH = (
+    REPOSITORY_ROOT / "host/VitaMoonlight.Host/InstallResidueCleanup.cs"
+)
+VDD_NORMALIZER_PATH = (
+    REPOSITORY_ROOT / "host/VitaMoonlight.Host/VddConfigurationNormalizer.cs"
+)
+MANAGED_VDD_RUNTIME_PATH = (
+    REPOSITORY_ROOT / "host/VitaMoonlight.Host/ManagedVirtualDisplayRuntime.cs"
+)
 LEGACY_HOSTS_PATH = REPOSITORY_ROOT / "host/tests/legacy-upgrade-hosts.json"
 
 
@@ -255,8 +267,8 @@ def check_installer_legacy_surface(installer: str) -> None:
         [
             "ExtractMaintenanceHelper(ErrorText)",
             "VitaMoonlight.Host.Maintenance.error.txt",
-            "VitaMoonlight.Host.Maintenance.exe",
             "maintenance begin --owner-pid ",
+            "VitaMoonlight.Host.Maintenance.exe",
             "if ResultCode <> 0 then",
             "ReadMaintenanceHelperError",
             "MaintenanceFenceActive := True",
@@ -399,7 +411,11 @@ def check_installer_failure_ux(installer: str) -> None:
     )
 
 
-def check_helper_physical_proof(maintenance: str, uninstall: str) -> None:
+def check_helper_physical_proof(
+    maintenance: str,
+    uninstall: str,
+    managed_vdd_runtime: str,
+) -> None:
     begin = section(
         maintenance,
         "internal static InstallerMaintenanceState Begin(",
@@ -435,21 +451,41 @@ def check_helper_physical_proof(maintenance: str, uninstall: str) -> None:
         "internal static SunshineIntegrationCleanupResult CleanupIntegration()",
         "installer maintenance physical recovery",
     )
-    require(
-        locked_recovery.count("VerifyPhysicalOnlyTopology(topology)") >= 2,
-        "installer maintenance recovery must prove physical-only topology "
-        "before and after state cleanup",
-    )
     require_in_order(
         locked_recovery,
         [
-            "topology.RecoverPhysicalDisplays()",
-            "topology.DisableManagedVirtualDisplays()",
-            "VerifyPhysicalOnlyTopology(topology)",
+            "ManagedVirtualDisplayRuntime.ReconcileIdleLocked(",
             "SessionManager.DiscardPendingRecoveryLocked(transaction)",
             "VerifyPhysicalOnlyTopology(topology)",
         ],
         "installer maintenance physical-only recovery",
+    )
+    idle_recovery = section(
+        managed_vdd_runtime,
+        "internal static ManagedVirtualDisplayIdleResult ReconcileIdleLocked(",
+        "internal static ManagedVirtualDisplayIdleResult\n        ReconcileRestoredPhysicalBaselineLocked(",
+        "managed VDD idle recovery",
+    )
+    require(
+        idle_recovery.count(
+            "UninstallManager.VerifyPhysicalOnlyTopology(topology)"
+        ) >= 2,
+        "managed VDD idle recovery must prove physical-only topology before "
+        "and after PnP shutdown",
+    )
+    require_in_order(
+        idle_recovery,
+        [
+            "topology.RecoverPhysicalDisplays()",
+            "topology.DisableManagedVirtualDisplays()",
+            "UninstallManager.VerifyPhysicalOnlyTopology(topology)",
+            "DisplayWizardAdapter.SetManagedDriverEnabled(",
+            "enabled: false",
+            "physicalDisplays = topology.RecoverPhysicalDisplays()",
+            "topology.DisableManagedVirtualDisplays()",
+            "UninstallManager.VerifyPhysicalOnlyTopology(topology)",
+        ],
+        "physical-only, PnP-disabled idle invariant",
     )
 
     physical_verification = section(
@@ -549,7 +585,7 @@ def check_vdd_only_repair_bridge(
             "display.IsActive",
             "active.Length == 1",
             "active[0].IsAvailable",
-            "IsManagedVirtualDisplay(active[0])",
+            "IsExactVitaVirtualDisplay(active[0])",
         ],
         "old broken-install topology must be exact and unambiguous",
     )
@@ -562,10 +598,8 @@ def check_vdd_only_repair_bridge(
     require_in_order(
         restart,
         [
-            "SelectExactManagedVddRestartTarget(",
+            "RequireOwnedEnabledRecoveryTargetLocked(transaction)",
             '"/restart-device"',
-            "candidates.Length != 1",
-            "No unrelated or ambiguous display device was changed",
         ],
         "exact managed device ownership gate",
     )
@@ -591,7 +625,9 @@ def check_vdd_only_repair_bridge(
             "RecoverPhysicalAndDiscardPendingTransactionForEmergencyLocked(",
             "physicalRecoverySucceeded = true",
             "physicalRecoverySucceeded &&",
-            "if (restartSunshine && sunshineStopped)",
+            "if (restartSunshine &&",
+            "sunshineStopped &&",
+            "idleStateVerifiedForSunshineRestart)",
             "WindowsServiceManager.Start(",
         ],
         "Sunshine stop/restart and emergency bridge semantics",
@@ -676,7 +712,7 @@ def check_interactive_task_account_safety(
     uninstall_prepare = section(
         uninstall,
         "internal static UninstallPreparationResult Prepare(",
-        "internal static UninstallPreparationResult\n        RecoverPhysicalAndDiscardPendingTransaction()",
+        "internal static UninstallPreparationResult\n        RecoverPhysicalAndDiscardPendingTransaction(",
         "UninstallManager.Prepare",
     )
     require_in_order(
@@ -685,7 +721,7 @@ def check_interactive_task_account_safety(
             "BackendLifecycleStateStore.AcquireLock()",
             "RequireOwnedFinalizationPreflight()",
             "BackendLifecycleStateStore.BeginUninstallLocked(",
-            "RecoverPhysicalAndDiscardPendingTransaction()",
+            "RecoverPhysicalAndDiscardPendingTransaction(",
             "operationLock.Dispose()",
         ],
         "uninstall must preflight exact owned cleanup before its durable mutation",
@@ -818,6 +854,258 @@ def check_release_scope_and_rescue_surface(installer: str) -> None:
             )
 
 
+def check_idle_ownership_release_contract(
+    installer: str,
+    maintenance: str,
+    uninstall: str,
+    managed_vdd_runtime: str,
+    display_topology: str,
+    display_wizard: str,
+    program: str,
+) -> None:
+    """Keep idle, upgrade, and uninstall bound to one exact VDD instance."""
+
+    idle = section(
+        managed_vdd_runtime,
+        "internal static ManagedVirtualDisplayIdleResult ReconcileIdleLocked(",
+        "internal static ManagedVirtualDisplayIdleResult\n        ReconcileRestoredPhysicalBaselineLocked(",
+        "exact managed-VDD idle reconciliation",
+    )
+    require_in_order(
+        idle,
+        [
+            "RequireOwnedPresentDevicesLocked(",
+            "if (presentInstanceIds.Length == 0)",
+            "TryCaptureExactPhysicalOnlySnapshot(",
+            "topology.RecoverPhysicalDisplays()",
+            "DisplayWizardAdapter.SetManagedDriverEnabled(",
+            "enabled: false",
+        ],
+        "idle must resolve exact authority before topology or PnP mutation",
+    )
+
+    capture = section(
+        display_topology,
+        "internal DisplayRecoveryRecord CaptureRecovery(",
+        "internal bool DisableManagedVirtualDisplays()",
+        "strict display recovery capture",
+    )
+    require(
+        "TryCaptureExactPhysicalOnlySnapshot(out var exact)" in capture
+        and "exact.Configuration" in capture,
+        "display recovery must reject incomplete/unnamed active paths",
+    )
+
+    require_in_order(
+        display_topology,
+        [
+            "SelectUniqueExactVitaVirtualDisplayForMutation(",
+            "exact.Length != 1",
+            "!IsExactVitaVirtualDisplay(display)",
+            "IsManagedVirtualDisplay(display)",
+        ],
+        "Vita display mutations must fail closed on an absent, duplicate, or competing managed target",
+    )
+    require(
+        '@"\\\\?\\DISPLAY#MTT1337#"' in display_topology
+        and "display.DevicePath.StartsWith(" in display_topology,
+        "Vita display mutation authority must come from the exact MTT1337 monitor path",
+    )
+
+    safe_end = section(
+        maintenance,
+        "private static void VerifySafeToEnd(",
+        "internal static bool CanEndForTest(",
+        "installer maintenance final display proof",
+    )
+    require_in_order(
+        safe_end,
+        [
+            "DisplayTransactionLock.Acquire()",
+            "File.Exists(HostStatePaths.RecoveryFile)",
+            "DisplaySuspendIntentStore.Inspect()",
+            "TryCaptureExactPhysicalOnlySnapshot(",
+            "RequireOwnedPresentDevicesLocked(",
+            "ownedDevices.Any(device => device.Enabled)",
+        ],
+        "maintenance must prove exact PnP-disabled idle before deleting its fence",
+    )
+
+    owned_files = re.search(
+        r"CurrentRootStateFiles\s*=\s*\[(?P<body>.*?)\];",
+        uninstall,
+        re.DOTALL,
+    )
+    require(owned_files is not None, "uninstall owned-state allowlist is missing")
+    require(
+        "managed-vdd-ownership.json" not in owned_files.group("body")
+        and 'Type: files; Name: "{app}\\state\\managed-vdd-ownership.json"'
+        in installer,
+        "exact VDD authority must survive host finalization and be removed only by the post-commit installer pass",
+    )
+
+    require(
+        "--prepare-vdd-ownership" not in installer
+        and "maintenance begin --owner-pid " in installer
+        and "driver install --adopt-existing-vdd" in installer
+        and "--adopt-existing-vdd" in program,
+        "existing MTT adoption must be deferred until the explicit post-copy driver install",
+    )
+
+    driver_uninstall = section(
+        display_wizard,
+        "internal bool UninstallDriver(",
+        "internal bool EnsureVitaCompatibilityModes(",
+        "exact VDD uninstall",
+    )
+    require_in_order(
+        driver_uninstall,
+        [
+            "PrepareReleaseLocked(",
+            "WindowsServiceManager.Stop(serviceName, \"Sunshine\")",
+            "topology.RecoverPhysicalDisplays()",
+            "CompleteReleaseLocked(",
+        ],
+        "uninstall must stop Sunshine and establish physical topology before releasing exact authority",
+    )
+
+    readiness = section(
+        program,
+        "private static bool IsVirtualDisplayReady(",
+        "private static int SessionCommand(",
+        "virtual-display readiness",
+    )
+    require(
+        "RequireOwnedPresentDevices(required: true)" in readiness,
+        "readiness must reject a sole unowned hardware-ID match",
+    )
+
+
+def check_versioned_install_cleanup_contract(
+    installer: str,
+    machine_state: str,
+    residue: str,
+    display_wizard: str,
+    normalizer: str,
+    uninstall: str,
+) -> None:
+    post_install = section(
+        installer,
+        "procedure CurStepChanged(CurStep: TSetupStep);",
+        "procedure CurPageChanged(CurPageID: Integer);",
+        "post-copy setup",
+    )
+    require_in_order(
+        post_install,
+        [
+            "session recover-upgrade",
+            "state secure",
+        ],
+        "protected post-copy cleanup initialization",
+    )
+    require(
+        machine_state.count(
+            "InstallResidueCleanup.RunForInstalledPayloadIfNeeded();"
+        ) >= 2,
+        "normal state security and legacy migration must both run versioned cleanup",
+    )
+    require_in_order(
+        display_wizard,
+        [
+            "AddVitaCompatibilityModesToConfiguration(string configuration)",
+            "VddConfigurationNormalizer.NormalizeForVitaRuntime(updated)",
+            "VddConfigurationNormalizer.IsNormalizedForVitaRuntime(configuration)",
+        ],
+        "VDD repair normalization and readiness",
+    )
+    require(
+        'SetExactScalar(monitors, "count", "1")' in normalizer
+        and 'SetExactScalar(options, "logging", "false")' in normalizer
+        and 'SetExactScalar(options, "debuglogging", "false")' in normalizer,
+        "VDD repair must enforce one monitor with normal/debug logging disabled",
+    )
+
+    expected_obsolete = {
+        "COMPATIBILITY.md",
+        "END_TO_END_TEST.md",
+        "FINAL_RELEASE_CHECKLIST.md",
+        "THIRD_PARTY_NOTICES.md",
+        "VITA_SETTINGS_GUIDE.md",
+    }
+    obsolete_match = re.search(
+        r"ObsoleteRootPayloadFilesV1\s*=\s*\[(?P<body>.*?)\];",
+        residue,
+        re.DOTALL,
+    )
+    require(obsolete_match is not None, "cleanup v1 root allowlist is missing")
+    actual_obsolete = set(re.findall(r'"([^"]+)"', obsolete_match.group("body")))
+    require(
+        actual_obsolete == expected_obsolete,
+        f"cleanup v1 root allowlist drifted: {sorted(actual_obsolete)}",
+    )
+    expected_legacy_state = {
+        "display-recovery.json",
+        "host-settings.json",
+        "session.lock",
+        "last-command-error.txt",
+        "display-driver-verification.json",
+        "display-driver-directory-identity.json",
+        "backend-lifecycle.json",
+        "backend-lifecycle.backup.json",
+        "backend-lifecycle.lock",
+        "backend-disabled.intent",
+        "deferred-host-setup.json",
+        "display-suspend.intent",
+        "display-suspend.lock",
+        "installer-maintenance.json",
+        "installer-maintenance.backup.json",
+        "installer-maintenance.lock",
+        "stream-rescue-status.json",
+        "stream-rescue.log",
+    }
+    legacy_match = re.search(
+        r"LegacyProgramDataStateFilesV1\s*=\s*\[(?P<body>.*?)\];",
+        residue,
+        re.DOTALL,
+    )
+    require(legacy_match is not None, "cleanup v1 legacy-state allowlist is missing")
+    actual_legacy_state = set(
+        re.findall(r'"([^"]+)"', legacy_match.group("body"))
+    )
+    require(
+        actual_legacy_state == expected_legacy_state,
+        f"cleanup v1 legacy-state allowlist drifted: {sorted(actual_legacy_state)}",
+    )
+    for file_name in expected_obsolete:
+        require(
+            f'Type: files; Name: "{{app}}\\{file_name}"' in installer,
+            f"uninstall lacks the final exact deletion pass for {file_name}",
+        )
+    require(
+        "CurrentCleanupVersion = 1" in residue
+        and "completedVersion < 1" in residue,
+        "install cleanup must retain an explicit immutable version boundary",
+    )
+    require(
+        "SearchOption.AllDirectories" not in residue
+        and "recursive: true" not in residue
+        and "Directory.Delete(testRoot" not in residue,
+        "elevated install cleanup must never recursively traverse or delete",
+    )
+    require(
+        "TrustedFileSystem.AcquireDirectoryLease(fullPath)" in residue
+        and "TrustedFileSystem.DeleteFile(candidate)" in residue
+        and "Refusing cleanup against a filesystem root" in residue
+        and "ValidateExactLeafNames(ownedFileNames)" in residue,
+        "cleanup must pin each root and delete only validated exact leaf names",
+    )
+    require(
+        ".CleanupObsoleteRootPayloadForUninstall(" in uninstall
+        and ".CleanupLegacyProgramDataForUninstall(" in uninstall,
+        "uninstall must repeat both exact versioned residue cleanup scopes",
+    )
+
+
 def main() -> int:
     try:
         installer = read(INSTALLER_PATH)
@@ -826,6 +1114,7 @@ def main() -> int:
         check_helper_physical_proof(
             read(MAINTENANCE_PATH),
             read(UNINSTALL_PATH),
+            read(MANAGED_VDD_RUNTIME_PATH),
         )
         check_vdd_only_repair_bridge(
             installer,
@@ -845,6 +1134,23 @@ def main() -> int:
             read(BACKEND_LIFECYCLE_PATH),
         )
         check_release_scope_and_rescue_surface(installer)
+        check_idle_ownership_release_contract(
+            installer,
+            read(MAINTENANCE_PATH),
+            read(UNINSTALL_PATH),
+            read(MANAGED_VDD_RUNTIME_PATH),
+            read(DISPLAY_TOPOLOGY_PATH),
+            read(DISPLAY_WIZARD_PATH),
+            read(PROGRAM_PATH),
+        )
+        check_versioned_install_cleanup_contract(
+            installer,
+            read(MACHINE_STATE_PATH),
+            read(INSTALL_RESIDUE_PATH),
+            read(DISPLAY_WIZARD_PATH),
+            read(VDD_NORMALIZER_PATH),
+            read(UNINSTALL_PATH),
+        )
     except ContractFailure as exc:
         print(f"Windows upgrade contract check failed: {exc}", file=sys.stderr)
         return 1
@@ -854,7 +1160,8 @@ def main() -> int:
         "are compatible, expected setup failures use a normal failure page and "
         "nonzero result, the embedded helper proves physical-only safety, "
         "interactive tasks cannot bind to different-account UAC, uninstall "
-        "remains available, and no unsafe foreground-close rescue exists."
+        "remains available, versioned exact install residue is cleaned, and "
+        "no unsafe foreground-close rescue exists."
     )
     return 0
 

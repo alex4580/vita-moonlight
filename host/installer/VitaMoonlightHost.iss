@@ -31,6 +31,7 @@ ArchitecturesAllowed=x64os
 ArchitecturesInstallIn64BitMode=x64os
 MinVersion=10.0.19041
 PrivilegesRequired=admin
+SetupMutex=VitaMoonlightHostSetup,Global\VitaMoonlightHostSetup
 RedirectionGuard=yes
 Compression=lzma2/ultra64
 SolidCompression=yes
@@ -48,7 +49,7 @@ SignedUninstaller=no
 [Tasks]
 Name: "gamepaddriver"; Description: "Controller support (recommended for Xbox, DS4, and Steam Input)"; GroupDescription: "Choose what setup should prepare:"
 Name: "host"; Description: "Configure this PC for Vita streaming now (recommended)"; GroupDescription: "Choose what setup should prepare:"
-Name: "host\sunshine"; Description: "Sunshine and the required Vita-sized virtual display"
+Name: "host\sunshine"; Description: "Sunshine and the required Vita-sized virtual display (if one existing MTT display is found, setup adopts only that exact device and restores its original enabled state on uninstall)"
 
 [Dirs]
 Name: "{app}\state"
@@ -110,6 +111,13 @@ Type: files; Name: "{app}\state\session.lock"
 Type: files; Name: "{app}\state\last-command-error.txt"
 Type: files; Name: "{app}\state\display-driver-verification.json"
 Type: files; Name: "{app}\state\display-driver-directory-identity.json"
+; Keep exact VDD authority through the host finalizer's durable commit. This
+; post-child pass removes its released tombstone only after rollback is no
+; longer possible.
+Type: files; Name: "{app}\state\managed-vdd-ownership.json"
+Type: files; Name: "{app}\state\stream-boundary-lease.json"
+Type: files; Name: "{app}\state\stream-boundary-lease.backup.json"
+Type: files; Name: "{app}\state\stream-boundary-lease.lock"
 Type: files; Name: "{app}\state\backend-lifecycle.json"
 Type: files; Name: "{app}\state\backend-lifecycle.backup.json"
 Type: files; Name: "{app}\state\backend-lifecycle.lock"
@@ -120,6 +128,14 @@ Type: files; Name: "{app}\state\display-suspend.lock"
 Type: files; Name: "{app}\state\installer-maintenance.json"
 Type: files; Name: "{app}\state\installer-maintenance.backup.json"
 Type: files; Name: "{app}\state\installer-maintenance.lock"
+; Exact documentation names shipped at the root by releases through 0.14.6.
+; The host removes these under a pinned directory identity; this final Inno
+; pass handles an ordinary transient file lock after every child has exited.
+Type: files; Name: "{app}\COMPATIBILITY.md"
+Type: files; Name: "{app}\END_TO_END_TEST.md"
+Type: files; Name: "{app}\FINAL_RELEASE_CHECKLIST.md"
+Type: files; Name: "{app}\THIRD_PARTY_NOTICES.md"
+Type: files; Name: "{app}\VITA_SETTINGS_GUIDE.md"
 Type: files; Name: "{app}\VitaMoonlight.Host.exe"
 Type: files; Name: "{app}\state\uninstall-in-progress.intent"
 Type: dirifempty; Name: "{app}\state"
@@ -359,6 +375,7 @@ end;
 function BeginUpgradeMaintenance(var ErrorText: String): Boolean;
 var
   HostError: String;
+  Parameters: String;
   ResultCode: Integer;
 begin
   Result := False;
@@ -378,9 +395,11 @@ begin
   ResultCode := -1;
   DeleteFile(ExpandConstant(
     '{tmp}\VitaMoonlight.Host.Maintenance.error.txt'));
+  Parameters :=
+    'maintenance begin --owner-pid ' + IntToStr(MaintenanceOwnerPid);
   if not Exec(
     ExpandConstant('{tmp}\VitaMoonlight.Host.Maintenance.exe'),
-    'maintenance begin --owner-pid ' + IntToStr(MaintenanceOwnerPid),
+    Parameters,
     ExpandConstant('{tmp}'),
     SW_HIDE,
     ewWaitUntilTerminated,
@@ -1010,7 +1029,7 @@ begin
 
     if not RunRequiredHostCommand(
       'Installing and verifying the virtual display driver',
-      'driver install') then
+      'driver install --adopt-existing-vdd') then
       exit;
     DriverReadinessChecked := False;
   end;
@@ -1256,9 +1275,11 @@ begin
     ExplanationLabel.AutoSize := False;
     ExplanationLabel.WordWrap := True;
     ExplanationLabel.Caption :=
-      'Sunshine, ViGEmBus, and the virtual display driver can be shared with ' +
-      'other streaming or controller software. They are kept by default. ' +
-      'Select a dependency only when you want it removed from this PC.';
+      'Sunshine and ViGEmBus can be shared with other streaming or controller ' +
+      'software and are kept by default. The MTT driver package may also be ' +
+      'shared, so Vita Moonlight never deletes that package without proof it ' +
+      'owns every consumer. The option below releases only the exact display ' +
+      'device managed by this installation.';
 
     RemoveVirtualDisplayCheck := TNewCheckBox.Create(OptionsForm);
     RemoveVirtualDisplayCheck.Parent := OptionsForm;
@@ -1267,7 +1288,7 @@ begin
     RemoveVirtualDisplayCheck.Width := ScaleX(520);
     RemoveVirtualDisplayCheck.Height := ScaleY(28);
     RemoveVirtualDisplayCheck.Caption :=
-      'Remove the MTT virtual display driver and its managed display configuration';
+      'Release the Vita-managed display device (remove it only if Vita created it)';
     RemoveVirtualDisplayCheck.Checked := RemoveVirtualDisplayOnUninstall;
 
     RemoveSunshineCheck := TNewCheckBox.Create(OptionsForm);
@@ -1520,11 +1541,11 @@ begin
     if RemoveVirtualDisplayOnUninstall then
     begin
       if not RunCheckedUninstallHostCommand(
-        'Removing the shared virtual display driver',
+        'Releasing the exact Vita-managed virtual display device',
         'driver uninstall',
         True) then
         Abort;
-      RecordCompletedExplicitRemoval('MTT virtual display driver');
+      RecordCompletedExplicitRemoval('Vita-managed virtual display device');
     end;
 
     if RemoveSunshineOnUninstall then

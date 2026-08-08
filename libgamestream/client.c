@@ -20,6 +20,7 @@
 #include "http.h"
 #include "xml.h"
 #include "mkcert.h"
+#include "bridge_protocol.h"
 #include "crypto.h"
 #include "client.h"
 #include "errors.h"
@@ -1211,7 +1212,10 @@ static int load_serverinfo(PSERVER_DATA server, bool https) {
   /* Preserve typed transport failures such as GS_IDENTITY_CHANGED. The
    * saved-host UI needs that distinction to warn about a replaced Sunshine
    * certificate instead of misreporting the computer as merely offline. */
-  if ((ret = http_request(url, data)) != GS_OK) goto cleanup;
+  if ((ret = http_request_with_timeout(
+          url, data, HTTP_TIMEOUT_ORDINARY_SECONDS)) != GS_OK) {
+    goto cleanup;
+  }
 
   if ((ret = xml_status(data->memory, data->size)) != GS_OK) {
     goto cleanup;
@@ -1509,7 +1513,8 @@ int gs_unpair(PSERVER_DATA server) {
   uuid_generate_random(uuid);
   uuid_unparse(uuid, uuid_str);
   snprintf(url, sizeof(url), "http://%s:%u/unpair?uniqueid=%s&uuid=%s", server->serverInfo.address, server->httpPort, unique_id, uuid_str);
-  ret = http_request(url, data);
+  ret = http_request_with_timeout(
+      url, data, HTTP_TIMEOUT_ORDINARY_SECONDS);
 
   http_free_data(data);
   return ret;
@@ -1570,7 +1575,8 @@ static int finish_pairing_challenge(
   char *paired = NULL;
   PHTTP_DATA data = http_create_data();
   if (data == NULL) return GS_OUT_OF_MEMORY;
-  if ((ret = http_request(url, data)) != GS_OK ||
+  if ((ret = http_request_with_timeout(
+           url, data, HTTP_TIMEOUT_PAIRING_USER_SECONDS)) != GS_OK ||
       (ret = xml_status(data->memory, data->size)) != GS_OK ||
       (ret = xml_search(data->memory, data->size, "paired", &paired)) !=
           GS_OK) {
@@ -1854,7 +1860,10 @@ int gs_pair(PSERVER_DATA server, char* pin) {
   uuid_generate_random(uuid);
   uuid_unparse(uuid, uuid_str);
   snprintf(url, urlSize, "http://%s:%u/pair?uniqueid=%s&uuid=%s&devicename=VitaMoonlight&updateState=1&clientchallenge=%s", server->serverInfo.address, server->httpPort, pairingUniqueId, uuid_str, challenge_hex);
-  if ((ret = http_request(url, data)) != GS_OK) goto cleanup;
+  if ((ret = http_request_with_timeout(
+          url, data, HTTP_TIMEOUT_PAIRING_USER_SECONDS)) != GS_OK) {
+    goto cleanup;
+  }
   free(result);
   result = NULL;
   if ((ret = xml_status(data->memory, data->size)) != GS_OK) goto cleanup;
@@ -1930,7 +1939,10 @@ int gs_pair(PSERVER_DATA server, char* pin) {
   uuid_generate_random(uuid);
   uuid_unparse(uuid, uuid_str);
   snprintf(url, urlSize, "http://%s:%u/pair?uniqueid=%s&uuid=%s&devicename=VitaMoonlight&updateState=1&serverchallengeresp=%s", server->serverInfo.address, server->httpPort, pairingUniqueId, uuid_str, challengeResponseHex);
-  if ((ret = http_request(url, data)) != GS_OK) goto cleanup;
+  if ((ret = http_request_with_timeout(
+          url, data, HTTP_TIMEOUT_PAIRING_USER_SECONDS)) != GS_OK) {
+    goto cleanup;
+  }
   free(result);
   result = NULL;
   if ((ret = xml_status(data->memory, data->size)) != GS_OK) goto cleanup;
@@ -2031,7 +2043,10 @@ int gs_pair(PSERVER_DATA server, char* pin) {
    * have accepted the proof even if the response never reached the Vita.
    * Never send the pre-authorization abort after this point. */
   pairingSessionOpen = false;
-  if ((ret = http_request(url, data)) != GS_OK) goto cleanup;
+  if ((ret = http_request_with_timeout(
+          url, data, HTTP_TIMEOUT_PAIRING_USER_SECONDS)) != GS_OK) {
+    goto cleanup;
+  }
   /* Sunshine removes the pending phase after processing clientpairingsecret,
    * whether it accepts the proof or rejects it. */
   free(result);
@@ -2132,7 +2147,8 @@ int gs_applist(PSERVER_DATA server, PAPP_LIST *list) {
   uuid_generate_random(uuid);
   uuid_unparse(uuid, uuid_str);
   snprintf(url, sizeof(url), "https://%s:%u/applist?uniqueid=%s&uuid=%s", server->serverInfo.address, server->httpsPort, unique_id, uuid_str);
-  if ((ret = http_request(url, data)) != GS_OK)
+  if ((ret = http_request_with_timeout(
+          url, data, HTTP_TIMEOUT_ORDINARY_SECONDS)) != GS_OK)
     goto cleanup;
   if ((ret = xml_status(data->memory, data->size)) != GS_OK)
     goto cleanup;
@@ -2164,6 +2180,171 @@ static bool is_vita_contract_mode(const STREAM_CONFIGURATION *config) {
     }
   }
   return resolutionSupported && frameRateSupported;
+}
+
+static int format_stream_boundary_authority(
+    const char *address, char *authority, size_t authoritySize) {
+  if (address == NULL || authority == NULL || authoritySize == 0) {
+    return GS_INVALID;
+  }
+  bool needsBrackets = strchr(address, ':') != NULL && address[0] != '[';
+  int written = snprintf(
+      authority, authoritySize, needsBrackets ? "[%s]" : "%s", address);
+  if (written < 1 || (size_t)written >= authoritySize) {
+    gs_error = "The Vita host bridge address is too long";
+    return GS_INVALID;
+  }
+  return GS_OK;
+}
+
+int gs_prepare_stream_boundary(
+    PSERVER_DATA server, PSTREAM_CONFIGURATION config,
+    char generation[VITA_STREAM_BOUNDARY_GENERATION_CAPACITY],
+    bool *bridgeActive) {
+  if (server == NULL || config == NULL || generation == NULL ||
+      bridgeActive == NULL || server->serverInfo.address == NULL) {
+    return GS_INVALID;
+  }
+  generation[0] = '\0';
+  *bridgeActive = false;
+  uint16_t port;
+  if (!stream_boundary_port(server->httpPort, &port)) {
+    gs_error = "The Sunshine HTTP port cannot produce a Vita host bridge port";
+    return GS_INVALID;
+  }
+  char authority[1024];
+  int ret = format_stream_boundary_authority(
+      server->serverInfo.address, authority, sizeof(authority));
+  if (ret != GS_OK) return ret;
+
+  char url[1536];
+  int written = snprintf(
+      url, sizeof(url),
+      "https://%s:%u" VITA_STREAM_BOUNDARY_PREPARE_PATH
+      "?width=%d&height=%d&fps=%d",
+      authority, (unsigned int)port,
+      config->width, config->height, config->fps);
+  if (written < 1 || (size_t)written >= sizeof(url)) {
+    gs_error = "The Vita host bridge preparation request is too long";
+    return GS_INVALID;
+  }
+  PHTTP_DATA data = http_create_data();
+  if (data == NULL) return GS_OUT_OF_MEMORY;
+  long responseCode = 0;
+  HTTP_BRIDGE_RESULT bridgeResult =
+      http_bridge_request(url, data, &responseCode);
+  if (bridgeResult == HTTP_BRIDGE_RESULT_OPTIONAL_UNAVAILABLE) {
+    ret = GS_OK;
+    goto cleanup;
+  }
+  if (bridgeResult != HTTP_BRIDGE_RESULT_OK) {
+    ret = GS_FAILED;
+    goto cleanup;
+  }
+  if (responseCode != 200) {
+    gs_error = "The authenticated Vita host bridge rejected display preparation";
+    ret = GS_FAILED;
+    goto cleanup;
+  }
+  if (!stream_boundary_parse_prepared(
+          data->memory, data->size, generation)) {
+    gs_error = "The Vita host bridge returned an invalid preparation response";
+    ret = GS_INVALID;
+    goto cleanup;
+  }
+  *bridgeActive = true;
+  ret = GS_OK;
+
+cleanup:
+  http_free_data(data);
+  return ret;
+}
+
+typedef bool (*stream_boundary_response_parser)(
+    const char *body, size_t body_size);
+
+static int gs_stream_boundary_generation_action(
+    PSERVER_DATA server, const char *generation, const char *path,
+    const char *rejectedMessage, const char *invalidMessage,
+    stream_boundary_response_parser parseResponse, long timeoutMs) {
+  if (server == NULL || generation == NULL ||
+      path == NULL || rejectedMessage == NULL || invalidMessage == NULL ||
+      parseResponse == NULL || timeoutMs <= 0 ||
+      strlen(generation) != VITA_STREAM_BOUNDARY_GENERATION_HEX_CHARS ||
+      server->serverInfo.address == NULL) {
+    return GS_INVALID;
+  }
+  uint16_t port;
+  if (!stream_boundary_port(server->httpPort, &port)) {
+    gs_error = "The Sunshine HTTP port cannot produce a Vita host bridge port";
+    return GS_INVALID;
+  }
+  char authority[1024];
+  int ret = format_stream_boundary_authority(
+      server->serverInfo.address, authority, sizeof(authority));
+  if (ret != GS_OK) return ret;
+  char url[1536];
+  int written = snprintf(
+      url, sizeof(url),
+      "https://%s:%u%s?generation=%s",
+      authority, (unsigned int)port, path, generation);
+  if (written < 1 || (size_t)written >= sizeof(url)) {
+    gs_error = "The Vita host bridge lease request is too long";
+    return GS_INVALID;
+  }
+  PHTTP_DATA data = http_create_data();
+  if (data == NULL) return GS_OUT_OF_MEMORY;
+  long responseCode = 0;
+  HTTP_BRIDGE_RESULT bridgeResult =
+      http_bridge_request_with_timeout_ms(
+          url, data, &responseCode, timeoutMs);
+  if (bridgeResult != HTTP_BRIDGE_RESULT_OK) {
+    if (bridgeResult == HTTP_BRIDGE_RESULT_OPTIONAL_UNAVAILABLE) {
+      gs_error = "The active Vita host bridge became unavailable";
+    }
+    ret = GS_FAILED;
+    goto cleanup;
+  }
+  if (responseCode != 200) {
+    gs_error = rejectedMessage;
+    ret = GS_FAILED;
+    goto cleanup;
+  }
+  if (!parseResponse(data->memory, data->size)) {
+    gs_error = invalidMessage;
+    ret = GS_INVALID;
+    goto cleanup;
+  }
+  ret = GS_OK;
+
+cleanup:
+  http_free_data(data);
+  return ret;
+}
+
+int gs_started_stream_boundary(PSERVER_DATA server, const char *generation) {
+  return gs_stream_boundary_generation_action(
+      server, generation, VITA_STREAM_BOUNDARY_STARTED_PATH,
+      "The authenticated Vita host bridge rejected stream start",
+      "The Vita host bridge returned an invalid stream-start response",
+      stream_boundary_parse_started, 65000L);
+}
+
+int gs_heartbeat_stream_boundary(PSERVER_DATA server, const char *generation) {
+  return gs_stream_boundary_generation_action(
+      server, generation, VITA_STREAM_BOUNDARY_HEARTBEAT_PATH,
+      "The authenticated Vita host bridge rejected the stream lease",
+      "The Vita host bridge returned an invalid heartbeat response",
+      stream_boundary_parse_heartbeat,
+      VITA_STREAM_BOUNDARY_HEARTBEAT_TIMEOUT_MS);
+}
+
+int gs_stop_stream_boundary(PSERVER_DATA server, const char *generation) {
+  return gs_stream_boundary_generation_action(
+      server, generation, VITA_STREAM_BOUNDARY_STOP_PATH,
+      "The authenticated Vita host bridge rejected display restore",
+      "The Vita host bridge returned an invalid restore response",
+      stream_boundary_parse_stopped, 65000L);
 }
 
 int gs_start_app(PSERVER_DATA server, STREAM_CONFIGURATION *config, int appId, bool sops, bool localaudio, int gamepad_mask) {
@@ -2282,7 +2463,8 @@ int gs_quit_app(PSERVER_DATA server) {
   uuid_generate_random(uuid);
   uuid_unparse(uuid, uuid_str);
   snprintf(url, sizeof(url), "https://%s:%u/cancel?uniqueid=%s&uuid=%s", server->serverInfo.address, server->httpsPort, unique_id, uuid_str);
-  if ((ret = http_request(url, data)) != GS_OK)
+  if ((ret = http_request_with_timeout(
+          url, data, HTTP_TIMEOUT_ORDINARY_SECONDS)) != GS_OK)
     goto cleanup;
 
   if ((ret = xml_status(data->memory, data->size)) != GS_OK)

@@ -57,6 +57,7 @@
 #include "graphics.h"
 #include "device.h"
 #include "gui/ui.h"
+#include "gui/ui_connect.h"
 #include "gui/ui_diagnostics.h"
 #include "util.h"
 #include "power/vita.h"
@@ -263,10 +264,15 @@ int main(int argc, char* argv[]) {
   if (connection_get_status() != LI_DISCONNECTED) {
     connection_terminate();
   }
+  (void)ui_connect_release_stream_boundary(false);
+  bool boundary_cleanup_ready =
+      ui_connect_stream_boundary_local_cleanup_ready();
   ui_diagnostics_shutdown();
   bool workers_stopped = vita_workers_shutdown();
-  if (workers_stopped) {
+  if (workers_stopped && boundary_cleanup_ready) {
     vita_runtime_shutdown();
   }
-  return workers_stopped ? EXIT_SUCCESS : EXIT_FAILURE;
+  return workers_stopped && boundary_cleanup_ready
+      ? EXIT_SUCCESS
+      : EXIT_FAILURE;
 }

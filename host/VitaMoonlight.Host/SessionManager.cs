@@ -612,6 +612,36 @@ internal sealed class SessionManager
             width,
             height,
             fps);
+        return StartValidated(
+            streamMode,
+            beforeTransactionRelease: null);
+    }
+
+    /// <summary>
+    /// Establishes the display handoff and publishes its external authority
+    /// before releasing the cross-process display transaction. This closes
+    /// the recovery-file watcher window in which a newly active display could
+    /// otherwise be mistaken for an orphan before its authenticated lease was
+    /// durable. A publication failure restores the exact physical snapshot
+    /// while the same transaction is still held.
+    /// </summary>
+    internal SessionStartResult Start(
+        int width,
+        int height,
+        int fps,
+        Action<SessionStartResult>? beforeTransactionRelease)
+    {
+        var streamMode = VitaDisplayModes.RequireSupportedStreamMode(
+            width,
+            height,
+            fps);
+        return StartValidated(streamMode, beforeTransactionRelease);
+    }
+
+    private SessionStartResult StartValidated(
+        VitaStreamMode streamMode,
+        Action<SessionStartResult>? beforeTransactionRelease)
+    {
         var suspendBeforeLease = DisplaySuspendIntentStore.Inspect();
         using var transaction = DisplayTransactionLock.Acquire();
         DisplaySuspendIntentStore.RequireClearForDisplayMutationLocked(
@@ -619,13 +649,36 @@ internal sealed class SessionManager
             suspendBeforeLease,
             "Vita display session start");
         RequireFullyReadyBackendLocked(transaction);
-        return StartCoreLocked(
+        var started = StartCoreLocked(
             transaction,
             streamMode,
             HostSettings.Load(),
             prepareDriverMode: true,
             persistMode: false,
             activationAttempts: 20);
+        if (beforeTransactionRelease is null) return started;
+        try
+        {
+            beforeTransactionRelease(started);
+            return started;
+        }
+        catch (Exception publicationError)
+        {
+            try
+            {
+                _ = RestoreIfPendingLocked(
+                    transaction,
+                    started.RecoveryCapturedAt);
+            }
+            catch (Exception restoreError)
+            {
+                throw new AggregateException(
+                    "Session authority publication failed and automatic display restoration also failed. The exact recovery record was retained.",
+                    publicationError,
+                    restoreError);
+            }
+            throw;
+        }
     }
 
     /// <summary>
@@ -634,8 +687,31 @@ internal sealed class SessionManager
     /// path: ordinary Start and ChangeMode always require a fully enabled
     /// lifecycle state inside the display transaction lock.
     /// </summary>
-    internal SessionStartResult PrimeNativeModeForDriverMaintenanceOnly()
+    internal SessionStartResult PrimeNativeModeForDriverMaintenanceOnly(
+        bool installDriver = false,
+        bool allowExistingDeviceAdoption = false)
     {
+        InstallationTrust.RequireInstalledPayload(
+            "Verifying virtual-display mode advertisement");
+        var suspendBeforeLease = DisplaySuspendIntentStore.Inspect();
+        using var transaction = DisplayTransactionLock.Acquire();
+        DisplaySuspendIntentStore.RequireClearForDisplayMutationLocked(
+            transaction,
+            suspendBeforeLease,
+            "Virtual-display driver maintenance");
+        BackendLifecycleStateStore.RequireNoUninstallInProgress();
+        return PrimeNativeModeForDriverMaintenanceOnlyLocked(
+            transaction,
+            installDriver,
+            allowExistingDeviceAdoption);
+    }
+
+    internal SessionStartResult PrimeNativeModeForDriverMaintenanceOnlyLocked(
+        DisplayTransactionLease transaction,
+        bool installDriver = false,
+        bool allowExistingDeviceAdoption = false)
+    {
+        transaction.RequireActive();
         InstallationTrust.RequireInstalledPayload(
             "Verifying virtual-display mode advertisement");
         var mode = VitaDisplayModes.Native;
@@ -650,12 +726,6 @@ internal sealed class SessionManager
             mode.Width,
             mode.Height,
             mode.Fps);
-        var suspendBeforeLease = DisplaySuspendIntentStore.Inspect();
-        using var transaction = DisplayTransactionLock.Acquire();
-        DisplaySuspendIntentStore.RequireClearForDisplayMutationLocked(
-            transaction,
-            suspendBeforeLease,
-            "Virtual-display mode verification");
         BackendLifecycleStateStore.RequireNoUninstallInProgress();
         DriverNativeModeVerification.Invalidate();
         if (File.Exists(HostStatePaths.RecoveryFile))
@@ -665,11 +735,42 @@ internal sealed class SessionManager
             );
         }
 
+        // Publish exact device authority before any PnP operation. This also
+        // completes an interrupted creation when the one new node can still
+        // be proven from its durable pre-create inventory. A clean install
+        // publishes a creation intent but has no device to stop yet.
+        ManagedVddInstallPlan? installPlan = null;
+        if (installDriver)
+        {
+            installPlan = ManagedVddOwnershipJournal.PrepareInstallLocked(
+                transaction,
+                allowExistingDeviceAdoption);
+        }
+        if (!installDriver ||
+            installPlan?.Action ==
+                ManagedVddInstallAction.UseOwnedInstance)
+        {
+            ManagedVirtualDisplayRuntime.ReconcileIdleLocked(
+                transaction,
+                requireManagedDevice: true);
+        }
+
         var recovery = displays.CaptureRecovery(mode.Width, mode.Height, mode.Fps);
         displays.SaveRecovery(transaction, recovery);
         DisplayDescriptor selected;
         try
         {
+            var wizard = DisplayWizardAdapter.LocateBundled();
+            if (installDriver)
+            {
+                wizard.InstallDriver(
+                    transaction,
+                    allowExistingDeviceAdoption);
+            }
+            else
+            {
+                wizard.ReloadDriver(transaction);
+            }
             // The verification topology is intentionally temporary.
             // Persisting a mode for it with CDS_UPDATEREGISTRY can fail even
             // when the active driver advertises and accepts the mode.
@@ -698,7 +799,11 @@ internal sealed class SessionManager
         {
             try
             {
-                displays.Restore();
+                ManagedVirtualDisplayRuntime
+                    .ReconcileRestoredPhysicalBaselineLocked(
+                    transaction,
+                    displays.Restore,
+                    requireManagedDevice: false);
                 DisplayTopologyService.ClearRecovery(transaction);
             }
             catch (Exception restoreError)
@@ -717,8 +822,11 @@ internal sealed class SessionManager
 
         try
         {
-            displays.Restore();
-            displays.DisableManagedVirtualDisplays();
+            ManagedVirtualDisplayRuntime
+                .ReconcileRestoredPhysicalBaselineLocked(
+                transaction,
+                displays.Restore,
+                requireManagedDevice: true);
             DisplayTopologyService.ClearRecovery(transaction);
         }
         catch (Exception restoreError)
@@ -752,11 +860,22 @@ internal sealed class SessionManager
     {
         transaction.RequireActive();
         var desktopMode = streamMode.DesktopMode;
+        var usesManagedVitaDisplay = !settings.HostMode.Equals(
+            "apollo",
+            StringComparison.OrdinalIgnoreCase);
         if (File.Exists(HostStatePaths.RecoveryFile))
         {
             throw new InvalidOperationException(
                 $"A pending display recovery record already exists at {HostStatePaths.RecoveryFile}. Run `session recover` first."
             );
+        }
+
+
+        if (usesManagedVitaDisplay)
+        {
+            ManagedVirtualDisplayRuntime.ReconcileIdleLocked(
+                transaction,
+                requireManagedDevice: true);
         }
 
         var recovery = displays.CaptureRecovery(
@@ -767,7 +886,7 @@ internal sealed class SessionManager
 
         try
         {
-            if (prepareDriverMode && !settings.HostMode.Equals("apollo", StringComparison.OrdinalIgnoreCase))
+            if (prepareDriverMode && usesManagedVitaDisplay)
             {
                 DisplayWizardAdapter.LocateBundled().PrepareMode(
                     transaction,
@@ -777,13 +896,14 @@ internal sealed class SessionManager
             }
 
             var selected = ActivateWithRetry(
-                settings.DisplayMatch,
+                usesManagedVitaDisplay ? null : settings.DisplayMatch,
                 desktopMode.Width,
                 desktopMode.Height,
                 desktopMode.Fps,
                 settings.ForceSdr,
                 persistMode,
-                activationAttempts);
+                activationAttempts,
+                requireExactVitaTarget: usesManagedVitaDisplay);
             DisplaySuspendIntentStore.RequireClearAfterDisplayMutationLocked(
                 transaction,
                 "Vita display session start");
@@ -811,6 +931,12 @@ internal sealed class SessionManager
             try
             {
                 displays.Restore();
+                if (usesManagedVitaDisplay)
+                {
+                    ManagedVirtualDisplayRuntime.ReconcileIdleLocked(
+                        transaction,
+                        requireManagedDevice: true);
+                }
                 DisplayTopologyService.ClearRecovery(transaction);
             }
             catch (Exception restoreError)
@@ -831,6 +957,19 @@ internal sealed class SessionManager
         return RestoreIfPendingLocked(transaction, expectedCapturedAt);
     }
 
+    internal bool RecoverToIdle()
+    {
+        using var transaction = DisplayTransactionLock.Acquire();
+        var restored = RestoreIfPendingLocked(transaction);
+        if (!restored)
+        {
+            ManagedVirtualDisplayRuntime.ReconcileIdleLocked(
+                transaction,
+                requireManagedDevice: false);
+        }
+        return restored;
+    }
+
     internal bool RestoreIfPendingLocked(
         DisplayTransactionLease transaction,
         DateTimeOffset? expectedCapturedAt = null)
@@ -847,7 +986,10 @@ internal sealed class SessionManager
             // test or delayed cleanup must never tear down that session.
             return false;
         }
-        displays.Restore();
+        ManagedVirtualDisplayRuntime.ReconcileRestoredPhysicalBaselineLocked(
+            transaction,
+            displays.Restore,
+            requireManagedDevice: false);
         DisplayTopologyService.ClearRecovery(transaction);
         return true;
     }
@@ -883,11 +1025,16 @@ internal sealed class SessionManager
         // the active virtual source mode leaves both Sunshine's disconnect
         // restoration and any companion recovery record intact.
         var selected = displays.ChangeActiveVirtualDisplayMode(
-            settings.DisplayMatch,
+            settings.HostMode.Equals("apollo", StringComparison.OrdinalIgnoreCase)
+                ? settings.DisplayMatch
+                : null,
             mode.Width,
             mode.Height,
             mode.Fps,
-            settings.ForceSdr);
+            settings.ForceSdr,
+            requireExactVitaTarget: !settings.HostMode.Equals(
+                "apollo",
+                StringComparison.OrdinalIgnoreCase));
         DisplaySuspendIntentStore.RequireClearAfterDisplayMutationLocked(
             transaction,
             "Vita virtual-display mode change");
@@ -901,7 +1048,8 @@ internal sealed class SessionManager
         int fps,
         bool forceSdr,
         bool persistMode,
-        int activationAttempts)
+        int activationAttempts,
+        bool requireExactVitaTarget = true)
     {
         Exception? lastError = null;
         for (var attempt = 0; attempt < activationAttempts; attempt++)
@@ -914,7 +1062,8 @@ internal sealed class SessionManager
                     height,
                     fps,
                     forceSdr,
-                    persistMode);
+                    persistMode,
+                    requireExactVitaTarget);
             }
             catch (Exception error) when (
                 error is InvalidOperationException or Win32Exception)

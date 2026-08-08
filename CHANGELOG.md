@@ -1,5 +1,24 @@
 ## 0.14.8
 
+* Fixed the idle virtual display remaining PnP-available after a stream. When a
+  physical monitor entered standby before Windows sleep, Windows could promote
+  the 960x544 target, resize or relocate open windows, and leave DWM/display
+  recovery sluggish after wake. Enabled + Idle now means the exact physical
+  layout is active and the managed display device is stopped; startup, normal
+  disconnect, abrupt loss, suspend, upgrade, Pause, and uninstall all reconcile
+  that invariant with bounded recovery.
+* Added a mutually authenticated Vita-to-companion stream boundary. The paired
+  Vita arms the exact display before both Sunshine launch and resume, receives
+  an unguessable generation token, starts a short certificate-bound heartbeat
+  lease after Sunshine accepts the app, and uses that token to restore the
+  saved layout. Other Moonlight clients cannot arm or retain the Vita display
+  by merely using the same resolution or sharing Sunshine. Exact lease expiry
+  is the abrupt-loss authority; Sunshine exit and a proven zero-session event
+  can only accelerate recovery.
+* Made repair normalize existing VDD installations instead of assuming a clean
+  PC: one virtual monitor is retained and driver logging/debug logging are off.
+  Upgrade and uninstall also remove only exact obsolete Vita-owned payload and
+  legacy state names while preserving unknown user files and shared software.
 * Kept a saved computer visible when Sunshine revokes or forgets the Vita.
   The pinned HTTPS probe now treats Sunshine's exact unauthorised response as
   **Pairing required**, falls back only to public discovery metadata, and
@@ -40,9 +59,9 @@
   buffer fits without silently stepping down, while retaining nearly 2 MiB for
   audio, control, discovery, and allocator overhead. No bitrate, resolution,
   packet-size, FEC, or image-quality reduction was made.
-* Enforced Sunshine launch-mode optimization for managed Vita sessions and
-  removed the misleading client switch that could leave the physical desktop
-  selected after choosing a Vita resolution.
+* Made the authenticated Vita preflight authoritative for managed Sunshine
+  sessions and removed the misleading client switch that could leave the
+  physical desktop selected after choosing a Vita resolution.
 * Made in-stream display changes reconnect through the ordinary GameStream
   launch-mode contract without sending F8-F10 or adding a pre-disconnect delay.
   The host now registers and requires those legacy mode keys only for an
@@ -53,9 +72,9 @@
 * Made Vita packages optimized Release builds by default while preserving the
   Vita platform definition across every bundled dependency.
 * Tightened Windows virtual-display selection and recovery. Automatic setup
-  selects only the managed MTT display, validates fresh post-restart Sunshine
-  inventory, rejects unhealthy driver devices, and restores a usable physical
-  mode after suspend without replacing a healthy desktop mode.
+  selects exactly one managed MTT display, rejects legacy or duplicate device
+  ambiguity, preserves the exact physical baseline, and returns the device to
+  PnP-disabled idle after any verification or recovery attempt.
 * Added a fail-closed installer and emergency bootstrap for a broken older
   installation that exposes only one active managed MTT display. It rescans
   first, may restart only that exact enabled device while backend features are
@@ -80,8 +99,8 @@
   and after Apollo has exited.
 * Expanded release-contract checks and first-time community instructions for
   clean install, in-place upgrade, same-version repair, Vita reinstall,
-  interrupted pairing retry, Pause/Enable, and both shared-component uninstall
-  choices.
+  interrupted pairing retry, Pause/Enable, and safe shared-component retention
+  or exact-device release during uninstall.
 * Replaced the unlicensed mDNS submodule and opaque Vita dependency packages
   with project-owned, hash-locked clean-room/source recipes and corresponding-
   source packaging. Vita discovery, TLS, media, font, compression, and audio

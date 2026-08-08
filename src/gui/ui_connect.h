@@ -5,6 +5,12 @@
 void ui_connect_address(char *addr, size_t addr_size);
 device_info_t* ui_connect_and_pairing(device_info_t *info);
 bool ui_connect_connected();
+/* Idempotently stops the lease worker and asks the authenticated host to
+ * restore the exact display handoff. Safe to call during process shutdown. */
+bool ui_connect_release_stream_boundary(bool show_error);
+/* False only while local heartbeat resources may still reference server/CURL
+ * state. A remote stop failure does not make local cleanup unsafe. */
+bool ui_connect_stream_boundary_local_cleanup_ready(void);
 
 void ui_connect_resume();
 void ui_connect_manual();

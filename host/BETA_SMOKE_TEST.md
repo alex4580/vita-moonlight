@@ -74,19 +74,26 @@ or a reversible test-machine snapshot.
    **Set up or repair this PC**.
 3. Click **Check readiness**. Sunshine, controller support, virtual display,
    recovery, and Stream rescue must report ready. The physical display must be
-   visible while idle.
+   visible while idle, no display transaction may be pending, and the exact
+   managed Vita display must be PnP-disabled rather than merely absent from the
+   Windows desktop.
 4. For an upgrade, confirm existing Sunshine pairing credentials and unrelated
    Sunshine applications still exist. For a repair, confirm the second setup
    completes without adding a duplicate virtual display or Sunshine install.
+   For an older-version upgrade, also confirm obsolete duplicate guide files
+   are no longer left beside the installed application and known retired state
+   is no longer left under `C:\ProgramData\VitaMoonlight`. An unrelated file
+   placed there by the tester must be retained; never delete that folder by
+   hand to make this test pass.
 5. Press **Ctrl + Alt + Shift + F11** on the PC keyboard. A short display blink
    is acceptable. The physical display must remain or return, and Sunshine
    must be available again.
 6. Disconnect the Vita. Open **Diagnostics & support > Save support
    report...** and save `before-pause.json`. In a text editor, confirm
    `backendStatus` is `Enabled`, `recoveryTaskStatus` and
-   `rescueAgentTaskStatus` are `Present`, `rescueAgentRunning` is `true`, and
-   `backendManagedVddActive` is `false`. `scheduledTaskAccountReady` must be
-   `true`.
+   `rescueAgentTaskStatus` are `Present`, `rescueAgentRunning` is `true`,
+   `backendManagedVddEnabledCount` is `0`, and `backendManagedVddActive` is
+   `false`. `scheduledTaskAccountReady` must be `true`.
    Also note `hostMode`, `sunshineInstalled`, `sunshineVersion`, and whether
    Sunshine's web page is reachable.
 
@@ -110,8 +117,8 @@ community matrix.
    remain reachable. Pause is not a network-access control.
 9. Choose **Enable Vita host features**, then **Check readiness**, and save
    `enabled-again.json`. The lifecycle, task, rescue-agent, and managed-VDD
-   fields must match `before-pause.json`; the VDD must remain inactive while
-   idle. Sunshine, pairing, and settings must remain unchanged. The
+   fields must match `before-pause.json`; the VDD must remain PnP-disabled
+   while idle. Sunshine, pairing, and settings must remain unchanged. The
    [support-report comparison table](../docs/LOGGING_AND_SUPPORT.md#create-a-windows-host-support-report)
     explains every field and the meaning of `Unknown`.
 
@@ -150,8 +157,14 @@ starting state.
 9. Open the on-screen keyboard from the menu and type into a non-secret field.
 10. Press a face button once and confirm it is not stuck or repeated after
    release.
-11. Choose **Disconnect stream**. The physical PC display must return without
-    a restart or sign-out.
+11. Choose **Disconnect stream**. The exact physical PC layout must return
+    without a restart or sign-out, and the managed VDD must be PnP-disabled.
+12. Immediately select the same Sunshine application again. This exercises
+    Sunshine's resume path rather than a fresh app launch. The dedicated Vita
+    display must arm again at 960x544, the same Windows application must remain
+    running, and the stream must reconnect normally. Disconnect once more and
+    confirm the physical layout returns; a delayed stop from the first stream
+    must not tear down the second one.
 
 Result: **Pass / Fail**, including any incorrect resolution, color, input, or
 display-recovery behavior.
@@ -160,23 +173,30 @@ display-recovery behavior.
 
 1. Start another stream.
 2. Interrupt the connection once by suspending the Vita or temporarily
-   disconnecting its network. Do not terminate Windows processes on a PC where
+   disconnecting its Wi-Fi. Do not terminate Windows processes on a PC where
    the stream has removed your only visible control surface.
-3. Confirm the physical PC display returns. If it does not, press
+3. Confirm the physical PC display returns automatically and the managed VDD
+   is PnP-disabled. If it does not, press
    **Ctrl + Alt + Shift + F11** on the PC keyboard and allow about 15 seconds.
 4. Start one more stream and disconnect normally.
-5. With no stream running, put Windows to sleep and wake it. Within about
-   20 seconds the physical display must be active, the Vita VDD must not remain
-   active, the physical monitor must return to its normal saved resolution and
-   refresh rate, and desktop responsiveness must be normal. Open
+5. With no stream running and the Vita disconnected or off, place two ordinary
+   Windows windows at recognizable sizes and positions and take a reference
+   screenshot. Confirm the desktop is responsive. Turn the physical monitor
+   off or let it enter power-save **before** putting the PC to sleep, then put
+   Windows to sleep with the chassis power button or a known keyboard shortcut.
+   Wake the PC and turn the monitor back on. Within about 20 seconds the
+   physical display must be active at its normal saved resolution and refresh
+   rate, every test window must retain its original size and position, the
+   managed VDD must be PnP-disabled, and desktop animation/input must be smooth
+   without a restart. Open
    **Diagnostics & support > Open diagnostics folder**, then open
    `stream-rescue.log`. After the timestamp of this test, find a successful
    `power-suspend-display-prepare` line and then either a successful
    `resume-display-check:` decision or a successful `recover-display-host`
    action whose message says it was triggered by resume. A resume-decision
    message reports `restored physical modes` and `mode-repair warnings`;
-   record any nonzero warning count/code and any window left at a Vita-sized
-   resolution.
+   record any nonzero warning count/code, moved/resized window, or sustained
+   post-wake slowdown.
    `stream-rescue-status.json` contains only the latest rescue result. See the
    [host rescue-record guide](../docs/LOGGING_AND_SUPPORT.md#read-the-sparse-windows-rescue-records)
    for the fields and privacy warning.
@@ -185,6 +205,18 @@ Long-pressing PS can expose a Vita system Wi-Fi toggle. Some firmware/plugin
 combinations do not restore the radio to the running app after it is disabled;
 close Vita Moonlight or restart the Vita if that occurs. Report it, but judge
 PC display recovery separately.
+
+For an assigned crash-recovery result, use only a disposable PC or a machine
+with an independent physical/remote control path. Start a stream, end the exact
+Sunshine process, and confirm the fallback observer restores the physical
+layout and PnP-disables the VDD without waiting for a normal Vita stop. Restart
+Sunshine, reconnect, and disconnect normally. Do not end the Vita Moonlight
+rescue agent for this minimum test.
+
+For the ordinary network-loss check, allow about 60 seconds for the exact
+authenticated client lease to expire and bounded recovery to finish. Another
+Moonlight client connected to the same Sunshine instance must not extend that
+Vita lease or delay restoration.
 
 Result: **Automatic recovery / Hotkey recovery / Failed recovery**.
 
@@ -205,9 +237,9 @@ These checks can be contributed by different testers.
    are arranged.
 2. Complete one stream, one normal disconnect, and one
    **Ctrl + Alt + Shift + F11** recovery.
-3. Confirm every connected physical display is available again and the
-   Vita virtual display is not the only active display. Record any changed
-   arrangement.
+3. Confirm every connected physical display has its original arrangement and
+   the managed Vita device is PnP-disabled while idle. Record any changed
+   arrangement, scaling, resolution, or primary display.
 
 Result: **Pass / Fail / Not available** for each layout.
 
@@ -242,29 +274,33 @@ software. This is the normal uninstall path.
 4. If Windows requests a restart, restart and run uninstall again.
 5. Confirm Vita Moonlight Host and its Start-menu entry are gone, the physical
    display still works, and Sunshine, ViGEmBus, and the virtual-display driver
-   remain installed.
+   remain installed. The retained managed device must be PnP-disabled, and no
+   Vita-owned recovery task, listener, or background process may remain.
 6. The public beta needs one enabled-host result and one deliberately paused-host
    result; different testers may contribute them. For the paused case, choose
    **Pause Vita host features**, restart, and then uninstall without enabling
-   again. Kept Sunshine must remain unchanged, and the kept VDD must be usable
-   but inactive.
+   again. Kept Sunshine must remain unchanged, and the kept VDD must remain
+   installed but PnP-disabled.
 
 Result: **Pass / Fail**.
 
-## G. Lab-only uninstall, removing shared components
+## G. Lab-only uninstall, releasing the display and removing optional shared components
 
-Run this only on a PC or reversible test snapshot where Sunshine, ViGEmBus, and
-the virtual-display driver are not needed by anything else.
+Run this only on a PC or reversible test snapshot where Sunshine and ViGEmBus
+are not needed by anything else. Vita Moonlight does not delete the shared MTT
+driver package; its option releases only the exact device it manages.
 
 1. Reinstall the candidate, click **Set up or repair this PC**, and run
    **Check readiness**.
-2. Start the uninstaller and explicitly select removal of the MTT
-   virtual-display driver, Sunshine, and ViGEmBus.
+2. Start the uninstaller and explicitly select release of the Vita-managed
+   display device plus removal of Sunshine and ViGEmBus.
 3. The physical display must be restored before removal begins.
 4. If Windows requests a restart or says removal is pending, the host and its
    recovery safeguards must remain. Restart, run uninstall again, and finish.
-5. Confirm the host and all three selected shared components are gone and the
-   physical display remains usable.
+5. Confirm the host, Sunshine, and ViGEmBus are gone and the physical display
+   remains usable. If Vita Moonlight created the exact MTT device, that device
+   is gone; if it adopted the device, its original enabled state is restored.
+   The shared MTT driver package remains staged.
 
 Result: **Pass / Fail / Not tested - shared PC**.
 
@@ -291,14 +327,17 @@ Install/upgrade/repair: Pass / Fail
 Menu, keyboard, and basic input: Pass / Fail
 Vita same-version reinstall and app removal: Pass / Fail
 Normal disconnect recovery: Pass / Fail
+Immediate same-app resume/reconnect: Pass / Fail
 Interrupted recovery: Automatic / F11 hotkey / Fail
-Sleep/resume physical-layout recovery: Pass / Fail
+Wi-Fi-loss recovery: Automatic / F11 hotkey / Fail
+Sunshine-process crash recovery: Pass / Fail / Not tested
+Monitor-off-before-sleep window/performance recovery: Pass / Fail
 Pause/restart/enable lifecycle: Pass / Fail
 Paused repair or paused uninstall: Pass / Fail / Not tested
 Laptop on battery: Pass / Fail / Not tested
 Multiple monitors: Pass / Fail / Not tested
 Uninstall, keep shared components: Pass / Fail
-Uninstall, remove shared components: Pass / Fail / Not tested
+Uninstall, release display and remove optional shared components: Pass / Fail / Not tested
 
 Shortest steps that reproduce any failure:
 Expected result:

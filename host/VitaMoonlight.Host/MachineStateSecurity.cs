@@ -28,12 +28,14 @@ internal static class MachineStateSecurity
                 "companion before using protected state.");
         }
         SecureCore();
+        InstallResidueCleanup.RunForInstalledPayloadIfNeeded();
     }
 
     internal static void SecureAfterLegacyMigration()
     {
         SecureCore();
         MarkProtectionInitialized();
+        InstallResidueCleanup.RunForInstalledPayloadIfNeeded();
     }
 
     internal static void SecureWhileDisplayTransactionHeld(
@@ -128,6 +130,25 @@ internal static class MachineStateSecurity
         }
     }
 
+    /// <summary>
+    /// Fast-path precondition for the high-frequency authenticated stream
+    /// heartbeat. The agent performs the full ACL walk once at startup; each
+    /// exact journal open still rejects reparse points/hard links and applies
+    /// the protected file ACL, without rescanning unrelated machine state.
+    /// </summary>
+    internal static void RequireStreamBoundaryLeaseAccess()
+    {
+        Environment.SetEnvironmentVariable(
+            "VITA_MOONLIGHT_STATE_DIR",
+            null);
+        if (!IsProtectionInitialized())
+        {
+            throw new InvalidOperationException(
+                "Legacy machine state has not been migrated. Run " +
+                "`session recover-upgrade` before using stream-boundary state.");
+        }
+    }
+
     private static IEnumerable<string> ProtectedMachineFiles()
     {
         yield return HostStatePaths.RecoveryFile;
@@ -140,6 +161,10 @@ internal static class MachineStateSecurity
         yield return HostStatePaths.LastErrorFile;
         yield return DriverNativeModeVerification.VerificationFile;
         yield return DriverConfigurationDirectoryTrust.IdentityFile;
+        yield return ManagedVddOwnershipJournal.JournalFile;
+        yield return StreamBoundaryLeaseJournal.StateFile;
+        yield return StreamBoundaryLeaseJournal.BackupFile;
+        yield return StreamBoundaryLeaseJournal.LockFile;
         yield return BackendLifecycleStateStore.StateFile;
         yield return BackendLifecycleStateStore.BackupFile;
         yield return BackendLifecycleStateStore.DisabledIntentFile;

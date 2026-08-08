@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Text.Json;
 
 namespace VitaMoonlight.Host;
@@ -47,7 +48,7 @@ internal static class HostRecoveryAgentManager
             using var context = new HostRecoveryAgentContext();
             ready.Set();
             Application.Run(context);
-            return 0;
+            return context.StreamBoundaryListenerFaulted ? 1 : 0;
         }
         finally
         {
@@ -63,7 +64,30 @@ internal static class HostRecoveryAgentManager
     internal static ExactScheduledTaskProbe GetInstallationState() =>
         ExactScheduledTaskManager.Probe(TaskName);
 
-    internal static bool IsRunning() => IsProcessPresent() && IsEventSignaled(ReadyEventName);
+    internal static bool IsRunning()
+    {
+        if (!IsProcessPresent() || !IsEventSignaled(ReadyEventName))
+        {
+            return false;
+        }
+        try
+        {
+            var bridge = SunshineStreamBridgeConfiguration.LoadIfEnabled();
+            return bridge is null || ManagedStreamBridgeFirewall.IsReady(
+                bridge.Port,
+                Environment.ProcessPath ?? Path.Combine(
+                    AppContext.BaseDirectory,
+                    "VitaMoonlight.Host.exe"));
+        }
+        catch (Exception error) when (
+            error is IOException or
+                UnauthorizedAccessException or
+                InvalidDataException or
+                System.Security.SecurityException)
+        {
+            return false;
+        }
+    }
 
     internal static IReadOnlyList<HostModeHotkeyStatus> GetModeHotkeyReadiness()
     {
@@ -155,6 +179,17 @@ internal static class HostRecoveryAgentManager
             TaskName,
             executablePath,
             "agent run --background");
+        var bridge = SunshineStreamBridgeConfiguration.LoadIfEnabled();
+        if (bridge is null)
+        {
+            ManagedStreamBridgeFirewall.RemoveOwned(executablePath);
+        }
+        else
+        {
+            ManagedStreamBridgeFirewall.InstallOrRepair(
+                bridge.Port,
+                executablePath);
+        }
         if (RunTask("/Run", "/TN", TaskName) != 0)
         {
             throw new InvalidOperationException("Windows created the stream rescue agent but could not start it.");
@@ -163,7 +198,7 @@ internal static class HostRecoveryAgentManager
         if (!IsRunning())
         {
             throw new InvalidOperationException(
-                "Windows started the stream rescue task, but its mandatory display-recovery hotkey did not become ready.");
+                "Windows started the stream rescue task, but authenticated stream handoff and display recovery did not become ready.");
         }
     }
 
@@ -184,6 +219,10 @@ internal static class HostRecoveryAgentManager
         }
         StopCurrentSessionAgent();
         ExactScheduledTaskManager.DeleteExact(TaskName);
+        ManagedStreamBridgeFirewall.RemoveOwned(
+            Environment.ProcessPath ?? Path.Combine(
+                AppContext.BaseDirectory,
+                "VitaMoonlight.Host.exe"));
     }
 
     internal static HostRescueStatus? ReadLastStatus()
@@ -339,15 +378,40 @@ internal static class HostRecoveryAgentManager
 internal sealed class HostRecoveryAgentContext : ApplicationContext
 {
     private readonly HostRecoveryHotkeyWindow window;
+    private readonly StreamBoundaryBridgeServer? streamBoundaryBridge;
+    private int streamBoundaryListenerFaulted;
+
+    internal bool StreamBoundaryListenerFaulted =>
+        Volatile.Read(ref streamBoundaryListenerFaulted) != 0;
 
     internal HostRecoveryAgentContext()
     {
         window = new HostRecoveryHotkeyWindow();
+        try
+        {
+            streamBoundaryBridge =
+                StreamBoundaryBridgeServer.CreateIfEnabled(() =>
+                {
+                    Interlocked.Exchange(
+                        ref streamBoundaryListenerFaulted,
+                        1);
+                    Application.Exit();
+                });
+        }
+        catch
+        {
+            window.Dispose();
+            throw;
+        }
     }
 
     protected override void Dispose(bool disposing)
     {
-        if (disposing) window.Dispose();
+        if (disposing)
+        {
+            streamBoundaryBridge?.Dispose();
+            window.Dispose();
+        }
         base.Dispose(disposing);
     }
 }
@@ -356,6 +420,7 @@ internal enum ResumeTopologyDecision
 {
     Wait,
     Healthy,
+    ReconcileIdle,
     Recover,
 }
 
@@ -370,7 +435,8 @@ internal static class ResumeTopologyClassifier
         string? pendingTransactionAtWake,
         string? currentPendingTransaction,
         int stableSamples,
-        bool minimumRecoveryAgeReached)
+        bool minimumRecoveryAgeReached,
+        bool managedVirtualPnpDisabled = true)
     {
         if (activePhysicalPaths < 0 ||
             activeManagedVirtualPaths < 0 ||
@@ -404,9 +470,13 @@ internal static class ResumeTopologyClassifier
             !interruptedSessionPending;
         if (physicalOnlyIsHealthy)
         {
-            return stableSamples >= HealthySamplesRequired
+            if (stableSamples < HealthySamplesRequired)
+            {
+                return ResumeTopologyDecision.Wait;
+            }
+            return managedVirtualPnpDisabled
                 ? ResumeTopologyDecision.Healthy
-                : ResumeTopologyDecision.Wait;
+                : ResumeTopologyDecision.ReconcileIdle;
         }
 
         return stableSamples >= RecoverySamplesRequired &&
@@ -448,21 +518,61 @@ internal sealed class HostRecoveryHotkeyWindow : NativeWindow, IDisposable
     private const uint VkF9 = 0x78;
     private const uint VkF10 = 0x79;
     private static readonly TimeSpan ResumeObservationWindow = TimeSpan.FromSeconds(20);
+    private static readonly TimeSpan MaximumResumeRecoveryRuntime =
+        TimeSpan.FromSeconds(60);
     private static readonly TimeSpan ResumeInitialDelay = TimeSpan.FromSeconds(3);
     private static readonly TimeSpan ResumeFollowupDelay = TimeSpan.FromMilliseconds(750);
     private static readonly TimeSpan ResumeSampleInterval = TimeSpan.FromSeconds(1);
     private static readonly TimeSpan MinimumRecoveryAge = TimeSpan.FromSeconds(8);
     private static readonly TimeSpan SuspendDisplayLeaseBudget =
         TimeSpan.FromMilliseconds(1500);
+    private static readonly TimeSpan SunshineAbsentPollInterval =
+        TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan SunshineDisconnectGrace =
+        TimeSpan.FromMilliseconds(1500);
+    private static readonly TimeSpan SunshineExitRecoveryBudget =
+        TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan SunshineRecoveryRetryInterval =
+        TimeSpan.FromSeconds(1);
+    private static readonly TimeSpan SunshineWatcherDisposeWait =
+        TimeSpan.FromSeconds(2);
+    private const int MaximumSunshineConfigurationBytes = 1024 * 1024;
+    private const int MaximumSunshineLogTailBytes = 1024 * 1024;
     private const int ResumeSampleAttempts = 12;
     private const int SuspendActionWaitMilliseconds = 500;
     private const int DisplayActionRunning = 1;
     private readonly HashSet<int> registeredHotkeys = new();
     private readonly List<EventWaitHandle> modeReadinessEvents = new();
     private readonly object resumeInspectionSync = new();
+    private readonly CancellationTokenSource sunshineWatchCancellation = new();
+    private readonly object sunshineLifecycleSync = new();
+    private readonly bool sunshineLifecycleEnabled;
+    private readonly bool legacySunshineLogObserverEnabled;
+    private readonly string? sunshineExecutablePath;
+    private string? sunshineLogPath;
+    private Task sunshineWatchTask = Task.CompletedTask;
+    private FileSystemWatcher? sunshineLogWatcher;
+    private FileSystemWatcher? sunshineRecoveryWatcher;
+    private CancellationTokenSource? sunshineScheduledRecoveryCancellation;
+    private string? sunshineScheduledRecoveryTransaction;
+    private TimeSpan sunshineScheduledRecoveryDelay;
+    private bool sunshineScheduledRecoveryHasNoSessionProof;
+    private bool sunshineScheduledRecoveryProofIsRetractable;
+    private string? sunshineCurrentProcessTransaction;
+    private int? sunshineActiveSessions;
+    private bool sunshineLogSessionStateReliable;
+    private long sunshineLogOffset;
+    private string sunshineLogRemainder = string.Empty;
+    private int sunshineLogReadScheduled;
+    private int sunshineLogReadRequested;
+    private int sunshineLogResetRequested;
+    private int sunshineRecoveryInspectionScheduled;
+    private int sunshineRecoveryInspectionRequested;
+    private int sunshineLogObserverUnavailableRecorded;
     private CancellationTokenSource? resumeInspectionCancellation;
     private DateTimeOffset resumeObservationStartedAt;
     private DateTimeOffset resumeObservationEndsAt;
+    private Stopwatch? resumeRecoveryRuntime;
     private string? resumePendingTransactionAtWake;
     private DisplaySuspendIntentState? currentSuspendIntent;
     private int actionRunning;
@@ -475,8 +585,9 @@ internal sealed class HostRecoveryHotkeyWindow : NativeWindow, IDisposable
         var modifiers = ModAlt | ModControl | ModShift | ModNoRepeat;
         try
         {
+            var settings = HostSettings.Load();
             RegisterRequiredHotkey(RecoverDisplayHotkeyId, modifiers, VkF11, "display-recovery");
-            if (HostRecoveryAgentManager.LegacyModeHotkeysRequired(HostSettings.Load()))
+            if (HostRecoveryAgentManager.LegacyModeHotkeysRequired(settings))
             {
                 RegisterOptionalModeHotkey(
                     Mode960x540HotkeyId,
@@ -493,6 +604,29 @@ internal sealed class HostRecoveryHotkeyWindow : NativeWindow, IDisposable
                     modifiers,
                     VkF10,
                     new VitaDisplayMode(1280, 720, 60));
+            }
+            if (settings.HostMode.Equals(
+                    "sunshine",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                sunshineLifecycleEnabled = true;
+                legacySunshineLogObserverEnabled =
+                    !settings.IntegrateAllSunshineApps;
+                sunshineExecutablePath =
+                    StreamingHostLocator.FindSunshineExecutable();
+                if (legacySunshineLogObserverEnabled)
+                {
+                    var configDirectory = SunshineConfigurator
+                        .ResolveConfigurationDirectory(
+                            settings.SunshineConfigDirectory,
+                            "sunshine");
+                    sunshineLogPath = ResolveSunshineLogPath(
+                        configDirectory,
+                        sunshineExecutablePath);
+                }
+                InitializeSunshineLifecycleWatchers();
+                sunshineWatchTask = WatchSunshineProcessAsync(
+                    sunshineWatchCancellation.Token);
             }
         }
         catch
@@ -521,9 +655,11 @@ internal sealed class HostRecoveryHotkeyWindow : NativeWindow, IDisposable
                 // power event. A session already inside its display
                 // transaction checks it again after activation and restores
                 // physical-only before returning.
-                currentSuspendIntent = null;
-                currentSuspendIntent =
+                var replacementSuspendIntent =
                     DisplaySuspendIntentStore.BeginForCurrentAgent();
+                Interlocked.Exchange(
+                    ref currentSuspendIntent,
+                    replacementSuspendIntent);
                 durableSuspendFencePublished = true;
             }
             catch (Exception error)
@@ -569,6 +705,12 @@ internal sealed class HostRecoveryHotkeyWindow : NativeWindow, IDisposable
                         HostRecoveryActions.PrepareDisplaysForSuspend(
                             SuspendDisplayLeaseBudget);
                     }
+                    catch (Exception error)
+                    {
+                        HostRecoveryActions.RecordUnhandledFailure(
+                            "power-suspend-display-prepare",
+                            error);
+                    }
                     finally
                     {
                         Interlocked.Exchange(ref actionRunning, 0);
@@ -606,13 +748,13 @@ internal sealed class HostRecoveryHotkeyWindow : NativeWindow, IDisposable
             message.Result = new IntPtr(1);
             return;
         }
-        else if (message.Msg == WmDisplayChange && IsResumeObservationOpen())
+        else if (message.Msg == WmDisplayChange)
         {
-            ScheduleResumeInspection("resume-display-change", beginObservation: false);
+            HandleTopologyNotification("resume-display-change");
         }
-        else if (message.Msg == WmDeviceChange && IsResumeObservationOpen())
+        else if (message.Msg == WmDeviceChange)
         {
-            ScheduleResumeInspection("resume-device-change", beginObservation: false);
+            HandleTopologyNotification("resume-device-change");
         }
         if (message.Msg == WmHotkey)
         {
@@ -679,6 +821,37 @@ internal sealed class HostRecoveryHotkeyWindow : NativeWindow, IDisposable
         base.WndProc(ref message);
     }
 
+    private void HandleTopologyNotification(string resumeTrigger)
+    {
+        var resumeObservationOpen = IsResumeObservationOpen();
+        if (resumeObservationOpen)
+        {
+            ScheduleResumeInspection(
+                resumeTrigger,
+                beginObservation: false);
+            return;
+        }
+        if (!sunshineLifecycleEnabled) return;
+        var pendingTransaction = HostRecoveryActions
+            .CapturePendingTransactionMarker();
+        if (ShouldInspectSunshineRecoveryForTopologyEvent(
+                resumeObservationOpen,
+                pendingTransaction))
+        {
+            // Re-enter the existing generation/session classifier instead of
+            // recovering directly from a noisy topology notification. This
+            // safely re-arms a bounded retry after the earlier circuit breaker
+            // while retaining the launch grace for a live/new session.
+            ScheduleSunshineRecoveryInspection();
+        }
+    }
+
+    internal static bool ShouldInspectSunshineRecoveryForTopologyEvent(
+        bool resumeObservationOpen,
+        string? pendingTransaction) =>
+        !resumeObservationOpen &&
+        !string.IsNullOrWhiteSpace(pendingTransaction);
+
     private bool TryAcquireSuspendAction()
     {
         var started = Environment.TickCount64;
@@ -697,10 +870,1066 @@ internal sealed class HostRecoveryHotkeyWindow : NativeWindow, IDisposable
         return false;
     }
 
+    private async Task WatchSunshineProcessAsync(CancellationToken token)
+    {
+        var initialProcessObservationPending = true;
+        try
+        {
+            while (true)
+            {
+                token.ThrowIfCancellationRequested();
+                using var sunshine = FindSunshineProcess();
+                if (sunshine is null)
+                {
+                    if (initialProcessObservationPending)
+                    {
+                        initialProcessObservationPending = false;
+                        var pendingTransaction = HostRecoveryActions
+                            .CapturePendingTransactionMarker();
+                        if (pendingTransaction is not null)
+                        {
+                            ScheduleSunshineRecovery(
+                                pendingTransaction,
+                                TimeSpan.Zero,
+                                "Sunshine was absent when the lifecycle observer started",
+                                hasNoSessionProof: true,
+                                proofIsRetractable: false);
+                        }
+                    }
+                    // Process discovery is the only polling path, and it runs
+                    // only while Sunshine is absent.
+                    await Task.Delay(SunshineAbsentPollInterval, token)
+                        .ConfigureAwait(false);
+                    continue;
+                }
+                initialProcessObservationPending = false;
+
+                lock (sunshineLifecycleSync)
+                {
+                    sunshineCurrentProcessTransaction =
+                        HostRecoveryActions.CapturePendingTransactionMarker();
+                }
+                try
+                {
+                    // Process.WaitForExitAsync registers an OS wait on this
+                    // exact process handle. There is no polling while
+                    // Sunshine is running.
+                    await sunshine.WaitForExitAsync(token)
+                        .ConfigureAwait(false);
+                }
+                catch (InvalidOperationException)
+                {
+                    await Task.Delay(SunshineAbsentPollInterval, token)
+                        .ConfigureAwait(false);
+                    continue;
+                }
+
+                token.ThrowIfCancellationRequested();
+                string? exitedTransaction;
+                lock (sunshineLifecycleSync)
+                {
+                    exitedTransaction = sunshineCurrentProcessTransaction;
+                    sunshineCurrentProcessTransaction = null;
+                    sunshineActiveSessions = null;
+                }
+                exitedTransaction ??= HostRecoveryActions
+                    .CapturePendingTransactionMarker();
+                if (exitedTransaction is not null)
+                {
+                    // A fast service restart does not invalidate the old
+                    // generation. The recovery worker rechecks this exact
+                    // marker under the display lease; a genuinely newer hook
+                    // transaction is therefore never torn down.
+                    ScheduleSunshineRecovery(
+                        exitedTransaction,
+                        TimeSpan.Zero,
+                        "Sunshine process exit",
+                        hasNoSessionProof: true,
+                        proofIsRetractable: false);
+                }
+            }
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested)
+        {
+            // Normal agent shutdown.
+        }
+        catch (Exception error)
+        {
+            HostRecoveryActions.RecordUnhandledFailure(
+                "sunshine-process-watch",
+                error);
+        }
+    }
+
+    private static string? ResolveSunshineLogPath(
+        string configurationDirectory,
+        string? sunshineExecutable)
+    {
+        try
+        {
+            var defaultPath = Path.GetFullPath(Path.Combine(
+                configurationDirectory,
+                "sunshine.log"));
+            var configurationPath = Path.Combine(
+                configurationDirectory,
+                "sunshine.conf");
+            string? configuredLogPath = null;
+            if (File.Exists(configurationPath))
+            {
+                using var stream = new FileStream(
+                    configurationPath,
+                    FileMode.Open,
+                    FileAccess.Read,
+                    FileShare.ReadWrite | FileShare.Delete);
+                if (stream.Length > MaximumSunshineConfigurationBytes)
+                {
+                    return null;
+                }
+                using var reader = new StreamReader(
+                    stream,
+                    Encoding.UTF8,
+                    detectEncodingFromByteOrderMarks: true,
+                    leaveOpen: false);
+                while (reader.ReadLine() is { } line)
+                {
+                    var trimmed = line.Trim();
+                    if (trimmed.Length == 0 ||
+                        trimmed.StartsWith('#'))
+                    {
+                        continue;
+                    }
+                    var separator = trimmed.IndexOf('=');
+                    if (separator <= 0 ||
+                        !trimmed[..separator].Trim().Equals(
+                            "log_path",
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+                    configuredLogPath = trimmed[(separator + 1)..]
+                        .Trim()
+                        .Trim('"');
+                }
+            }
+            if (string.IsNullOrWhiteSpace(configuredLogPath))
+            {
+                return defaultPath;
+            }
+            if (Path.IsPathRooted(configuredLogPath))
+            {
+                return Path.GetFullPath(configuredLogPath);
+            }
+
+            var candidates = new List<string>
+            {
+                Path.GetFullPath(Path.Combine(
+                    configurationDirectory,
+                    configuredLogPath)),
+            };
+            var executableDirectory = string.IsNullOrWhiteSpace(
+                sunshineExecutable)
+                ? null
+                : Path.GetDirectoryName(sunshineExecutable);
+            if (!string.IsNullOrWhiteSpace(executableDirectory))
+            {
+                candidates.Add(Path.GetFullPath(Path.Combine(
+                    executableDirectory,
+                    configuredLogPath)));
+            }
+            var existing = candidates
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Where(File.Exists)
+                .ToArray();
+            if (existing.Length == 1)
+            {
+                return existing[0];
+            }
+            if (configuredLogPath.Equals(
+                    "sunshine.log",
+                    StringComparison.OrdinalIgnoreCase) &&
+                existing.Length == 0)
+            {
+                return defaultPath;
+            }
+            // A custom relative path with no unique existing target is
+            // ambiguous. Do not tail an unproven file or infer a timeout from
+            // it; exact Sunshine-process-exit and suspend recovery remain
+            // armed for the pending transaction.
+            return null;
+        }
+        catch (Exception error) when (
+            error is IOException or
+                UnauthorizedAccessException or
+                ArgumentException or
+                NotSupportedException or
+                System.Security.SecurityException)
+        {
+            return null;
+        }
+    }
+
+    private void InitializeSunshineLifecycleWatchers()
+    {
+        var recoveryDirectory = Path.GetDirectoryName(
+            HostStatePaths.RecoveryFile);
+        if (!string.IsNullOrWhiteSpace(recoveryDirectory) &&
+            Directory.Exists(recoveryDirectory))
+        {
+            sunshineRecoveryWatcher = new FileSystemWatcher(
+                recoveryDirectory,
+                Path.GetFileName(HostStatePaths.RecoveryFile))
+            {
+                NotifyFilter = NotifyFilters.FileName |
+                               NotifyFilters.CreationTime |
+                               NotifyFilters.LastWrite |
+                               NotifyFilters.Size,
+                IncludeSubdirectories = false,
+            };
+            sunshineRecoveryWatcher.Created += OnSunshineRecoveryFileChanged;
+            sunshineRecoveryWatcher.Changed += OnSunshineRecoveryFileChanged;
+            sunshineRecoveryWatcher.Deleted += OnSunshineRecoveryFileChanged;
+            sunshineRecoveryWatcher.Renamed += OnSunshineRecoveryFileRenamed;
+            sunshineRecoveryWatcher.Error += OnSunshineLifecycleWatcherError;
+        }
+
+        if (sunshineRecoveryWatcher is not null)
+        {
+            sunshineRecoveryWatcher.EnableRaisingEvents = true;
+        }
+        ScheduleSunshineRecoveryInspection();
+    }
+
+    private bool ArmSunshineLogWatcher()
+    {
+        lock (sunshineLifecycleSync)
+        {
+            if (sunshineLogWatcher is not null) return true;
+            if (disposed ||
+                sunshineWatchCancellation.IsCancellationRequested ||
+                string.IsNullOrWhiteSpace(sunshineLogPath))
+            {
+                return false;
+            }
+            var logDirectory = Path.GetDirectoryName(sunshineLogPath);
+            if (string.IsNullOrWhiteSpace(logDirectory) ||
+                !Directory.Exists(logDirectory))
+            {
+                return false;
+            }
+
+            var watcher = new FileSystemWatcher(
+                logDirectory,
+                Path.GetFileName(sunshineLogPath))
+            {
+                NotifyFilter = NotifyFilters.FileName |
+                               NotifyFilters.CreationTime |
+                               NotifyFilters.LastWrite |
+                               NotifyFilters.Size,
+                IncludeSubdirectories = false,
+                InternalBufferSize = 8192,
+            };
+            watcher.Created += OnSunshineLogCreated;
+            watcher.Changed += OnSunshineLogChanged;
+            watcher.Deleted += OnSunshineLogCreated;
+            watcher.Renamed += OnSunshineLogRenamed;
+            watcher.Error += OnSunshineLifecycleWatcherError;
+            sunshineLogWatcher = watcher;
+            ReadSunshineLogBaseline();
+            watcher.EnableRaisingEvents = true;
+        }
+        ScheduleSunshineLogRead(reset: false);
+        return true;
+    }
+
+    private void DisarmSunshineLogWatcher()
+    {
+        FileSystemWatcher? watcher;
+        lock (sunshineLifecycleSync)
+        {
+            watcher = sunshineLogWatcher;
+            sunshineLogWatcher = null;
+            sunshineActiveSessions = null;
+            sunshineLogSessionStateReliable = false;
+            sunshineLogOffset = 0;
+            sunshineLogRemainder = string.Empty;
+        }
+        watcher?.Dispose();
+    }
+
+    private void OnSunshineRecoveryFileChanged(
+        object sender,
+        FileSystemEventArgs args) =>
+        ScheduleSunshineRecoveryInspection();
+
+    private void OnSunshineRecoveryFileRenamed(
+        object sender,
+        RenamedEventArgs args) =>
+        ScheduleSunshineRecoveryInspection();
+
+    /*
+     * This requested-plus-scheduled drain intentionally mirrors the log-tail
+     * reader below. FileSystemWatcher does not queue reliable one-for-one
+     * notifications; correctness comes from re-reading durable state after
+     * every observed edge, including an edge that races worker teardown.
+     */
+    private void ScheduleSunshineRecoveryInspection()
+    {
+        if (disposed ||
+            sunshineWatchCancellation.IsCancellationRequested)
+        {
+            return;
+        }
+        Interlocked.Exchange(
+            ref sunshineRecoveryInspectionRequested,
+            1);
+        if (Interlocked.CompareExchange(
+                ref sunshineRecoveryInspectionScheduled,
+                1,
+                0) != 0)
+        {
+            return;
+        }
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                while (!disposed &&
+                       !sunshineWatchCancellation.IsCancellationRequested &&
+                       Interlocked.Exchange(
+                           ref sunshineRecoveryInspectionRequested,
+                           0) != 0)
+                {
+                    // Coalesce the create/write/rename burst produced by one
+                    // atomic journal publication without dropping a later
+                    // generation that arrives while this inspection runs.
+                    await Task.Delay(
+                            TimeSpan.FromMilliseconds(100),
+                            sunshineWatchCancellation.Token)
+                        .ConfigureAwait(false);
+                    InspectSunshineRecoveryMarker();
+                }
+            }
+            catch (OperationCanceledException) when (
+                sunshineWatchCancellation.IsCancellationRequested)
+            {
+                // Normal shutdown.
+            }
+            finally
+            {
+                Interlocked.Exchange(
+                    ref sunshineRecoveryInspectionScheduled,
+                    0);
+                // Close the event-arrived-between-last-exchange-and-clear
+                // race. The next worker again drains every requested edge.
+                if (!disposed &&
+                    !sunshineWatchCancellation.IsCancellationRequested &&
+                    Volatile.Read(
+                        ref sunshineRecoveryInspectionRequested) != 0)
+                {
+                    ScheduleSunshineRecoveryInspection();
+                }
+            }
+        });
+    }
+
+    private void InspectSunshineRecoveryMarker()
+    {
+        var marker = HostRecoveryActions.CapturePendingTransactionMarker();
+        lock (sunshineLifecycleSync)
+        {
+            sunshineCurrentProcessTransaction = marker;
+        }
+        if (marker is null)
+        {
+            CancelScheduledSunshineRecovery();
+            DisarmSunshineLogWatcher();
+            HostRecoveryActions.DiscardStaleStreamBoundaryLease();
+            return;
+        }
+
+        // The exact authenticated client/generation lease is authoritative.
+        // The supported all-app path intentionally does not tail Sunshine's
+        // log: lease expiry and an exact Sunshine process exit are sufficient
+        // to recover, without forcing INFO logging or processing every global
+        // client lifecycle record.
+        ScheduleSunshineRecovery(
+            marker,
+            HostRecoveryActions.GetStreamBoundaryRecoveryDelay(marker),
+            "authenticated Vita stream lease expired",
+            hasNoSessionProof: false,
+            proofIsRetractable: false);
+        if (!legacySunshineLogObserverEnabled)
+        {
+            return;
+        }
+        if (!ArmSunshineLogWatcher())
+        {
+            if (Interlocked.CompareExchange(
+                    ref sunshineLogObserverUnavailableRecorded,
+                    1,
+                    0) == 0)
+            {
+                HostRecoveryActions.RecordSunshineExitDecision(
+                    false,
+                    "A Vita display transaction appeared, but Sunshine's configured session log path was missing or ambiguous. The observer left the active transaction unchanged; process-exit recovery remains armed. Repair Sunshine logging before relying on disconnect cleanup.");
+            }
+            return;
+        }
+        Interlocked.Exchange(
+            ref sunshineLogObserverUnavailableRecorded,
+            0);
+    }
+
+    private void OnSunshineLogChanged(
+        object sender,
+        FileSystemEventArgs args) =>
+        ScheduleSunshineLogRead(reset: false);
+
+    private void OnSunshineLogCreated(
+        object sender,
+        FileSystemEventArgs args) =>
+        ScheduleSunshineLogRead(reset: true);
+
+    private void OnSunshineLogRenamed(
+        object sender,
+        RenamedEventArgs args) =>
+        ScheduleSunshineLogRead(reset: true);
+
+    private void OnSunshineLifecycleWatcherError(
+        object sender,
+        ErrorEventArgs args)
+    {
+        if (HostRecoveryActions.CapturePendingTransactionMarker() is null)
+        {
+            return;
+        }
+        lock (sunshineLifecycleSync)
+        {
+            sunshineLogSessionStateReliable = false;
+        }
+        ScheduleSunshineRecoveryInspection();
+        if (legacySunshineLogObserverEnabled)
+        {
+            ScheduleSunshineLogRead(reset: true);
+        }
+        if (Interlocked.CompareExchange(
+                ref sunshineLogObserverUnavailableRecorded,
+                1,
+                0) == 0)
+        {
+            HostRecoveryActions.RecordSunshineExitDecision(
+                false,
+                $"Sunshine lifecycle filesystem notification became unavailable: {args.GetException()?.Message ?? "unknown watcher error"}. The observer left any active transaction unchanged; process-exit recovery remains armed.");
+        }
+    }
+
+    private void ScheduleSunshineLogRead(bool reset)
+    {
+        if (disposed || sunshineWatchCancellation.IsCancellationRequested)
+        {
+            return;
+        }
+        if (HostRecoveryActions.CapturePendingTransactionMarker() is null)
+        {
+            return;
+        }
+        if (reset)
+        {
+            Interlocked.Exchange(ref sunshineLogResetRequested, 1);
+        }
+        Interlocked.Exchange(ref sunshineLogReadRequested, 1);
+        if (Interlocked.CompareExchange(
+                ref sunshineLogReadScheduled,
+                1,
+                0) != 0)
+        {
+            return;
+        }
+
+        _ = Task.Run(() =>
+        {
+            try
+            {
+                while (!disposed &&
+                       !sunshineWatchCancellation.IsCancellationRequested &&
+                       HostRecoveryActions.CapturePendingTransactionMarker() is not null &&
+                       Interlocked.Exchange(
+                           ref sunshineLogReadRequested,
+                           0) != 0)
+                {
+                    ReadAppendedSunshineLog();
+                }
+            }
+            catch (Exception error) when (
+                error is IOException or
+                    UnauthorizedAccessException or
+                    InvalidDataException or
+                    System.ComponentModel.Win32Exception)
+            {
+                lock (sunshineLifecycleSync)
+                {
+                    sunshineLogSessionStateReliable = false;
+                }
+                if (Interlocked.CompareExchange(
+                        ref sunshineLogObserverUnavailableRecorded,
+                        1,
+                        0) == 0)
+                {
+                    HostRecoveryActions.RecordSunshineExitDecision(
+                        false,
+                        $"Sunshine's session log could not be read: {error.Message}. The observer left any active transaction unchanged; process-exit recovery remains armed.");
+                }
+            }
+            finally
+            {
+                Interlocked.Exchange(ref sunshineLogReadScheduled, 0);
+                if (Volatile.Read(ref sunshineLogReadRequested) != 0)
+                {
+                    ScheduleSunshineLogRead(reset: false);
+                }
+            }
+        });
+    }
+
+    private void ReadSunshineLogBaseline()
+    {
+        if (string.IsNullOrWhiteSpace(sunshineLogPath) ||
+            !File.Exists(sunshineLogPath))
+        {
+            return;
+        }
+        var snapshot = ReadSunshineLogRange(
+            sunshineLogPath,
+            startAt: null,
+            out var length,
+            out var beganMidFile);
+        sunshineLogOffset = length;
+        sunshineLogRemainder = ExtractCompleteLogLines(
+            snapshot,
+            beganMidFile,
+            out var lines);
+
+        var currentProcessStart = -1;
+        for (var index = 0; index < lines.Count; index++)
+        {
+            if (lines[index].Contains(
+                    "Sunshine version",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                currentProcessStart = index;
+            }
+        }
+        int? reconstructedSessions = null;
+        for (var index = Math.Max(0, currentProcessStart);
+             index < lines.Count;
+             index++)
+        {
+            ApplySunshineSessionLine(
+                lines[index],
+                ref reconstructedSessions,
+                scheduleRecovery: false);
+        }
+        lock (sunshineLifecycleSync)
+        {
+            sunshineActiveSessions = reconstructedSessions;
+            sunshineLogSessionStateReliable =
+                !beganMidFile || currentProcessStart >= 0;
+            sunshineCurrentProcessTransaction = HostRecoveryActions
+                .CapturePendingTransactionMarker();
+        }
+    }
+
+    private void ReadAppendedSunshineLog()
+    {
+        if (string.IsNullOrWhiteSpace(sunshineLogPath) ||
+            !File.Exists(sunshineLogPath))
+        {
+            return;
+        }
+        var reset = Interlocked.Exchange(
+            ref sunshineLogResetRequested,
+            0) != 0;
+        var currentLength = new FileInfo(sunshineLogPath).Length;
+        if (reset || currentLength < sunshineLogOffset)
+        {
+            sunshineLogOffset = 0;
+            sunshineLogRemainder = string.Empty;
+            lock (sunshineLifecycleSync)
+            {
+                sunshineActiveSessions = null;
+                sunshineLogSessionStateReliable = false;
+            }
+        }
+        if (currentLength == sunshineLogOffset)
+        {
+            return;
+        }
+
+        var snapshot = ReadSunshineLogRange(
+            sunshineLogPath,
+            sunshineLogOffset,
+            out var length,
+            out var beganMidFile);
+        sunshineLogOffset = length;
+        var combined = beganMidFile
+            ? snapshot
+            : sunshineLogRemainder + snapshot;
+        if (beganMidFile)
+        {
+            lock (sunshineLifecycleSync)
+            {
+                sunshineActiveSessions = null;
+                sunshineLogSessionStateReliable = false;
+            }
+        }
+        sunshineLogRemainder = ExtractCompleteLogLines(
+            combined,
+            beganMidFile,
+            out var lines);
+        foreach (var line in lines)
+        {
+            HandleSunshineSessionLine(line);
+        }
+    }
+
+    private static string ReadSunshineLogRange(
+        string path,
+        long? startAt,
+        out long length,
+        out bool beganMidFile)
+    {
+        using var stream = new FileStream(
+            path,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete);
+        length = stream.Length;
+        var requestedStart = startAt ?? Math.Max(
+            0,
+            length - MaximumSunshineLogTailBytes);
+        var actualStart = Math.Max(
+            requestedStart,
+            length - MaximumSunshineLogTailBytes);
+        beganMidFile = actualStart > 0 && actualStart != startAt;
+        stream.Position = actualStart;
+        var bytesToRead = checked((int)Math.Min(
+            MaximumSunshineLogTailBytes,
+            length - actualStart));
+        var buffer = new byte[bytesToRead];
+        var read = 0;
+        while (read < buffer.Length)
+        {
+            var received = stream.Read(buffer, read, buffer.Length - read);
+            if (received == 0) break;
+            read += received;
+        }
+        return Encoding.UTF8.GetString(buffer, 0, read);
+    }
+
+    private static string ExtractCompleteLogLines(
+        string content,
+        bool discardFirstPartial,
+        out IReadOnlyList<string> lines)
+    {
+        var split = content.Split('\n');
+        var completeCount = content.EndsWith('\n')
+            ? split.Length - 1
+            : split.Length - 1;
+        var first = discardFirstPartial && completeCount > 0 ? 1 : 0;
+        lines = split
+            .Skip(first)
+            .Take(Math.Max(0, completeCount - first))
+            .Select(line => line.TrimEnd('\r'))
+            .ToArray();
+        return content.EndsWith('\n')
+            ? string.Empty
+            : split[^1];
+    }
+
+    private void HandleSunshineSessionLine(string line)
+    {
+        int? activeSessions;
+        lock (sunshineLifecycleSync)
+        {
+            activeSessions = sunshineActiveSessions;
+        }
+        ApplySunshineSessionLine(
+            line,
+            ref activeSessions,
+            scheduleRecovery: true);
+        lock (sunshineLifecycleSync)
+        {
+            sunshineActiveSessions = activeSessions;
+        }
+    }
+
+    private void ApplySunshineSessionLine(
+        string line,
+        ref int? activeSessions,
+        bool scheduleRecovery)
+    {
+        if (line.Contains(
+                "Sunshine version",
+                StringComparison.OrdinalIgnoreCase))
+        {
+            activeSessions = null;
+            lock (sunshineLifecycleSync)
+            {
+                sunshineCurrentProcessTransaction = null;
+                sunshineLogSessionStateReliable = true;
+            }
+            return;
+        }
+        if (TryReadSunshineActiveSessionCount(line, out var reported))
+        {
+            activeSessions = reported;
+            var startMarker = HostRecoveryActions
+                .CapturePendingTransactionMarker();
+            lock (sunshineLifecycleSync)
+            {
+                sunshineCurrentProcessTransaction = startMarker;
+                sunshineLogSessionStateReliable = true;
+            }
+            // A Sunshine-wide count includes unrelated Moonlight clients.
+            // Never cancel the exact Vita lease deadline because it is
+            // nonzero. It does invalidate an earlier global-zero proof,
+            // though, so downgrade only that proof back to the lease timer.
+            if (scheduleRecovery && reported > 0 && startMarker is not null)
+            {
+                ReconcileSunshineRecoveryAfterSessionStart(startMarker);
+            }
+            return;
+        }
+        if (!line.Contains(
+                "CLIENT DISCONNECTED",
+                StringComparison.OrdinalIgnoreCase) ||
+            activeSessions is not > 0)
+        {
+            return;
+        }
+
+        activeSessions--;
+        if (!scheduleRecovery || activeSessions != 0)
+        {
+            return;
+        }
+        string? disconnectMarker;
+        lock (sunshineLifecycleSync)
+        {
+            disconnectMarker = sunshineCurrentProcessTransaction;
+        }
+        disconnectMarker ??= HostRecoveryActions
+            .CapturePendingTransactionMarker();
+        if (disconnectMarker is not null)
+        {
+            ScheduleSunshineRecovery(
+                disconnectMarker,
+                SunshineDisconnectGrace,
+                "last Sunshine client disconnect",
+                hasNoSessionProof: true,
+                proofIsRetractable: true);
+        }
+    }
+
+    private static bool TryReadSunshineActiveSessionCount(
+        string line,
+        out int count)
+    {
+        count = 0;
+        const string prefix =
+            "New streaming session started [active sessions:";
+        var start = line.IndexOf(prefix, StringComparison.OrdinalIgnoreCase);
+        if (start < 0) return false;
+        start += prefix.Length;
+        var end = line.IndexOf(']', start);
+        if (end < 0) return false;
+        return int.TryParse(line[start..end].Trim(), out count) &&
+               count >= 0;
+    }
+
+    private void ScheduleSunshineRecovery(
+        string expectedTransaction,
+        TimeSpan delay,
+        string reason,
+        bool hasNoSessionProof,
+        bool proofIsRetractable)
+    {
+        if (disposed ||
+            sunshineWatchCancellation.IsCancellationRequested ||
+            string.IsNullOrWhiteSpace(expectedTransaction))
+        {
+            return;
+        }
+        var cancellation = CancellationTokenSource
+            .CreateLinkedTokenSource(sunshineWatchCancellation.Token);
+        lock (sunshineLifecycleSync)
+        {
+            if (sunshineScheduledRecoveryCancellation is not null &&
+                string.Equals(
+                    sunshineScheduledRecoveryTransaction,
+                    expectedTransaction,
+                    StringComparison.Ordinal) &&
+                sunshineScheduledRecoveryDelay <= delay &&
+                (sunshineScheduledRecoveryHasNoSessionProof ||
+                 !hasNoSessionProof))
+            {
+                cancellation.Dispose();
+                return;
+            }
+            sunshineScheduledRecoveryCancellation?.Cancel();
+            sunshineScheduledRecoveryCancellation = cancellation;
+            sunshineScheduledRecoveryTransaction = expectedTransaction;
+            sunshineScheduledRecoveryDelay = delay;
+            sunshineScheduledRecoveryHasNoSessionProof =
+                hasNoSessionProof;
+            sunshineScheduledRecoveryProofIsRetractable =
+                proofIsRetractable;
+        }
+        _ = Task.Run(() => RunScheduledSunshineRecoveryAsync(
+            expectedTransaction,
+            delay,
+            reason,
+            hasNoSessionProof,
+            cancellation));
+    }
+
+    private async Task RunScheduledSunshineRecoveryAsync(
+        string expectedTransaction,
+        TimeSpan delay,
+        string reason,
+        bool hasNoSessionProof,
+        CancellationTokenSource cancellation)
+    {
+        var token = cancellation.Token;
+        try
+        {
+            if (delay > TimeSpan.Zero)
+            {
+                await Task.Delay(delay, token).ConfigureAwait(false);
+            }
+            Stopwatch? recoveryRuntime = null;
+            while (true)
+            {
+                var liveLeaseDelay = hasNoSessionProof
+                    ? TimeSpan.Zero
+                    : HostRecoveryActions
+                        .GetStreamBoundaryRecoveryDelay(
+                            expectedTransaction);
+                if (liveLeaseDelay > TimeSpan.Zero)
+                {
+                    recoveryRuntime = null;
+                    await Task.Delay(liveLeaseDelay, token)
+                        .ConfigureAwait(false);
+                    continue;
+                }
+                if (TryRecoverAfterSunshineExit(
+                        expectedTransaction,
+                        reason,
+                        hasNoSessionProof,
+                        token))
+                {
+                    return;
+                }
+                recoveryRuntime ??= Stopwatch.StartNew();
+                if (recoveryRuntime.Elapsed >= SunshineExitRecoveryBudget)
+                {
+                    HostRecoveryActions.RecordSunshineExitDecision(
+                        false,
+                        $"{reason} left a Vita display transaction, but automatic idle recovery either failed or could not acquire the display transaction during the bounded 30-second cleanup window. Automatic cleanup stopped without changing that transaction.");
+                    return;
+                }
+                await Task.Delay(SunshineRecoveryRetryInterval, token)
+                    .ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested)
+        {
+            // A reconnect, newer marker, or agent shutdown superseded this
+            // exact recovery generation.
+        }
+        finally
+        {
+            lock (sunshineLifecycleSync)
+            {
+                if (ReferenceEquals(
+                        sunshineScheduledRecoveryCancellation,
+                        cancellation))
+                {
+                    sunshineScheduledRecoveryCancellation = null;
+                    sunshineScheduledRecoveryTransaction = null;
+                    sunshineScheduledRecoveryDelay = TimeSpan.Zero;
+                    sunshineScheduledRecoveryHasNoSessionProof = false;
+                    sunshineScheduledRecoveryProofIsRetractable = false;
+                }
+            }
+            cancellation.Dispose();
+        }
+    }
+
+    private void CancelScheduledSunshineRecovery()
+    {
+        lock (sunshineLifecycleSync)
+        {
+            sunshineScheduledRecoveryCancellation?.Cancel();
+            sunshineScheduledRecoveryCancellation = null;
+            sunshineScheduledRecoveryTransaction = null;
+            sunshineScheduledRecoveryDelay = TimeSpan.Zero;
+            sunshineScheduledRecoveryHasNoSessionProof = false;
+            sunshineScheduledRecoveryProofIsRetractable = false;
+        }
+    }
+
+    private void ReconcileSunshineRecoveryAfterSessionStart(
+        string expectedTransaction)
+    {
+        CancellationTokenSource? retractable = null;
+        lock (sunshineLifecycleSync)
+        {
+            if (sunshineScheduledRecoveryProofIsRetractable &&
+                string.Equals(
+                    sunshineScheduledRecoveryTransaction,
+                    expectedTransaction,
+                    StringComparison.Ordinal))
+            {
+                retractable = sunshineScheduledRecoveryCancellation;
+                sunshineScheduledRecoveryCancellation = null;
+                sunshineScheduledRecoveryTransaction = null;
+                sunshineScheduledRecoveryDelay = TimeSpan.Zero;
+                sunshineScheduledRecoveryHasNoSessionProof = false;
+                sunshineScheduledRecoveryProofIsRetractable = false;
+            }
+        }
+        retractable?.Cancel();
+        ScheduleSunshineRecovery(
+            expectedTransaction,
+            HostRecoveryActions.GetStreamBoundaryRecoveryDelay(
+                expectedTransaction),
+            "authenticated Vita stream lease expired",
+            hasNoSessionProof: false,
+            proofIsRetractable: false);
+    }
+
+    private bool TryRecoverAfterSunshineExit(
+        string expectedTransaction,
+        string reason,
+        bool hasNoSessionProof,
+        CancellationToken token)
+    {
+        if (token.IsCancellationRequested ||
+            disposed ||
+            Volatile.Read(ref suspendPending) != 0 ||
+            !HostRecoveryActions.IsSunshineExitRecoveryAllowed() ||
+            !string.Equals(
+                HostRecoveryActions.CapturePendingTransactionMarker(),
+                expectedTransaction,
+                StringComparison.Ordinal))
+        {
+            return true;
+        }
+        if (Interlocked.CompareExchange(
+                ref actionRunning,
+                DisplayActionRunning,
+                0) != 0)
+        {
+            return false;
+        }
+
+        try
+        {
+            if (token.IsCancellationRequested ||
+                disposed ||
+                Volatile.Read(ref suspendPending) != 0)
+            {
+                return true;
+            }
+            return HostRecoveryActions.TryRecoverAfterSunshineExit(
+                expectedTransaction,
+                reason,
+                hasNoSessionProof);
+        }
+        finally
+        {
+            try
+            {
+                if (Volatile.Read(ref suspendPending) != 0)
+                {
+                    HostRecoveryActions.PrepareDisplaysForSuspend(
+                        SuspendDisplayLeaseBudget);
+                }
+            }
+            finally
+            {
+                Interlocked.Exchange(ref actionRunning, 0);
+            }
+        }
+    }
+
+    private Process? FindSunshineProcess()
+    {
+        Process[] candidates;
+        try
+        {
+            candidates = Process.GetProcessesByName("sunshine");
+        }
+        catch (Exception error) when (
+            error is InvalidOperationException or
+                System.ComponentModel.Win32Exception or
+                PlatformNotSupportedException)
+        {
+            return null;
+        }
+
+        Process? selected = null;
+        foreach (var candidate in candidates)
+        {
+            try
+            {
+                if (selected is not null || candidate.HasExited)
+                {
+                    continue;
+                }
+                if (!string.IsNullOrWhiteSpace(sunshineExecutablePath))
+                {
+                    var imagePath = candidate.MainModule?.FileName;
+                    if (string.IsNullOrWhiteSpace(imagePath) ||
+                        !string.Equals(
+                            Path.GetFullPath(imagePath),
+                            sunshineExecutablePath,
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+                }
+                selected = candidate;
+            }
+            catch (Exception error) when (
+                error is InvalidOperationException or
+                    System.ComponentModel.Win32Exception or
+                    NotSupportedException or
+                    IOException or
+                    UnauthorizedAccessException)
+            {
+                // Keep polling while absent rather than binding the recovery
+                // agent to a process whose image Windows would not identify.
+            }
+            finally
+            {
+                if (!ReferenceEquals(candidate, selected))
+                {
+                    candidate.Dispose();
+                }
+            }
+        }
+        return selected;
+    }
+
     public void Dispose()
     {
         if (disposed) return;
         disposed = true;
+        sunshineWatchCancellation.Cancel();
+        StopSunshineLifecycleWatchers();
         StopResumeObservation();
         if (Handle != IntPtr.Zero)
         {
@@ -717,13 +1946,58 @@ internal sealed class HostRecoveryHotkeyWindow : NativeWindow, IDisposable
             readiness.Dispose();
         }
         modeReadinessEvents.Clear();
+        StopSunshineWatcher();
+    }
+
+    private void StopSunshineLifecycleWatchers()
+    {
+        CancelScheduledSunshineRecovery();
+        DisarmSunshineLogWatcher();
+        var recoveryWatcher = Interlocked.Exchange(
+            ref sunshineRecoveryWatcher,
+            null);
+        recoveryWatcher?.Dispose();
+    }
+
+    private void StopSunshineWatcher()
+    {
+        try
+        {
+            sunshineWatchTask.Wait(SunshineWatcherDisposeWait);
+        }
+        catch (AggregateException error) when (
+            error.InnerExceptions.All(inner =>
+                inner is OperationCanceledException))
+        {
+            // Cancellation is the normal shutdown path.
+        }
+
+        if (sunshineWatchTask.IsCompleted)
+        {
+            sunshineWatchCancellation.Dispose();
+            return;
+        }
+
+        _ = sunshineWatchTask.ContinueWith(
+            (completed, state) =>
+            {
+                _ = completed.Exception;
+                ((CancellationTokenSource)state!).Dispose();
+            },
+            sunshineWatchCancellation,
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
     }
 
     private bool IsResumeObservationOpen()
     {
         lock (resumeInspectionSync)
         {
-            return !disposed && DateTimeOffset.UtcNow < resumeObservationEndsAt;
+            return !disposed &&
+                   resumeRecoveryRuntime is { } runtime &&
+                   runtime.Elapsed < MaximumResumeRecoveryRuntime &&
+                   DateTimeOffset.UtcNow < resumeObservationEndsAt;
         }
     }
 
@@ -737,7 +2011,7 @@ internal sealed class HostRecoveryHotkeyWindow : NativeWindow, IDisposable
         DateTimeOffset observationStartedAt;
         string? pendingTransactionAtWake;
         var currentPendingTransaction = beginObservation
-            ? CapturePendingTransactionMarker()
+            ? HostRecoveryActions.CapturePendingTransactionMarker()
             : null;
         lock (resumeInspectionSync)
         {
@@ -754,20 +2028,37 @@ internal sealed class HostRecoveryHotkeyWindow : NativeWindow, IDisposable
             {
                 resumeObservationStartedAt = now;
                 resumeObservationEndsAt = now + ResumeObservationWindow;
+                resumeRecoveryRuntime = Stopwatch.StartNew();
                 resumePendingTransactionAtWake = currentPendingTransaction;
             }
-            else if (now >= resumeObservationEndsAt)
+            else
             {
-                if (Volatile.Read(ref currentSuspendIntent) is null)
+                var runtime = resumeRecoveryRuntime;
+                if (runtime is null ||
+                    runtime.Elapsed >= MaximumResumeRecoveryRuntime)
                 {
                     return false;
                 }
-                // A live durable suspend token must not become a permanent
-                // block merely because another process held session.lock past
-                // the ordinary topology-observation window. Keep bounded
-                // individual attempts, but continue them until physical-only
-                // verification commits the token or the agent exits.
-                resumeObservationEndsAt = now + ResumeObservationWindow;
+                if (now >= resumeObservationEndsAt)
+                {
+                    if (Volatile.Read(ref currentSuspendIntent) is null)
+                    {
+                        return false;
+                    }
+                    // A live durable suspend token must not become a permanent
+                    // block merely because another process held session.lock
+                    // past the ordinary topology-observation window. Extend
+                    // individual attempts only inside the absolute recovery
+                    // budget. If that budget expires, the durable token stays
+                    // in place and blocks display mutation without continuing
+                    // background churn.
+                    var remaining =
+                        MaximumResumeRecoveryRuntime - runtime.Elapsed;
+                    resumeObservationEndsAt = now +
+                        (remaining < ResumeObservationWindow
+                            ? remaining
+                            : ResumeObservationWindow);
+                }
             }
 
             previous = resumeInspectionCancellation;
@@ -814,7 +2105,8 @@ internal sealed class HostRecoveryHotkeyWindow : NativeWindow, IDisposable
                             0,
                             PhysicalDisplayModeRepairResult.Empty,
                             pendingTransactionAtWake,
-                            "suspend-fence-pending"),
+                            ManagedVirtualPnpDisabled: false,
+                            Signature: "suspend-fence-pending"),
                         hardDeadlineReached: false,
                         cancellation)
                     .ConfigureAwait(false);
@@ -888,8 +2180,10 @@ internal sealed class HostRecoveryHotkeyWindow : NativeWindow, IDisposable
                     pendingTransactionAtWake,
                     snapshot.PendingTransactionMarker,
                     stableSamples,
-                    observationAge >= MinimumRecoveryAge);
-                if (decision == ResumeTopologyDecision.Healthy)
+                    observationAge >= MinimumRecoveryAge,
+                    snapshot.ManagedVirtualPnpDisabled);
+                if (decision is ResumeTopologyDecision.Healthy or
+                    ResumeTopologyDecision.ReconcileIdle)
                 {
                     // Finalize even a healthy observation under the shared
                     // display lease. This is where an unambiguous Windows
@@ -1158,7 +2452,50 @@ internal sealed class HostRecoveryHotkeyWindow : NativeWindow, IDisposable
                 pendingTransactionAtWake,
                 confirmed.PendingTransactionMarker,
                 ResumeTopologyClassifier.RecoverySamplesRequired,
-                minimumRecoveryAgeReached: true);
+                minimumRecoveryAgeReached: true,
+                confirmed.ManagedVirtualPnpDisabled);
+            if (decision == ResumeTopologyDecision.ReconcileIdle)
+            {
+                try
+                {
+                    var idle = ManagedVirtualDisplayRuntime
+                        .ReconcileIdleLocked(
+                            heldTransaction,
+                            requireManagedDevice: false);
+                    if (StopResumeObservation(
+                            cancelCurrentInspection: false,
+                            expectedCurrent: cancellation))
+                    {
+                        HostRecoveryActions.RecordResumeDecision(
+                            trigger,
+                            true,
+                            "Windows resumed to a physical-only topology, but the managed Vita VDD was still PnP-enabled; " +
+                            $"reconciled and verified idle for {string.Join(", ", idle.PhysicalDisplays)}.");
+                    }
+                }
+                catch (Exception error)
+                {
+                    if (!hardDeadlineReached &&
+                        ScheduleResumeInspection(
+                            "resume-pnp-idle-retry",
+                            beginObservation: false,
+                            expectedCurrent: cancellation))
+                    {
+                        return;
+                    }
+                    if (StopResumeObservation(
+                            cancelCurrentInspection: false,
+                            expectedCurrent: cancellation))
+                    {
+                        HostRecoveryActions.RecordResumeDecision(
+                            trigger,
+                            false,
+                            "Windows resumed with the managed Vita VDD still PnP-enabled, and idle reconciliation failed: " +
+                            error.Message);
+                    }
+                }
+                return;
+            }
             if (decision != ResumeTopologyDecision.Recover)
             {
                 token.ThrowIfCancellationRequested();
@@ -1244,7 +2581,10 @@ internal sealed class HostRecoveryHotkeyWindow : NativeWindow, IDisposable
         var activeOtherVirtual = active.Count(display =>
             DisplayTopologyService.IsLikelyVirtualDisplay(display) &&
             !DisplayTopologyService.IsManagedVirtualDisplay(display));
-        var pendingTransactionMarker = CapturePendingTransactionMarker();
+        var pendingTransactionMarker = HostRecoveryActions
+            .CapturePendingTransactionMarker();
+        var managedVirtualPnpDisabled = HostRecoveryActions
+            .AreManagedVirtualDisplayDevicesDisabledForResume();
         var pathSignature = string.Join(
             "|",
             active
@@ -1259,33 +2599,8 @@ internal sealed class HostRecoveryHotkeyWindow : NativeWindow, IDisposable
             activeOtherVirtual,
             modeRepair,
             pendingTransactionMarker,
-            $"{pendingTransactionMarker ?? "<none>"}:{pathSignature}");
-    }
-
-    private static string? CapturePendingTransactionMarker()
-    {
-        if (!File.Exists(HostStatePaths.RecoveryFile)) return null;
-        try
-        {
-            var recovery = new DisplayTopologyService().LoadRecovery();
-            return $"{recovery.CapturedAt.UtcDateTime.Ticks}:" +
-                   $"{recovery.RequestedWidth}x{recovery.RequestedHeight}x{recovery.RequestedFps}";
-        }
-        catch
-        {
-            // A malformed record still identifies interrupted work. File
-            // metadata lets a later valid/new transaction be distinguished
-            // without trusting or applying the malformed content.
-            try
-            {
-                var information = new FileInfo(HostStatePaths.RecoveryFile);
-                return $"unreadable:{information.LastWriteTimeUtc.Ticks}:{information.Length}";
-            }
-            catch
-            {
-                return "present-unreadable";
-            }
-        }
+            managedVirtualPnpDisabled,
+            $"{pendingTransactionMarker ?? "<none>"}:{managedVirtualPnpDisabled}:{pathSignature}");
     }
 
     private bool IsCurrentResumeInspection(
@@ -1315,6 +2630,7 @@ internal sealed class HostRecoveryHotkeyWindow : NativeWindow, IDisposable
                 return false;
             }
             resumeObservationEndsAt = DateTimeOffset.MinValue;
+            resumeRecoveryRuntime = null;
             resumePendingTransactionAtWake = null;
             cancellation = resumeInspectionCancellation;
             if (cancelCurrentInspection)
@@ -1348,11 +2664,13 @@ internal sealed class HostRecoveryHotkeyWindow : NativeWindow, IDisposable
         int ActiveOtherVirtualPaths,
         PhysicalDisplayModeRepairResult ModeRepair,
         string? PendingTransactionMarker,
+        bool ManagedVirtualPnpDisabled,
         string Signature)
     {
         internal string Summary =>
             $"active paths={ActivePaths}, physical={ActivePhysicalPaths}, " +
             $"managed Vita VDD={ActiveManagedVirtualPaths}, other virtual={ActiveOtherVirtualPaths}, " +
+            $"managed Vita VDD PnP disabled={ManagedVirtualPnpDisabled.ToString().ToLowerInvariant()}, " +
             $"restored physical modes={ModeRepair.RestoredModes.Count}, " +
             $"mode-repair warnings={ModeRepair.Warnings.Count}" +
             (ModeRepair.Warnings.Count == 0
@@ -1421,7 +2739,289 @@ internal sealed class HostRecoveryHotkeyWindow : NativeWindow, IDisposable
 internal static class HostRecoveryActions
 {
     private const long MaximumRescueLogBytes = 512 * 1024;
+    private const int MaximumUnfencedSuspendFallbackAttempts = 128;
+    private static readonly TimeSpan SunshineExitDisplayLeaseWait =
+        TimeSpan.FromMilliseconds(750);
+    private static readonly TimeSpan MaximumUnfencedSuspendFallbackRuntime =
+        TimeSpan.FromSeconds(45);
+    private static readonly TimeSpan MaximumUnfencedPostResumeRecoveryRuntime =
+        TimeSpan.FromSeconds(30);
     private static int unfencedSuspendFallbackRunning;
+
+    internal static string? CapturePendingTransactionMarker()
+    {
+        if (!File.Exists(HostStatePaths.RecoveryFile)) return null;
+        try
+        {
+            var recovery = new DisplayTopologyService().LoadRecovery();
+            return $"{recovery.CapturedAt.UtcDateTime.Ticks}:" +
+                   $"{recovery.RequestedWidth}x{recovery.RequestedHeight}x{recovery.RequestedFps}";
+        }
+        catch
+        {
+            // A malformed record still identifies interrupted work. File
+            // metadata lets a later valid/new transaction be distinguished
+            // without trusting or applying the malformed content.
+            try
+            {
+                var information = new FileInfo(HostStatePaths.RecoveryFile);
+                return $"unreadable:{information.LastWriteTimeUtc.Ticks}:{information.Length}";
+            }
+            catch
+            {
+                return "present-unreadable";
+            }
+        }
+    }
+
+    internal static DateTimeOffset? CaptureDurableRecoveryCapturedAtUtc()
+    {
+        if (!File.Exists(HostStatePaths.RecoveryFile)) return null;
+        try
+        {
+            return new DisplayTopologyService()
+                .LoadRecovery()
+                .CapturedAt
+                .ToUniversalTime();
+        }
+        catch
+        {
+            // A present but unreadable recovery record must never be treated
+            // as idle. UnixEpoch cannot match a valid newly captured handoff,
+            // so the lease classifier safely reports orphan/mismatch.
+            return DateTimeOffset.UnixEpoch;
+        }
+    }
+
+    internal static TimeSpan GetStreamBoundaryRecoveryDelay(
+        string expectedTransaction,
+        DateTimeOffset? nowUtc = null)
+    {
+        if (!string.Equals(
+                CapturePendingTransactionMarker(),
+                expectedTransaction,
+                StringComparison.Ordinal))
+        {
+            return TimeSpan.Zero;
+        }
+        var now = (nowUtc ?? DateTimeOffset.UtcNow).ToUniversalTime();
+        var durableCapturedAt = CaptureDurableRecoveryCapturedAtUtc();
+        try
+        {
+            var assessment = StreamBoundaryLeaseJournal.Assess(
+                durableCapturedAt,
+                now);
+            return GetStreamBoundaryRecoveryDelayForAssessment(
+                assessment,
+                now);
+        }
+        catch (Exception error) when (
+            StreamBoundaryBridgeServer.IsOperationalRequestFailure(error))
+        {
+            // If the protected lease cannot be read, retain the display for
+            // at most the full Prepared bound measured from the durable
+            // recovery capture. This avoids both immediate teardown of a
+            // fresh launch and indefinite ownership by a damaged journal.
+            if (durableCapturedAt is not { } captured ||
+                captured == DateTimeOffset.UnixEpoch)
+            {
+                return TimeSpan.Zero;
+            }
+            var remaining = captured
+                .Add(StreamBoundaryLeaseJournal.PreparedLifetime) - now;
+            return remaining > TimeSpan.Zero
+                ? remaining
+                : TimeSpan.Zero;
+        }
+    }
+
+    internal static TimeSpan GetStreamBoundaryRecoveryDelayForAssessment(
+        StreamBoundaryLeaseAssessment assessment,
+        DateTimeOffset nowUtc)
+    {
+        ArgumentNullException.ThrowIfNull(assessment);
+        var now = nowUtc.ToUniversalTime();
+        if (!assessment.AuthorizesActiveHandoff ||
+            assessment.Lease is not { } lease)
+        {
+            return TimeSpan.Zero;
+        }
+        var remaining = lease.LeaseExpiresAtUtc - now;
+        return remaining > TimeSpan.Zero
+            ? remaining
+            : TimeSpan.Zero;
+    }
+
+    internal static bool ShouldDeferRecoveryForLease(
+        StreamBoundaryLeaseAssessment assessment,
+        bool hasNoSessionProof)
+    {
+        ArgumentNullException.ThrowIfNull(assessment);
+        return assessment.AuthorizesActiveHandoff &&
+            !hasNoSessionProof;
+    }
+
+    internal static void DiscardStaleStreamBoundaryLease()
+    {
+        try
+        {
+            var assessment = StreamBoundaryLeaseJournal.Assess(null);
+            if (assessment.Disposition ==
+                    StreamBoundaryLeaseDisposition.StaleLease)
+            {
+                _ = StreamBoundaryLeaseJournal.RemoveAssessed(assessment);
+            }
+        }
+        catch (Exception error) when (
+            StreamBoundaryBridgeServer.IsOperationalRequestFailure(error))
+        {
+            RecordSunshineExitDecision(
+                false,
+                $"The display is idle, but its stale protected stream lease could not be inspected: {error.Message}");
+        }
+    }
+
+    // Keep resume classification behind one ownership boundary so a shared or
+    // ambiguous MTT device can never make Vita idle look healthy.
+    internal static bool AreManagedVirtualDisplayDevicesDisabledForResume() =>
+        ManagedVddOwnershipJournal
+            .RequireOwnedPresentDevices(required: false)
+            .All(device => !device.Enabled);
+
+    internal static bool ShouldRetrySunshineRecovery(
+        bool recoverySucceeded,
+        string expectedTransaction,
+        string? currentTransaction) =>
+        !recoverySucceeded &&
+        string.Equals(
+            expectedTransaction,
+            currentTransaction,
+            StringComparison.Ordinal);
+
+    internal static bool IsSunshineExitRecoveryAllowed()
+    {
+        try
+        {
+            return BackendLifecycleManager.IsEnabled &&
+                   !InstallerMaintenanceFence.IsPresent &&
+                   !BackendLifecycleStateStore.IsUninstallInProgress();
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    internal static bool TryRecoverAfterSunshineExit(
+        string expectedTransaction,
+        string reason,
+        bool hasNoSessionProof = false)
+    {
+        if (!IsSunshineExitRecoveryAllowed() ||
+            !string.Equals(
+                CapturePendingTransactionMarker(),
+                expectedTransaction,
+                StringComparison.Ordinal))
+        {
+            return true;
+        }
+        if (!hasNoSessionProof &&
+            GetStreamBoundaryRecoveryDelay(expectedTransaction) >
+            TimeSpan.Zero)
+        {
+            return false;
+        }
+
+        DisplayTransactionLease transaction;
+        try
+        {
+            transaction = DisplayTransactionLock.AcquireWithin(
+                SunshineExitDisplayLeaseWait);
+        }
+        catch (TimeoutException)
+        {
+            return false;
+        }
+
+        using (transaction)
+        {
+            if (!IsSunshineExitRecoveryAllowed() ||
+                !string.Equals(
+                    CapturePendingTransactionMarker(),
+                    expectedTransaction,
+                    StringComparison.Ordinal))
+            {
+                return true;
+            }
+            StreamBoundaryLeaseAssessment? leaseAssessment = null;
+            try
+            {
+                leaseAssessment = StreamBoundaryLeaseJournal.Assess(
+                    CaptureDurableRecoveryCapturedAtUtc());
+                if (leaseAssessment.AuthorizesActiveHandoff)
+                {
+                    if (ShouldDeferRecoveryForLease(
+                            leaseAssessment,
+                            hasNoSessionProof) ||
+                        !StreamBoundaryLeaseJournal
+                            .RemoveAssessedForProvenNoSession(
+                                leaseAssessment))
+                    {
+                        // A concurrent heartbeat revision wins. Re-enter the
+                        // bounded worker and reassess under this same exact
+                        // process/global-zero proof before restoring.
+                        return false;
+                    }
+                    leaseAssessment = StreamBoundaryLeaseJournal.Assess(
+                        CaptureDurableRecoveryCapturedAtUtc());
+                }
+            }
+            catch (Exception error) when (
+                StreamBoundaryBridgeServer.IsOperationalRequestFailure(error))
+            {
+                RecordSunshineExitDecision(
+                    false,
+                    $"{reason}; the protected Vita stream lease was unreadable after its bounded launch lifetime: {error.Message}. Continuing exact recovery from the durable display record.");
+            }
+            var recoverySucceeded = false;
+            try
+            {
+                var recovery = UninstallManager
+                    .RecoverPhysicalAndDiscardPendingTransactionLocked(
+                        transaction);
+                RecordSunshineExitDecision(
+                    true,
+                    $"{reason}; recovered and verified the physical-only, PnP-disabled idle state for {string.Join(", ", recovery.PhysicalDisplays)}.");
+                recoverySucceeded = true;
+                if (leaseAssessment is { CanDiscardLeaseAfterRecovery: true })
+                {
+                    try
+                    {
+                        _ = StreamBoundaryLeaseJournal.RemoveAssessed(
+                            leaseAssessment);
+                    }
+                    catch (Exception error) when (
+                        StreamBoundaryBridgeServer
+                            .IsOperationalRequestFailure(error))
+                    {
+                        RecordSunshineExitDecision(
+                            false,
+                            $"{reason}; the display was restored, but the exact expired stream lease could not be discarded: {error.Message}");
+                    }
+                }
+            }
+            catch (Exception error)
+            {
+                RecordSunshineExitDecision(
+                    false,
+                    $"{reason}; automatic physical/PnP idle recovery failed: {error.Message}");
+            }
+            return !ShouldRetrySunshineRecovery(
+                recoverySucceeded,
+                expectedTransaction,
+                CapturePendingTransactionMarker());
+        }
+    }
     internal static void RecoverStaleSuspendIntentAtAgentStartup()
     {
         if (!File.Exists(DisplaySuspendIntentStore.IntentFile)) return;
@@ -1462,15 +3062,18 @@ internal static class HostRecoveryActions
         _ = Task.Run(() =>
         {
             Exception? lastError = null;
-            DateTimeOffset? resumeObservedAt = null;
+            var fallbackRuntime = Stopwatch.StartNew();
+            Stopwatch? postResumeRecoveryRuntime = null;
+            var attempts = 0;
             try
             {
                 while (true)
                 {
+                    attempts++;
                     var stillSuspending = suspendIsPending();
                     if (!stillSuspending)
                     {
-                        resumeObservedAt ??= DateTimeOffset.UtcNow;
+                        postResumeRecoveryRuntime ??= Stopwatch.StartNew();
                     }
 
                     try
@@ -1497,15 +3100,32 @@ internal static class HostRecoveryActions
                         lastError = error;
                     }
 
-                    if (resumeObservedAt is { } resumed &&
-                        DateTimeOffset.UtcNow - resumed >
-                            TimeSpan.FromSeconds(30))
+                    if (postResumeRecoveryRuntime is { } resumed &&
+                        resumed.Elapsed >=
+                            MaximumUnfencedPostResumeRecoveryRuntime)
                     {
                         Record(
                             "unfenced-suspend-recovery",
                             false,
                             "Durable suspend-fence publication failed and the fallback could not verify physical-only within 30 seconds after resume: " +
                             (lastError?.Message ?? "unknown display recovery error"));
+                        return;
+                    }
+                    if (attempts >= MaximumUnfencedSuspendFallbackAttempts ||
+                        fallbackRuntime.Elapsed >=
+                            MaximumUnfencedSuspendFallbackRuntime)
+                    {
+                        var finalPhysicalVerificationSucceeded =
+                            lastError is null;
+                        Record(
+                            "unfenced-suspend-recovery-circuit-breaker",
+                            false,
+                            finalPhysicalVerificationSucceeded
+                                ? "The Windows resume flag did not clear within the bounded fallback window. " +
+                                  "The last physical-only verification succeeded, so automatic retries were stopped to prevent display churn."
+                                : "The Windows resume flag did not clear within the bounded fallback window, and physical-only verification still failed. " +
+                                  "Automatic retries were stopped to prevent display churn; use the display recovery hotkey after Windows is fully awake. " +
+                                  $"Last response: {lastError!.Message}");
                         return;
                     }
                     Thread.Sleep(250);
@@ -1579,40 +3199,16 @@ internal static class HostRecoveryActions
         try
         {
             var topology = new DisplayTopologyService();
-            var displays = topology.ListDisplays();
-            var hasActivePhysical = displays.Any(display =>
-                display.IsActive &&
-                display.IsAvailable &&
-                !DisplayTopologyService.IsLikelyVirtualDisplay(display));
-            var hasActiveManagedVirtual = displays.Any(display =>
-                display.IsActive &&
-                DisplayTopologyService.IsManagedVirtualDisplay(display));
-            IReadOnlyList<string> physicalDisplays;
-            PhysicalDisplayModeRepairResult modeRepair;
-            var changedTopology = false;
-
-            if (!hasActivePhysical || hasActiveManagedVirtual)
-            {
-                physicalDisplays = topology.RecoverPhysicalDisplays(
-                    out modeRepair);
-                topology.DisableManagedVirtualDisplays();
-                changedTopology = true;
-            }
-            else
-            {
-                physicalDisplays = displays
-                    .Where(display =>
-                        display.IsActive &&
-                        display.IsAvailable &&
-                        !DisplayTopologyService.IsLikelyVirtualDisplay(display))
-                    .Select(display => string.IsNullOrWhiteSpace(display.FriendlyName)
-                        ? display.DevicePath
-                        : display.FriendlyName)
-                    .ToArray();
-                modeRepair =
-                    topology.RestorePersistedPhysicalDisplayModes();
-            }
-
+            // "Safe for suspend" always means the complete idle invariant:
+            // physical-only topology and the exact managed Vita PnP node
+            // disabled. If restoring an unreadable/failed record did not
+            // clear it, this central idle path intentionally leaves that
+            // record in place for later diagnosis/retry; suspend must never
+            // fall back to merely deactivating the VDD topology path.
+            var idleState = ManagedVirtualDisplayRuntime.ReconcileIdleLocked(
+                transaction,
+                requireManagedDevice: false);
+            var physicalDisplays = idleState.PhysicalDisplays;
             UninstallManager.VerifyPhysicalOnlyTopology(topology);
             var work = new List<string>();
             if (restoredTransaction)
@@ -1623,21 +3219,8 @@ internal static class HostRecoveryActions
             {
                 work.Add($"could not restore the pending Vita display transaction: {transactionFailure.Message}");
             }
-            work.Add(changedTopology
-                ? "activated the physical display topology with the managed Vita VDD inactive"
-                : "confirmed a physical display is active and the managed Vita VDD is inactive");
-            if (modeRepair.RestoredModes.Count > 0)
-            {
-                work.Add(
-                    "restored persisted physical display mode(s): " +
-                    string.Join(", ", modeRepair.RestoredModes));
-            }
-            if (modeRepair.Warnings.Count > 0)
-            {
-                work.Add(
-                    "physical mode repair warnings: " +
-                    string.Join(", ", modeRepair.Warnings));
-            }
+            work.Add(
+                "reconciled the physical-only, PnP-disabled Vita display idle state");
             work.Add($"physical displays: {string.Join(", ", physicalDisplays)}");
             return Record(
                 "power-suspend-display-prepare",
@@ -1738,6 +3321,7 @@ internal static class HostRecoveryActions
             sunshineState == WindowsServiceState.Running;
         var sunshineStopped = false;
         var physicalRecoverySucceeded = false;
+        var idleStateVerifiedForSunshineRestart = false;
         var vddOnlyRecoveryBridgeUsed = false;
 
         try
@@ -1755,6 +3339,7 @@ internal static class HostRecoveryActions
                     "discarded the pending display transaction");
             }
             physicalRecoverySucceeded = true;
+            idleStateVerifiedForSunshineRestart = true;
         }
         catch (PhysicalDisplayUnavailableException initialRecoveryError)
         {
@@ -1807,6 +3392,7 @@ internal static class HostRecoveryActions
                             "discarded the pending display transaction");
                     }
                     physicalRecoverySucceeded = true;
+                    idleStateVerifiedForSunshineRestart = true;
                     vddOnlyRecoveryBridgeUsed = true;
                 }
                 catch (Exception error)
@@ -1883,23 +3469,22 @@ internal static class HostRecoveryActions
         {
             try
             {
-                DisplayWizardAdapter
-                    .LocateBundledForUninstall()
-                    .ReloadDriver(transaction);
-                completed.Add("reloaded the virtual display driver");
-                IReadOnlyList<string>? physical = null;
-                for (var attempt = 0; attempt < 10 && physical is null; attempt++)
+                idleStateVerifiedForSunshineRestart = false;
+                _ = new SessionManager()
+                    .PrimeNativeModeForDriverMaintenanceOnlyLocked(
+                        transaction);
+                var topology = new DisplayTopologyService();
+                if (!topology.TryCaptureExactPhysicalOnlySnapshot(
+                        out var physicalSnapshot) ||
+                    physicalSnapshot is null)
                 {
-                    try
-                    {
-                        physical = new DisplayTopologyService().RecoverPhysicalDisplays();
-                    }
-                    catch when (attempt < 9)
-                    {
-                        Thread.Sleep(250);
-                    }
+                    throw new InvalidOperationException(
+                        "Driver reset completed without a complete physical-only display snapshot.");
                 }
-                completed.Add($"reapplied physical-only topology for {string.Join(", ", physical!)}");
+                idleStateVerifiedForSunshineRestart = true;
+                completed.Add(
+                    "reloaded and verified the virtual display driver, then " +
+                    $"reapplied the exact physical-only, PnP-disabled idle state for {string.Join(", ", physicalSnapshot.PhysicalDisplays)}");
             }
             catch (Exception error)
             {
@@ -1907,7 +3492,9 @@ internal static class HostRecoveryActions
             }
         }
 
-        if (restartSunshine && sunshineStopped)
+        if (restartSunshine &&
+            sunshineStopped &&
+            idleStateVerifiedForSunshineRestart)
         {
             try
             {
@@ -1918,6 +3505,11 @@ internal static class HostRecoveryActions
             {
                 failures.Add($"start Sunshine: {error.Message}");
             }
+        }
+        else if (restartSunshine && sunshineStopped)
+        {
+            failures.Add(
+                "Sunshine was left stopped because the physical-only, PnP-disabled idle state could not be verified after recovery");
         }
 
         var message = string.Join("; ", completed.Concat(failures));
@@ -1939,6 +3531,11 @@ internal static class HostRecoveryActions
         bool success,
         string message) =>
         Record("power-suspend-display-prepare", success, message);
+
+    internal static HostRescueStatus RecordSunshineExitDecision(
+        bool success,
+        string message) =>
+        Record("sunshine-session-idle-recovery", success, message);
 
     private static HostRescueStatus Record(string action, bool success, string message)
     {

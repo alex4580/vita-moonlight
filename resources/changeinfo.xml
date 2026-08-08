@@ -3,6 +3,15 @@
 <changes app_ver="00.14"><![CDATA[
 ## 0.14.8<br>
 <br>
+* Fixed the idle Vita display remaining available when the physical monitor<br>
+entered standby before Windows sleep. The host now preserves the exact<br>
+physical layout and PnP-disables the managed display after disconnect, abrupt<br>
+loss, suspend, upgrade, Pause, recovery, and uninstall.<br>
+* Added a mutually authenticated Vita-to-host boundary before both Sunshine<br>
+launch and resume. A generation-matched stop restores the physical desktop;<br>
+other Moonlight clients cannot arm the Vita display by sharing its resolution.<br>
+* Repair now normalizes existing VDD installs to one monitor with driver<br>
+logging disabled and cleans only exact obsolete Vita-owned files/state.<br>
 * Fixed the Vita pairing retry path that could authorize the client in<br>
 Sunshine but leave the real saved-computer entry unpaired or hidden until a<br>
 restart. Failed and cancelled attempts now remain visible as **Pairing<br>

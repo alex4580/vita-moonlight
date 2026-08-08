@@ -20,6 +20,7 @@
 #include "http.h"
 #include "errors.h"
 #include "crypto.h"
+#include "bridge_protocol.h"
 
 #include <errno.h>
 #include <stdbool.h>
@@ -27,6 +28,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <pthread.h>
 #include <curl/curl.h>
 
 #define HTTP_PATH_MAX 1024
@@ -36,8 +38,13 @@
 static CURL *curl;
 static bool debug;
 static bool responseTooLarge;
+static size_t responseSizeLimit = HTTP_MAX_RESPONSE_SIZE;
 static char keyDirectoryPath[HTTP_PATH_MAX];
 static char serverPin[SPKI_PIN_BUFFER_SIZE];
+/* The media transport does not use this handle, but the lease heartbeat and
+ * GameStream control requests can originate on different Vita threads. Keep
+ * every easy-handle operation serialized without blocking video decode. */
+static pthread_mutex_t httpRequestMutex = PTHREAD_MUTEX_INITIALIZER;
 
 typedef enum _PIN_FILE_STATE {
   PIN_FILE_ABSENT,
@@ -313,8 +320,8 @@ static size_t _write_curl(void *contents, size_t size, size_t nmemb, void *userp
   size_t realsize = size * nmemb;
   PHTTP_DATA mem = (PHTTP_DATA)userp;
 
-  if (realsize > HTTP_MAX_RESPONSE_SIZE ||
-      mem->size > HTTP_MAX_RESPONSE_SIZE - realsize) {
+  if (realsize > responseSizeLimit ||
+      mem->size > responseSizeLimit - realsize) {
     responseTooLarge = true;
     return 0;
   }
@@ -417,7 +424,8 @@ static const char *request_path(const char *url) {
   return path == NULL ? "/" : path;
 }
 
-int http_request_with_timeout(char* url, PHTTP_DATA data, long timeoutSeconds) {
+static int http_request_with_timeout_locked(
+    char* url, PHTTP_DATA data, long timeoutSeconds) {
   if (curl == NULL || url == NULL || data == NULL) {
     gs_error = "The host connection is not initialized";
     return GS_INVALID;
@@ -436,6 +444,7 @@ int http_request_with_timeout(char* url, PHTTP_DATA data, long timeoutSeconds) {
   data->memory[0] = '\0';
   data->size = 0;
   responseTooLarge = false;
+  responseSizeLimit = HTTP_MAX_RESPONSE_SIZE;
 
   if (timeoutSeconds < 0 ||
       curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeoutSeconds) != CURLE_OK) {
@@ -482,9 +491,120 @@ int http_request_with_timeout(char* url, PHTTP_DATA data, long timeoutSeconds) {
   return GS_OK;
 }
 
-int http_request(char* url, PHTTP_DATA data) {
-  return http_request_with_timeout(
-      url, data, HTTP_TIMEOUT_ORDINARY_SECONDS);
+int http_request_with_timeout(char* url, PHTTP_DATA data, long timeoutSeconds) {
+  pthread_mutex_lock(&httpRequestMutex);
+  int result = http_request_with_timeout_locked(url, data, timeoutSeconds);
+  pthread_mutex_unlock(&httpRequestMutex);
+  return result;
+}
+
+HTTP_BRIDGE_RESULT http_bridge_request_with_timeout_ms(
+    char *url, PHTTP_DATA data, long *responseCode, long timeoutMs) {
+  pthread_mutex_lock(&httpRequestMutex);
+  HTTP_BRIDGE_RESULT bridgeResult = HTTP_BRIDGE_RESULT_FAILED;
+  if (curl == NULL || url == NULL || data == NULL || responseCode == NULL) {
+    gs_error = "The secure Vita host bridge is not initialized";
+    goto finished;
+  }
+  if (!http_has_server_pin()) {
+    gs_error = "Secure pairing is required before using the Vita host bridge";
+    goto finished;
+  }
+  if (timeoutMs <= 0) {
+    gs_error = "The Vita host bridge timeout is invalid";
+    goto finished;
+  }
+
+  free(data->memory);
+  data->memory = malloc(1);
+  if (data->memory == NULL) {
+    data->size = 0;
+    goto finished;
+  }
+  data->memory[0] = '\0';
+  data->size = 0;
+  responseTooLarge = false;
+  responseSizeLimit = VITA_STREAM_BOUNDARY_MAX_RESPONSE_BYTES;
+  *responseCode = 0;
+
+  CURLcode optionResult = CURLE_OK;
+#define SET_BRIDGE_OPTION(option, value) do { \
+  CURLcode setResult = curl_easy_setopt(curl, (option), (value)); \
+  if (setResult != CURLE_OK && optionResult == CURLE_OK) optionResult = setResult; \
+} while (0)
+  SET_BRIDGE_OPTION(CURLOPT_CONNECTTIMEOUT_MS, 1000L);
+  SET_BRIDGE_OPTION(CURLOPT_TIMEOUT_MS, timeoutMs);
+  SET_BRIDGE_OPTION(CURLOPT_FAILONERROR, 0L);
+  SET_BRIDGE_OPTION(CURLOPT_WRITEDATA, data);
+  SET_BRIDGE_OPTION(CURLOPT_URL, url);
+  SET_BRIDGE_OPTION(CURLOPT_FORBID_REUSE, 1L);
+  if (optionResult != CURLE_OK) {
+    gs_error = "The Vita host bridge request could not be configured";
+  }
+
+  CURLcode result = optionResult == CURLE_OK
+      ? curl_easy_perform(curl) : optionResult;
+  curl_off_t appConnectTime = 0;
+  if (result != CURLE_OK) {
+    (void)curl_easy_getinfo(
+        curl, CURLINFO_APPCONNECT_TIME_T, &appConnectTime);
+  }
+  if (result == CURLE_OK) {
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, responseCode);
+  }
+
+  /* Restore the shared GameStream handle before interpreting the result. */
+  CURLcode restoreResult = CURLE_OK;
+#define RESTORE_BRIDGE_OPTION(option, value) do { \
+  CURLcode setResult = curl_easy_setopt(curl, (option), (value)); \
+  if (setResult != CURLE_OK && restoreResult == CURLE_OK) restoreResult = setResult; \
+} while (0)
+  RESTORE_BRIDGE_OPTION(CURLOPT_CONNECTTIMEOUT, 10L);
+  RESTORE_BRIDGE_OPTION(CURLOPT_TIMEOUT, HTTP_TIMEOUT_ORDINARY_SECONDS);
+  RESTORE_BRIDGE_OPTION(CURLOPT_FAILONERROR, 1L);
+  RESTORE_BRIDGE_OPTION(CURLOPT_FORBID_REUSE, 0L);
+  responseSizeLimit = HTTP_MAX_RESPONSE_SIZE;
+#undef RESTORE_BRIDGE_OPTION
+#undef SET_BRIDGE_OPTION
+  if (restoreResult != CURLE_OK) {
+    gs_error = "The Vita host bridge could not restore the GameStream HTTP state";
+    goto finished;
+  }
+
+  STREAM_BOUNDARY_TRANSPORT_FAILURE failure =
+      result == CURLE_COULDNT_CONNECT
+          ? STREAM_BOUNDARY_TRANSPORT_REFUSED
+          : result == CURLE_OPERATION_TIMEDOUT
+              ? STREAM_BOUNDARY_TRANSPORT_TIMEOUT
+              : STREAM_BOUNDARY_TRANSPORT_OTHER;
+  if (stream_boundary_transport_failure_is_optional(
+          failure, appConnectTime > 0)) {
+    bridgeResult = HTTP_BRIDGE_RESULT_OPTIONAL_UNAVAILABLE;
+    goto finished;
+  }
+  if (result != CURLE_OK) {
+    if (responseTooLarge) {
+      gs_error = "The Vita host bridge returned an unexpectedly large response";
+#if LIBCURL_VERSION_NUM >= 0x072700
+    } else if (result == CURLE_SSL_PINNEDPUBKEYNOTMATCH) {
+      gs_error = "The Vita host bridge did not match the paired Sunshine identity";
+#endif
+    } else {
+      gs_error = "The reached Vita host bridge rejected its authenticated TLS connection";
+    }
+    goto finished;
+  }
+  bridgeResult = HTTP_BRIDGE_RESULT_OK;
+
+finished:
+  pthread_mutex_unlock(&httpRequestMutex);
+  return bridgeResult;
+}
+
+HTTP_BRIDGE_RESULT http_bridge_request(
+    char *url, PHTTP_DATA data, long *responseCode) {
+  return http_bridge_request_with_timeout_ms(
+      url, data, responseCode, 65000L);
 }
 
 void http_cleanup() {

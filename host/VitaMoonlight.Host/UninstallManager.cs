@@ -44,21 +44,15 @@ internal static class UninstallManager
         "installer-maintenance.json",
         "installer-maintenance.backup.json",
         "installer-maintenance.lock",
+        "stream-boundary-lease.json",
+        "stream-boundary-lease.backup.json",
+        "stream-boundary-lease.lock",
     ];
 
     private static readonly string[] DiagnosticStateFiles =
     [
         "stream-rescue-status.json",
         "stream-rescue.log",
-    ];
-
-    // Version 0.14.6 and earlier stored every file directly beneath this
-    // machine-wide directory. Keep the list exact: an old, replaceable
-    // ProgramData child must never become authority to delete arbitrary data.
-    private static readonly string[] LegacyRootStateFiles =
-    [
-        .. CurrentRootStateFiles,
-        .. DiagnosticStateFiles,
     ];
 
     internal static UninstallPreparationResult Prepare(
@@ -87,7 +81,8 @@ internal static class UninstallManager
                 // operation lock through the complete physical-safety probe.
                 BackendLifecycleStateStore.RequireNoUninstallInProgress();
             }
-            return RecoverPhysicalAndDiscardPendingTransaction();
+            return RecoverPhysicalAndDiscardPendingTransaction(
+                allowLegacyVddOwnershipMigration: true);
         }
         finally
         {
@@ -125,7 +120,8 @@ internal static class UninstallManager
     }
 
     internal static UninstallPreparationResult
-        RecoverPhysicalAndDiscardPendingTransaction()
+        RecoverPhysicalAndDiscardPendingTransaction(
+            bool allowLegacyVddOwnershipMigration = false)
     {
         return WithSunshineStopped(
             () =>
@@ -133,6 +129,12 @@ internal static class UninstallManager
                 UninstallPreparationResult result;
                 using (var transaction = DisplayTransactionLock.Acquire())
                 {
+                    if (allowLegacyVddOwnershipMigration)
+                    {
+                        ManagedVddOwnershipJournal
+                            .MigrateLegacyOwnershipIfProvenLocked(
+                                transaction);
+                    }
                     result = RecoverPhysicalAndDiscardPendingTransactionLocked(
                         transaction);
                 }
@@ -152,6 +154,9 @@ internal static class UninstallManager
                 using (var transaction = DisplayTransactionLock
                            .AcquireForRecoveryUpgradeOnly())
                 {
+                    ManagedVddOwnershipJournal
+                        .MigrateLegacyOwnershipIfProvenLocked(
+                            transaction);
                     result = RecoverPhysicalAndDiscardPendingTransactionLocked(
                         transaction);
                 }
@@ -174,6 +179,10 @@ internal static class UninstallManager
                            .AcquireForInstallerMaintenanceBootstrap(
                                ownerProcessId))
                 {
+                    ManagedVddOwnershipJournal
+                        .MigrateLegacyOwnershipIfProvenLocked(
+                            transaction,
+                            allowAuthorizedMaintenanceBootstrap: true);
                     result =
                         RecoverPhysicalAndDiscardPendingTransactionWithManagedVddBootstrapLocked(
                             transaction,
@@ -364,9 +373,29 @@ internal static class UninstallManager
     {
         transaction.RequireActive();
         var topology = new DisplayTopologyService();
-        var physicalDisplays = topology.RecoverPhysicalDisplays();
-        topology.DisableManagedVirtualDisplays();
-        VerifyPhysicalOnlyTopology(topology);
+        IReadOnlyList<string> physicalDisplays;
+        if (!File.Exists(ManagedVddOwnershipJournal.JournalFile) &&
+            !File.Exists(HostStatePaths.RecoveryFile) &&
+            topology.TryCaptureExactPhysicalOnlySnapshot(
+                out var untouchedPhysical) &&
+            untouchedPhysical is not null)
+        {
+            // Controller-only installs and unrelated DisplayWizard users may
+            // legitimately have an inactive ROOT\MttVDD/IddSample device.
+            // With no Vita ownership or recovery transaction, an already
+            // exact physical-only desktop needs no mutation. This narrow path
+            // lets setup/uninstall proceed without claiming, toggling, or
+            // deactivating the third-party device; configured Vita backends
+            // still require the journaled idle invariant below.
+            physicalDisplays = untouchedPhysical.PhysicalDisplays;
+        }
+        else
+        {
+            var idle = ManagedVirtualDisplayRuntime.ReconcileIdleLocked(
+                transaction,
+                requireManagedDevice: false);
+            physicalDisplays = idle.PhysicalDisplays;
+        }
 
         // Recovery records from older installs lived in a replaceable
         // ProgramData child. Never inspect, traverse, or delete that untrusted
@@ -446,6 +475,18 @@ internal static class UninstallManager
                     // later filesystem failure is observed.
                     disabledBackendRollbackState =
                         backendHandoff.DisabledRollbackState;
+
+                    if (restoreManagedVdd)
+                    {
+                        var restartRequired = DisplayWizardAdapter
+                            .LocateBundledForUninstall()
+                            .UninstallDriver(transaction);
+                        if (restartRequired)
+                        {
+                            throw new HostRestartRequiredException(
+                                "Windows must restart to finish removing the exact app-created virtual-display instance. The shared MttVDD package and retry-safe ownership journal were retained.");
+                        }
+                    }
 
                     VerifyPhysicalOnlyTopology(
                         new DisplayTopologyService());
@@ -583,9 +624,30 @@ internal static class UninstallManager
             {
                 try
                 {
+                    var rollbackState = disabledBackendRollbackState;
+                    using (var displayTransaction =
+                           DisplayTransactionLock.Acquire())
+                    {
+                        var ownershipRollback = ManagedVddOwnershipJournal
+                            .ReactivateReleasedOwnershipLocked(
+                                displayTransaction);
+                        if (ownershipRollback ==
+                            ManagedVddRollbackDisposition.RetainedTombstone)
+                        {
+                            // An already-removed app-created node or a node
+                            // relinquished to preserve a concurrent change
+                            // cannot be guessed back into ownership. Restore
+                            // the remaining paused safeguards without later
+                            // authorizing a toggle of that exact ID.
+                            rollbackState = rollbackState with
+                            {
+                                ManagedVirtualDisplayInstancesToRestore = [],
+                            };
+                        }
+                    }
                     BackendLifecycleManager
                         .RestoreDisabledStateAfterFailedUninstall(
-                            disabledBackendRollbackState);
+                            rollbackState);
                 }
                 catch (Exception rollbackError)
                 {
@@ -699,9 +761,22 @@ internal static class UninstallManager
             Environment.GetFolderPath(
                 Environment.SpecialFolder.CommonApplicationData),
             "VitaMoonlight");
-        return CleanupOwnedStateFiles(
+        var state = CleanupOwnedStateFiles(
             HostStatePaths.Root,
             legacyRoot);
+        var residue = InstallResidueCleanup
+            .CleanupObsoleteRootPayloadForUninstall(
+                InstallationTrust.ExpectedInstallationDirectory);
+        return new OwnedStateCleanupResult(
+            state.RemovedFiles + residue.RemovedFiles,
+            state.RemovedDirectories + residue.RemovedDirectories,
+            state.RetainedEntries
+                .Concat(residue.RetainedOwnedEntries)
+                .Concat(residue.RetainedDirectories)
+                .Distinct(OperatingSystem.IsWindows()
+                    ? StringComparer.OrdinalIgnoreCase
+                    : StringComparer.Ordinal)
+                .ToArray());
     }
 
     internal static OwnedStateCleanupResult CleanupOwnedStateFiles(
@@ -731,23 +806,12 @@ internal static class UninstallManager
 
         if (!PathsEqual(legacyRoot, currentRoot))
         {
-            // A short-lived transitional build could also have created the
-            // new Diagnostics child beneath the legacy root. Clean only its
-            // two exact Vita-owned filenames before handling old root files.
-            CleanupKnownDirectory(
-                Path.Combine(legacyRoot, "Diagnostics"),
-                DiagnosticStateFiles,
-                retainedEntries,
-                ref removedFiles,
-                ref removedDirectories,
-                failOnUntrustedDirectory: false);
-            CleanupKnownDirectory(
-                legacyRoot,
-                LegacyRootStateFiles,
-                retainedEntries,
-                ref removedFiles,
-                ref removedDirectories,
-                failOnUntrustedDirectory: false);
+            var legacy = InstallResidueCleanup
+                .CleanupLegacyProgramDataForUninstall(legacyRoot);
+            removedFiles += legacy.RemovedFiles;
+            removedDirectories += legacy.RemovedDirectories;
+            retainedEntries.AddRange(legacy.RetainedOwnedEntries);
+            retainedEntries.AddRange(legacy.RetainedDirectories);
         }
 
         return new OwnedStateCleanupResult(
@@ -916,12 +980,20 @@ internal static class UninstallManager
         string operationName)
     {
         var serviceName = StreamingHostLocator.FindSunshineServiceName();
-        var restartSunshine =
-            WindowsServiceManager.GetState(serviceName) ==
-            WindowsServiceState.Running;
+        var initialSunshineState =
+            WindowsServiceManager.GetState(serviceName);
+        var stopSunshine = initialSunshineState is not (
+            WindowsServiceState.NotInstalled or
+            WindowsServiceState.Stopped);
+        var restartSunshine = initialSunshineState is
+            WindowsServiceState.Running or
+            WindowsServiceState.StartPending or
+            WindowsServiceState.ContinuePending or
+            WindowsServiceState.PausePending or
+            WindowsServiceState.Paused;
         Exception? operationError = null;
 
-        if (restartSunshine)
+        if (stopSunshine)
         {
             WindowsServiceManager.Stop(serviceName, "Sunshine");
         }

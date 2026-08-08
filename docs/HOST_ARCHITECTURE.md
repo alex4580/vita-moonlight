@@ -28,49 +28,76 @@ overridden.
 
 The installer upgrades Sunshine builds older than `2026.516.143833`, while
 leaving compatible newer builds in place. The health check rejects an unknown
-or older build before the companion writes native display-manager keys. After a
-restart, configuration polls Sunshine's display inventory for up to 30 seconds
-instead of assuming service-running means enumeration is complete.
+or older build before enabling the automatic handoff. Upgrade removes exact
+Vita preparation hooks owned by older releases while preserving unrelated
+global and per-application commands.
 
-For a compatible Sunshine version, the companion selects the virtual display
-by Sunshine's stable `device_id` and enables its native Windows display manager:
-`ensure_only_display`, automatic client resolution, a driver-safe 60 Hz
-Windows desktop refresh, automatic HDR state, and
-`dd_config_revert_on_disconnect`. Moonlight negotiates the stream frame rate
-independently. This policy is global, so it
-covers Desktop, Steam Big Picture, and custom games and restores the physical
-layout after the final client disconnects even when the application remains
-open. Obsolete `VitaMoonlight.Host` prep hooks are removed while unrelated
-commands are retained, and the original `apps.json` is backed up once.
+Sunshine's native display manager resolves an output and probes encoders before
+running application preparation commands, so neither that manager nor a global
+preparation hook can safely arm a PnP-disabled idle VDD for every launch and
+resume path. The companion therefore keeps `output_name` on Sunshine's active-
+display default and disables Sunshine's native `dd_*` topology transaction.
 
-## Display lifecycle and manual transaction
+The supported client and host add a small authenticated preflight beside the
+standard GameStream protocol. The endpoint presents the same host identity
+that the Vita pinned during pairing and accepts only a client certificate still
+enabled in Sunshine's paired-client state. Before sending either Sunshine's
+launch or resume request, the Vita asks the companion to prepare one supported
+mode. The companion creates a protected recovery record, enables the exact
+managed VDD, activates 960x544, 960x540, or 1280x720 at a driver-safe 60 Hz,
+applies SDR, and returns a generation token. A matching authenticated stop
+restores the exact physical baseline and PnP-disables the VDD; a delayed stop
+from an older generation cannot tear down a newer stream. No manual Windows
+display selection is part of the supported path.
 
-Sunshine owns the default streaming transaction. It snapshots display state,
-activates only the configured virtual target, applies the mode requested by the
-Vita, and reverts after a 500 ms disconnect grace period. This avoids tying
-display restoration to application shutdown; Sunshine deliberately keeps
-detached applications such as Steam Big Picture alive for resume.
+After Sunshine accepts launch or resume, the Vita marks that exact generation
+started and renews a short authenticated lease while the stream is alive. The
+renewal is protocol state, not support logging: successful heartbeats are not
+written to the optional user log. The companion keeps ordinary renewals in
+memory and checkpoints the small protected lease at a sparse interval so an
+agent restart can reconnect without granting indefinite display ownership.
 
-The companion's `session start` transaction remains available for the legacy
-single-app path, the timed manual preview, and an explicitly selected
-experimental Apollo CLI path. Apollo is not exposed by the installer or GUI,
-is not public-beta qualified, and requires an explicit display match. It:
+## Display lifecycle and transaction
 
-1. acquires the machine-wide display transaction lock;
-2. captures the active Windows paths and modes;
+Feature preference and runtime display state are separate. Healthy Enabled +
+Idle means at least one physical display is active, no recovery transaction is
+pending, and the exact managed VDD device node is PnP-disabled. An
+authenticated preflight before either launch or resume transitions through
+Preparing to Streaming under the same machine-wide lease. Its generation-
+matched stop is the normal restoration boundary. An expired client-bound lease
+is the authoritative abrupt-loss signal; an exact Sunshine process exit or a
+matching authenticated stop may accelerate that recovery. The experimental
+legacy hook mode can additionally use its historical global zero-session log
+signal, but that signal is not part of the supported all-app path. Another
+Moonlight client's active Sunshine session can never keep a stale Vita display
+alive. Sleep, startup, emergency recovery, and uninstall also restore the exact
+saved physical layout and PnP-disable the VDD. There is no idle display polling,
+continuous Sunshine-log tail, forced Sunshine INFO level, or continuous support
+log.
+
+The same `session start` transaction remains available for the timed control-
+panel preview and an explicitly selected experimental Apollo CLI path. Apollo
+is not exposed by the installer or GUI, is not public-beta qualified, and
+requires an explicit display match. A transaction:
+
+1. authenticates and validates the requested mode for a production Vita
+   boundary, then acquires the machine-wide display transaction lock;
+2. verifies Enabled + Idle and captures the exact active physical Windows
+   paths and modes while the VDD is PnP-disabled;
 3. writes and flushes a recovery record beneath the protected
    `%ProgramFiles%\Vita Moonlight Host\state` directory;
-4. finds the configured or known managed virtual target;
+4. enables the one exact managed VDD device and waits for its target;
 5. validates and applies a topology containing only that target;
-6. changes it to the Vita-requested resolution and refresh rate; and
-7. disables advanced color on the target when Force SDR is enabled.
+6. changes it to the Vita-requested resolution and refresh rate;
+7. disables advanced color on the target when Force SDR is enabled; and
+8. returns the generation only after the display is ready for Sunshine.
 
-If a manual activation step fails, the saved physical topology is restored
-immediately. `session stop` restores it after the legacy application ends. A
-scheduled highest-privilege logon task invokes recovery after an interrupted
-manual transaction. The saved record is cleared only after a successful
-restore. Recovery and rescue tasks allow battery operation and delayed starts,
-so a laptop does not postpone recovery until it is connected to AC power.
+If activation fails, the saved physical topology is restored immediately and
+the VDD is disabled. A scheduled highest-privilege logon task invokes recovery
+after an interrupted transaction. The saved record is cleared only after the
+exact physical baseline has been reapplied following device shutdown.
+Recovery and rescue tasks allow battery operation and delayed starts, so a
+laptop does not postpone recovery until it is connected to AC power.
 
 The driver is installed or updated explicitly by the installer/control panel;
 stream start never installs a driver. The supported Sunshine release path
@@ -100,24 +127,25 @@ pinned to the disabled Vita VDD may therefore need a different host output.
 
 The saved state uses redundant checksummed JSON records plus a small Disabled
 intent marker. Disable publishes intent before changing Windows; Enable keeps
-that marker until the saved VDD instances and previously present safeguards
-are restored and verified. A partial or corrupt transition fails closed and
-does not authorize a stream. Upgrades read the existing intent and preserve an
-intentional Pause.
+that marker until the saved managed-device inventory and previously present
+safeguards are restored and verified. Enable then reconciles the exact VDD back
+to PnP-disabled idle; it does not leave a spare display active. A partial or
+corrupt transition fails closed and does not authorize a stream. Upgrades read
+the existing intent and preserve an intentional Pause.
 
 ## Stream rescue agent
 
 Setup installs a highest-privilege per-user logon task that runs a hidden,
 single-instance WinForms message loop. The physical-display recovery hotkey is
-mandatory. The supported native Sunshine path neither registers nor requires
-the legacy F8-F10 display-mode hotkeys: the current Vita client changes mode by
-reconnecting with an ordinary GameStream launch request. F8-F10 register
-independently only when the user explicitly selects the legacy
-single-application fallback, preserving older clients without reserving those
-keys on a default installation. A named ready event is signaled only after
-mandatory recovery registration succeeds. No TCP listener, credentials, or
-remotely callable HTTP endpoint is added. The Vita overlay sends only the F11
-recovery chord through the normal encrypted Moonlight input channel.
+mandatory. The supported automatic Sunshine path neither registers nor
+requires the legacy F8-F10 display-mode hotkeys: the current Vita client uses
+the authenticated preflight before both GameStream launch and resume. A named
+ready event is signaled only after mandatory recovery registration and the
+authenticated boundary listener are ready. The listener uses the existing
+Sunshine pairing identities, accepts only the narrow prepare/stop protocol, and
+does not expose an unauthenticated status or control endpoint. The Vita overlay
+sends the F11 recovery chord through the normal encrypted Moonlight input
+channel only for emergency recovery.
 
 Both scheduled tasks are created for the current interactive token at highest
 available privilege and their executable, arguments, logon type, and run level
@@ -133,7 +161,7 @@ arguments.
 The companion never closes or kills an inferred foreground process. The Vita
 can open Windows Task Manager through the ordinary Moonlight keyboard channel;
 ending a Sunshine application uses GameStream's authenticated quit-app request.
-The display-recovery action first restores any saved manual transaction and a
+The display-recovery action first restores any saved display transaction and a
 physical-only topology, then stops Sunshine, reloads the
 signed VDD, reapplies the physical-only topology after driver enumeration, and
 starts Sunshine. If a suspend notification arrives during that action,
@@ -166,6 +194,10 @@ may mutate state, while exact physical recovery remains available without an
 owner. Dead-owner takeover carries the original obligations forward, and a
 live or unverifiable owner is never displaced. Uninstall bridges a dead setup
 record into its own durable guard before removing either maintenance copy.
+After a successful installed-payload transition, versioned cleanup removes only
+the immutable exact names shipped at obsolete root/ProgramData locations by
+older releases. Unknown, busy, or reparse entries are retained and prevent that
+cleanup generation from being marked complete until a safe retry succeeds.
 
 ## Uninstall transaction
 
@@ -181,8 +213,13 @@ verifies its deletion, and removes the exact guard last. A retry with an exact
 Finalized stage but a missing host may finish file-only cleanup; a missing host
 with any earlier, torn, or absent stage fails closed. Successful uninstall
 removes only allowlisted Vita-owned state; unknown entries are retained.
-Sunshine, ViGEmBus, and the MTT driver are kept unless the user explicitly
-selects their removal.
+Sunshine and ViGEmBus are kept unless the user explicitly selects their
+removal. The MTT package is always retained unless a future package-consumer
+proof can show that deletion is safe. By default the exact managed device is
+left PnP-disabled; selecting display release removes an app-created node or
+restores an adopted node to its recorded baseline. Uninstall also removes the
+exact authenticated-boundary firewall rule
+and stops its listener with the rest of the Vita-owned safeguards.
 
 ## Vita client
 
@@ -193,13 +230,13 @@ Motion initialization is nonfatal and lazy: the single event-driven worker and
 Vita sampler exist only during a compatible PS/DS4 stream, and sleep without
 polling until Sunshine requests a sensor.
 
-GameStream HTTPS uses the client certificate plus a persisted SPKI SHA-256 pin
-for Sunshine's self-signed server certificate. The PIN pairing proof binds the
-pin before the first privileged HTTPS request. Older installs retain valid
-client IDs and keys but require one visible secure re-pair because no trusted
-server pin can be reconstructed after the fact. Reachability probes use a
-disposable client state and every exit releases certificate, HTTP, app-list,
-audio, motion, and stream resources.
+GameStream HTTPS and the narrow display-boundary request use the same client
+certificate plus a persisted SPKI SHA-256 pin for Sunshine's self-signed server
+certificate. The PIN pairing proof binds the pin before the first privileged
+HTTPS request. Older installs retain valid client IDs and keys but require one
+visible secure re-pair because no trusted server pin can be reconstructed after
+the fact. Reachability probes use a disposable client state and every exit
+releases certificate, HTTP, app-list, audio, motion, and stream resources.
 
 Video and audio callbacks use moonlight-common's queues because Vita decoding,
 display synchronization, and audio output can block. They are never declared
@@ -223,9 +260,10 @@ Destructive rescue items require a second confirmation.
 Disconnect, Sunshine-app termination, display-setting reconnects, and
 host-recovery requests are consumed by the connection UI loop so network
 teardown remains ordered. A display-setting reconnect saves the new mode,
-terminates the video session, refreshes GameStream state, and resumes the same
-application without a legacy hotkey or extra pre-disconnect delay. Opening Task
-Manager is ordinary encrypted keyboard input and does not add a host-side
+terminates the video session, sends the generation-matched stop, refreshes
+GameStream state, prepares a new display generation, and resumes the same
+application without a legacy hotkey or extra pre-disconnect delay. Opening
+Task Manager is ordinary encrypted keyboard input and does not add a host-side
 process-control endpoint.
 
 ## Packaging

@@ -43,8 +43,11 @@ for details.
    **Steam Big Picture**, **Desktop**, or a game.
 
 The display can briefly blink while Windows verifies the virtual display.
-When idle, the physical display should be active and the Vita virtual display
-should not be the only active screen.
+When host features are Enabled but no Vita stream is active, the physical
+display should be active, no recovery transaction should be pending, and the
+exact managed Vita virtual-display device should be PnP-disabled. The paired
+Vita arms it automatically before a Sunshine launch or same-application
+resume; the optional timed display test uses the same protected transaction.
 
 If setup requests a restart, it stops before changing the Sunshine stream
 display. Restart Windows, reopen the control panel as Administrator, and click
@@ -120,9 +123,10 @@ while. The action:
 
 The pause survives sign-out, restart, sleep, and an in-place upgrade. It keeps
 the app, pairing, settings, drivers, and shared programs installed. Choose
-**Enable Vita host features** to restore only the Vita safeguards and exact
-managed VDD instances that were active before the pause. Both actions are
-safe to run again and require Administrator approval.
+**Enable Vita host features** to restore the Vita safeguards. The managed VDD
+still remains disabled while idle and is armed automatically for the next
+Vita stream. Both actions are safe to run again and require Administrator
+approval.
 
 Do not use Windows Device Manager or Task Scheduler to reproduce this state by
 hand. The control panel journals the exact Vita task and managed-device state.
@@ -136,8 +140,9 @@ Most users should keep the defaults:
 - **Streaming service:** Sunshine. Older Apollo selections are migrated to
   Sunshine during repair; Apollo itself and unrelated Apollo settings are
   preserved, but Apollo integration is not public-beta qualified.
-- **Preferred virtual display:** blank for automatic selection. Enter a name
-  only if the health check finds more than one virtual display.
+- **Preferred virtual display:** leave this blank. The supported Vita path
+  identifies the exact managed display automatically; do not select a Sunshine
+  output or enable the device in Device Manager.
 - **Use the Vita display with every streamed application:** enabled. This
   applies display switching to Steam, Desktop, and custom Sunshine apps.
 - **Force SDR for Vita virtual-display sessions:** enabled. The Vita does not
@@ -149,14 +154,17 @@ session. **Restart Sunshine now** restarts only the streaming service.
 
 ### Display & recovery
 
-The managed virtual display normally appears as **VDD by MTT** and remains
-inactive while idle.
+The managed virtual display normally appears as **VDD by MTT**. Its Windows
+device is PnP-disabled while Enabled + Idle, then enabled automatically after
+an authenticated request from the paired Vita and before Sunshine starts or
+resumes capture.
 
 - **Restore physical display now** ends the active stream, restores physical
-  displays, reloads VDD, leaves the Vita display inactive, and restarts
+  displays, reloads VDD only for recovery, disables it again, and restarts
   Sunshine.
-- **Turn off idle Vita display** disables only an idle managed VDD while
-  keeping a physical display active.
+- **Reconcile idle display now** is a fallback check: it restores a physical
+  desktop and disables the managed VDD device. Normal use performs this
+  automatically.
 - **Test Vita display for 15 seconds** temporarily activates 960x544 and then
   restores the original physical layout automatically.
 - **Show detected displays** lists physical and virtual displays.
@@ -166,8 +174,9 @@ inactive while idle.
 - **Show current session state** reports whether a display change is pending.
 
 During a stream or timed display test, a physical monitor may go blank because
-Sunshine captures only the Vita virtual display. A normal disconnect restores
-the physical layout.
+Sunshine captures only the Vita virtual display. The normal Vita stop request
+restores the exact saved physical layout, disables the managed device, and
+cannot stop a newer stream generation by mistake.
 
 If it does not return, press **Ctrl + Alt + Shift + F11** on the PC keyboard.
 While Vita host features are enabled, this shortcut works without opening the
@@ -175,11 +184,13 @@ control panel. Allow roughly 15 seconds for the physical displays, driver, and
 Sunshine to recover. A complete **Pause Vita host features** removes the rescue
 agent and therefore unregisters F11 until **Enable Vita host features** is run.
 
-The rescue agent also prepares a physical-only layout when Windows announces
-sleep and performs a bounded topology check after resume. A stream that
-crosses system sleep is treated as interrupted: the host prioritizes the
-physical desktop and leaves the Vita VDD inactive instead of preserving a
-stale Vita-sized layout.
+The paired Vita request and its matching stop are the normal display boundary.
+The rescue agent uses Sunshine lifecycle events only as a fallback for abrupt
+Wi-Fi loss, a client crash, or Sunshine exit; it does not continuously poll or
+tail Sunshine while the host is idle. Startup, suspend, resume, emergency
+recovery, and uninstall also reconcile to the same physical-layout / managed-
+VDD-disabled idle state. A stream that crosses system sleep is treated as
+interrupted.
 
 ### Diagnostics & support
 
@@ -194,11 +205,12 @@ Technical output and individual repairs are kept away from everyday setup:
   before interpreting or sharing them.
 - **Repair sign-in display recovery** repairs the interrupted-session
   safeguard.
-- **Repair stream rescue shortcuts** repairs the background Vita and keyboard
+- **Repair automatic handoff and recovery** repairs the paired-Vita listener, background recovery, and keyboard
   recovery controls.
 - **Repair controller support** repairs ViGEmBus.
 - **Repair Sunshine** repairs the packaged compatible Sunshine installation.
-- **Check rescue shortcuts** reports the rescue agent and hotkey state.
+- **Check automatic handoff** reports the rescue agent, authenticated display
+  handoff, and hotkey state.
 
 Start with **Set up or repair this PC** instead of repairing individual
 components. Use an individual repair only when readiness or support output
@@ -224,10 +236,10 @@ compatibility and 1280x720 for games with a 720p minimum.
 
 Changing resolution, FPS, bitrate, or network mode during a session requires
 **Apply resolution + reconnect**. The video connection renegotiates while the
-Windows game stays open. On the supported Sunshine configuration this uses the
-ordinary GameStream launch mode; it does not send or require the legacy
-Ctrl+Alt+Shift+F8/F9/F10 shortcuts. Changing Xbox/DS4 controller capabilities
-requires **Apply input changes + reconnect**.
+Windows game stays open. The Vita performs an authenticated display preflight
+before Sunshine resumes the same application; it does not send or require the
+legacy Ctrl+Alt+Shift+F8/F9/F10 shortcuts. Changing Xbox/DS4 controller
+capabilities requires **Apply input changes + reconnect**.
 
 See the [Vita settings guide](../docs/VITA_SETTINGS_GUIDE.md) for presets,
 controller profiles, gyro, graphical mapping, front-touch zones, PS behavior,
@@ -284,9 +296,12 @@ host or its recovery safeguards. By default it keeps:
 - ViGEmBus controller emulation; and
 - the MTT virtual-display driver.
 
-These components may be used by other software. Select their removal only when
-you are certain they are no longer needed. Removing the VDD also removes its
-managed Vita display configuration.
+These components may be used by other software. The uninstaller can remove
+Sunshine or ViGEmBus only when you explicitly select them. Its display option
+releases this installation's exact device: an app-created device is removed,
+while an adopted device returns to its recorded pre-install enabled state. The
+shared MTT driver package is retained because package-wide ownership cannot be
+proved safely.
 
 Unlike setup/repair, uninstall may be approved with a different Administrator
 account. It verifies the exact executable and arguments of each Vita-owned
@@ -294,7 +309,7 @@ scheduled task before removing it; an unexpected same-name task is retained and
 uninstall stops with an explanation.
 
 When shared components are kept, uninstall leaves Sunshine unchanged and the
-VDD device usable but inactive. It
+VDD driver installed, but leaves its exact managed device PnP-disabled. It
 then removes both exact scheduled tasks, the running rescue agent, current
 host state, and exact legacy Vita Moonlight state. Unknown files in a legacy
 folder are retained rather than deleted recursively.

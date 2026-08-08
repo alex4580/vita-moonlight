@@ -69,12 +69,14 @@ To change it remotely:
    1280x720.
 4. Select **Apply resolution + reconnect**.
 
-Moonlight saves the selection, disconnects only the video session, and resumes
-the same Sunshine application. The ordinary GameStream launch request is the
-authoritative mode change: Sunshine's native display manager applies the
-requested Vita resolution to the dedicated display. The client does not send a
-separate display-mode hotkey or wait for a host-side transaction. The Windows
-game continues running. The reconnect renegotiates resolution, FPS, bitrate,
+Moonlight saves the selection and performs a controlled reconnect to the same
+Sunshine application. Before both the initial launch and the resume request,
+the paired Vita authenticates to the Windows companion and asks it to arm the
+dedicated display at the requested resolution. The matching stop restores the
+physical layout before the new generation begins; an old delayed stop cannot
+tear down the newer generation. The client does not send a display-mode hotkey
+and the user does not select a Windows output by hand. The Windows game
+continues running. The reconnect renegotiates resolution, FPS, bitrate,
 network mode, and other stream-start settings with Sunshine's encoder. Expect
 a brief black screen while this happens.
 

@@ -1,6 +1,6 @@
 {
-  "schema": "vita-moonlight/host-client-contract/v2",
-  "contract_version": 2,
+  "schema": "vita-moonlight/host-client-contract/v4",
+  "contract_version": 4,
   "stream": {
     "resolutions": [
       {
@@ -40,17 +40,69 @@
     }
   },
   "mode_control": {
-    "authoritative_transport": "gamestream-launch-mode",
-    "native_sunshine_display_management": {
+    "authoritative_transport": "mutual-tls-stream-boundary-v1",
+    "authenticated_stream_boundary": {
+      "protocol": "vita-moonlight-stream-boundary/1",
+      "transport": "https-mutual-tls",
+      "port_offset_from_sunshine_http": 23,
+      "default_port": 48012,
+      "connect_timeout_ms": 1000,
+      "preauthentication_timeout_ms": 2000,
+      "reached_operation_timeout_ms": 65000,
+      "heartbeat_request_timeout_ms": 3000,
+      "heartbeat_interval_ms": 10000,
+      "prepared_lease_lifetime_ms": 240000,
+      "started_lease_lifetime_ms": 45000,
+      "heartbeat_checkpoint_interval_ms": 20000,
+      "maximum_response_bytes": 256,
+      "state_file_configuration_key": "file_state",
+      "server_identity": "paired-sunshine-spki-sha256",
+      "client_identity": "enabled-sunshine-named-device-certificate",
+      "firewall_remote_addresses": "*",
+      "prepare": {
+        "method": "GET",
+        "path": "/v1/prepare",
+        "parameters": [
+          "width",
+          "height",
+          "fps"
+        ],
+        "success_body": "vita-moonlight-stream-boundary/1 prepared generation=<32-lowercase-hex>"
+      },
+      "started": {
+        "method": "GET",
+        "path": "/v1/started",
+        "parameters": [
+          "generation"
+        ],
+        "success_body": "vita-moonlight-stream-boundary/1 started"
+      },
+      "heartbeat": {
+        "method": "GET",
+        "path": "/v1/heartbeat",
+        "parameters": [
+          "generation"
+        ],
+        "success_body": "vita-moonlight-stream-boundary/1 heartbeat"
+      },
+      "stop": {
+        "method": "GET",
+        "path": "/v1/stop",
+        "parameters": [
+          "generation"
+        ],
+        "success_body": "vita-moonlight-stream-boundary/1 stopped"
+      },
+      "generation": "128-bit-random-lowercase-hex",
+      "exact_generation_and_client_owner_required": true,
+      "generic_sunshine_fallback": "connection-refused-or-pre-tls-timeout-only",
+      "unauthenticated_endpoints": false
+    },
+    "sunshine_display_safety": {
       "scope": "all-applications",
-      "configuration_option": "ensure_only_display",
-      "resolution_option": "auto",
-      "refresh_rate_option": "manual",
-      "desktop_refresh_hz": 60,
-      "exact_contract_resolution_remapping": true,
-      "force_sdr_for_vita": true,
-      "revert_delay_ms": 500,
-      "revert_on_disconnect": true
+      "native_display_management": "disabled",
+      "pinned_output": "empty-default-active-output",
+      "vita_global_prep_hook": "absent"
     },
     "legacy_single_application_hook": {
       "command": "session hook-start",

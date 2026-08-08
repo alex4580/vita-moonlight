@@ -25,6 +25,7 @@
 #include "../input/vita.h"
 
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -78,6 +79,15 @@ int pos[2];
  * route. Two records can legitimately share an address after a Sunshine
  * rename, so pairing completion must never look up its owner by address. */
 static char active_saved_host_name[256];
+static char active_stream_boundary_generation[
+    VITA_STREAM_BOUNDARY_GENERATION_CAPACITY];
+static SceUID stream_boundary_heartbeat_thread = -1;
+static SceUID stream_boundary_heartbeat_event = -1;
+static uint32_t stream_boundary_heartbeat_running = 0;
+
+#define STREAM_BOUNDARY_HEARTBEAT_STOP 0x1u
+#define STREAM_BOUNDARY_HEARTBEAT_STACK_SIZE 0x10000
+#define STREAM_BOUNDARY_HEARTBEAT_STOP_TIMEOUT_US 5000000u
 
 #define HOST_KEY_DIRECTORY_CAPACITY 1024u
 #define HOST_KEY_FILE_SUFFIX_RESERVE 32u
@@ -145,6 +155,160 @@ static bool build_host_key_directory(char *output, size_t output_size,
   return true;
 }
 
+static bool stream_boundary_heartbeat_is_running(void) {
+  return __atomic_load_n(
+      &stream_boundary_heartbeat_running, __ATOMIC_ACQUIRE) != 0;
+}
+
+static void set_stream_boundary_heartbeat_running(bool running) {
+  __atomic_store_n(
+      &stream_boundary_heartbeat_running,
+      running ? 1u : 0u,
+      __ATOMIC_RELEASE);
+}
+
+static int stream_boundary_heartbeat_worker(SceSize args, void *argp) {
+  (void)args;
+  (void)argp;
+  bool heartbeat_failure_active = false;
+  while (stream_boundary_heartbeat_is_running()) {
+    SceUInt timeout =
+        VITA_STREAM_BOUNDARY_HEARTBEAT_INTERVAL_MS * 1000u;
+    unsigned int event_bits = 0;
+    int wait_result = sceKernelWaitEventFlag(
+        stream_boundary_heartbeat_event,
+        STREAM_BOUNDARY_HEARTBEAT_STOP,
+        SCE_EVENT_WAITOR | SCE_EVENT_WAITCLEAR_PAT,
+        &event_bits,
+        &timeout);
+    if (!stream_boundary_heartbeat_is_running() ||
+        (wait_result >= 0 &&
+         (event_bits & STREAM_BOUNDARY_HEARTBEAT_STOP) != 0)) {
+      break;
+    }
+
+    int result = gs_heartbeat_stream_boundary(
+        &server, active_stream_boundary_generation);
+    if (result == GS_OK && heartbeat_failure_active) {
+      vita_debug_event(
+          VITA_DEBUG_LEVEL_INFO, "stream.boundary",
+          "action=heartbeat state=recovered code=0");
+      heartbeat_failure_active = false;
+    } else if (result != GS_OK && !heartbeat_failure_active) {
+      vita_debug_event(
+          VITA_DEBUG_LEVEL_WARNING, "stream.boundary",
+          "action=heartbeat state=retry_pending code=%d", result);
+      heartbeat_failure_active = true;
+    }
+  }
+  set_stream_boundary_heartbeat_running(false);
+  return 0;
+}
+
+static bool start_stream_boundary_heartbeat(void) {
+  if (stream_boundary_heartbeat_thread >= 0 ||
+      stream_boundary_heartbeat_event >= 0 ||
+      active_stream_boundary_generation[0] == '\0') {
+    return false;
+  }
+  stream_boundary_heartbeat_event = sceKernelCreateEventFlag(
+      "vita_stream_lease_event", SCE_EVENT_WAITSINGLE, 0, NULL);
+  if (stream_boundary_heartbeat_event < 0) return false;
+
+  SceUID thread = sceKernelCreateThread(
+      "vita_stream_lease", stream_boundary_heartbeat_worker,
+      0, STREAM_BOUNDARY_HEARTBEAT_STACK_SIZE, 0, 0, NULL);
+  if (thread < 0) {
+    sceKernelDeleteEventFlag(stream_boundary_heartbeat_event);
+    stream_boundary_heartbeat_event = -1;
+    return false;
+  }
+  stream_boundary_heartbeat_thread = thread;
+  set_stream_boundary_heartbeat_running(true);
+  if (sceKernelStartThread(thread, 0, NULL) < 0) {
+    set_stream_boundary_heartbeat_running(false);
+    sceKernelDeleteThread(thread);
+    stream_boundary_heartbeat_thread = -1;
+    sceKernelDeleteEventFlag(stream_boundary_heartbeat_event);
+    stream_boundary_heartbeat_event = -1;
+    return false;
+  }
+  return true;
+}
+
+static bool stop_stream_boundary_heartbeat(void) {
+  set_stream_boundary_heartbeat_running(false);
+  if (stream_boundary_heartbeat_event >= 0) {
+    sceKernelSetEventFlag(
+        stream_boundary_heartbeat_event,
+        STREAM_BOUNDARY_HEARTBEAT_STOP);
+  }
+  if (stream_boundary_heartbeat_thread >= 0) {
+    SceUInt timeout = STREAM_BOUNDARY_HEARTBEAT_STOP_TIMEOUT_US;
+    int thread_status = 0;
+    if (sceKernelWaitThreadEnd(
+            stream_boundary_heartbeat_thread,
+            &thread_status,
+            &timeout) < 0) {
+      return false;
+    }
+    if (sceKernelDeleteThread(stream_boundary_heartbeat_thread) < 0) {
+      return false;
+    }
+    stream_boundary_heartbeat_thread = -1;
+  }
+  if (stream_boundary_heartbeat_event >= 0) {
+    if (sceKernelDeleteEventFlag(stream_boundary_heartbeat_event) < 0) {
+      return false;
+    }
+    stream_boundary_heartbeat_event = -1;
+  }
+  return true;
+}
+
+bool ui_connect_stream_boundary_local_cleanup_ready(void) {
+  return !stream_boundary_heartbeat_is_running() &&
+      stream_boundary_heartbeat_thread < 0 &&
+      stream_boundary_heartbeat_event < 0;
+}
+
+static bool release_stream_boundary(bool show_error) {
+  bool worker_stopped = stop_stream_boundary_heartbeat();
+  if (active_stream_boundary_generation[0] == '\0') return worker_stopped;
+  char generation[VITA_STREAM_BOUNDARY_GENERATION_CAPACITY];
+  snprintf(generation, sizeof(generation), "%s",
+           active_stream_boundary_generation);
+  /* One bounded stop attempt owns this local generation. If the network is
+   * gone, the host observer owns durable recovery; never carry a token into a
+   * later PC connection or generic-Sunshine fallback. */
+  if (!worker_stopped) {
+    vita_debug_event(
+        VITA_DEBUG_LEVEL_ERROR, "stream.boundary",
+        "action=stop state=deferred reason=heartbeat_worker code=-1");
+    return false;
+  }
+  active_stream_boundary_generation[0] = '\0';
+  int result = gs_stop_stream_boundary(
+      &server, generation);
+  vita_debug_event(
+      result == GS_OK ? VITA_DEBUG_LEVEL_INFO : VITA_DEBUG_LEVEL_ERROR,
+      "stream.boundary",
+      "action=stop state=%s code=%d",
+      result == GS_OK ? "complete" : "failed", result);
+  if (result == GS_OK) return true;
+  if (show_error) {
+    display_error(
+        "The stream ended, but the PC could not confirm display restore.\n%s\n\n"
+        "The Windows rescue agent will keep trying automatically.",
+        connection_error_message());
+  }
+  return false;
+}
+
+bool ui_connect_release_stream_boundary(bool show_error) {
+  return release_stream_boundary(show_error);
+}
+
 static bool release_host_client_state(void) {
   int status = connection_get_status();
   int transition_result = 0;
@@ -162,10 +326,18 @@ static bool release_host_client_state(void) {
     return false;
   }
 
+  bool restore_confirmed = release_stream_boundary(false);
+  if (!ui_connect_stream_boundary_local_cleanup_ready()) {
+    vita_debug_event(
+        VITA_DEBUG_LEVEL_ERROR, "connection.state",
+        "state=release_blocked reason=heartbeat_worker_join code=-1");
+    return false;
+  }
+
   gs_free_applist(&server_applist);
   gs_cleanup(&server);
   active_saved_host_name[0] = '\0';
-  return true;
+  return restore_confirmed;
 }
 
 int get_app_id(PAPP_LIST list, char *name) {
@@ -200,11 +372,42 @@ void ui_connect_stream(int appId) {
       "fps=%d bitrate_kbps=%d",
       config.stream.width, config.stream.height,
       config.stream.fps, config.stream.bitrate);
-  int ret = gs_start_app(&server, &config.stream, appId, config.sops, config.localaudio, 1);
+  bool bridge_active = false;
+  char bridge_generation[VITA_STREAM_BOUNDARY_GENERATION_CAPACITY];
+  /* A repeated launch request must never overwrite the only token capable of
+   * restoring an earlier prepared display handoff. */
+  if (!release_stream_boundary(true)) return;
+  int ret = gs_prepare_stream_boundary(
+      &server, &config.stream, bridge_generation, &bridge_active);
+  if (ret != GS_OK) {
+    vita_debug_event(
+        VITA_DEBUG_LEVEL_ERROR, "stream.boundary",
+        "action=prepare state=failed code=%d", ret);
+    display_error(
+        "The PC rejected display preparation. The stream was not launched.\n%s",
+        connection_error_message());
+    return;
+  }
+  if (bridge_active) {
+    snprintf(
+        active_stream_boundary_generation,
+        sizeof(active_stream_boundary_generation), "%s", bridge_generation);
+    vita_debug_event(
+        VITA_DEBUG_LEVEL_INFO, "stream.boundary",
+        "action=prepare state=complete protocol=1");
+  } else {
+    vita_debug_event(
+        VITA_DEBUG_LEVEL_INFO, "stream.boundary",
+        "action=prepare state=optional_unavailable");
+  }
+
+  ret = gs_start_app(&server, &config.stream, appId, config.sops, config.localaudio, 1);
   if (ret < 0) {
     vita_debug_event(
         VITA_DEBUG_LEVEL_ERROR, "stream.action",
         "action=connect state=failed phase=app_start code=%d", ret);
+    if (!release_stream_boundary(true))
+      return;
     if (ret == GS_NOT_SUPPORTED_4K)
       display_error("Server doesn't support 4K\n");
     else if (ret == GS_NOT_SUPPORTED_MODE)
@@ -217,6 +420,30 @@ void ui_connect_stream(int appId) {
   vita_debug_event(
       VITA_DEBUG_LEVEL_INFO, "stream.action",
       "action=connect state=ready phase=app_start");
+  if (bridge_active) {
+    ret = gs_started_stream_boundary(
+        &server, active_stream_boundary_generation);
+    if (ret != GS_OK || !start_stream_boundary_heartbeat()) {
+      vita_debug_event(
+          VITA_DEBUG_LEVEL_ERROR, "stream.boundary",
+          "action=started state=failed code=%d", ret);
+      if (connection_get_status() == LI_READY)
+        connection_abort_attempt();
+      else
+        connection_terminate();
+      (void)release_stream_boundary(true);
+      display_error(
+          "Sunshine accepted the app launch, but the PC could not protect "
+          "its display handoff. The connection was closed safely.\n%s",
+          ret == GS_OK
+              ? "The Vita heartbeat worker could not start."
+              : connection_error_message());
+      return;
+    }
+    vita_debug_event(
+        VITA_DEBUG_LEVEL_INFO, "stream.boundary",
+        "action=started state=complete protocol=1");
+  }
 
   enum platform system = VITA;
   int drFlags = 0;
@@ -267,6 +494,7 @@ void ui_connect_stream(int appId) {
 
     display_error("Failed to start stream:\nFailed stage: %s\n(error code %d)",
                   connection_failed_stage_name, ret);
+    (void)release_stream_boundary(true);
     return;
   }
 }
@@ -420,6 +648,8 @@ int ui_connect_loop(int id, void *context, const input_data *input) {
                 "action=reconnect state=requested reason=input_settings");
           }
           connection_terminate();
+          if (!release_stream_boundary(true))
+            break;
           sceKernelDelayThread(500 * 1000);
 
           ret = gs_refresh(&server);
@@ -524,6 +754,7 @@ disconnect:
     connection_abort_attempt();
   else if (status != LI_DISCONNECTED)
     connection_terminate();
+  (void)release_stream_boundary(true);
   sceKernelDelayThread(1000 * 1000);
   release_host_client_state();
   return 1;

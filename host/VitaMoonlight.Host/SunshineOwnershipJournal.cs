@@ -14,6 +14,11 @@ internal sealed record SunshineOwnedHook(
     string Undo,
     bool Elevated);
 
+internal sealed record SunshineOwnedGlobalHook(
+    string Do,
+    string Undo,
+    bool Elevated);
+
 internal sealed class SunshineOwnedLocation
 {
     public required string ConfigurationDirectory { get; init; }
@@ -24,6 +29,9 @@ internal sealed class SunshineOwnedLocation
     public Dictionary<string, SunshineOwnedValue> Values { get; set; } =
         new(StringComparer.OrdinalIgnoreCase);
     public List<SunshineOwnedHook> Hooks { get; set; } = [];
+    public List<SunshineOwnedGlobalHook> GlobalHooks { get; set; } = [];
+    public bool? GlobalPrepCommandOriginallyPresent { get; set; }
+    public bool? LegacyDisplayOwnershipMigrationCompleted { get; set; }
     public List<string> CreatedApplications { get; set; } = [];
     public bool BackupOwned { get; set; }
     public string? BackupSha256 { get; set; }
@@ -31,12 +39,14 @@ internal sealed class SunshineOwnedLocation
 
 internal sealed class SunshineOwnershipState
 {
-    public int FormatVersion { get; init; } = 1;
+    public int FormatVersion { get; set; } = 2;
     public List<SunshineOwnedLocation> Locations { get; init; } = [];
 }
 
 internal static class SunshineOwnershipJournal
 {
+    internal const int CurrentFormatVersion = 2;
+    internal const int LegacyFormatVersion = 1;
     private const string RegistryPath = @"SOFTWARE\VitaMoonlight\Host";
     private const string RegistryValue = "SunshineOwnership";
     private static readonly JsonSerializerOptions JsonOptions = new()
@@ -68,7 +78,8 @@ internal static class SunshineOwnershipJournal
     {
         var state = JsonSerializer.Deserialize<SunshineOwnershipState>(json, JsonOptions)
             ?? throw new InvalidDataException("The Sunshine ownership journal is empty.");
-        if (state.FormatVersion != 1)
+        if (state.FormatVersion is not (
+                LegacyFormatVersion or CurrentFormatVersion))
         {
             throw new InvalidDataException(
                 $"Unsupported Sunshine ownership journal version {state.FormatVersion}.");
@@ -78,8 +89,19 @@ internal static class SunshineOwnershipJournal
             location.Values = new Dictionary<string, SunshineOwnedValue>(
                 location.Values,
                 StringComparer.OrdinalIgnoreCase);
+            location.Hooks ??= [];
+            location.GlobalHooks ??= [];
+            location.CreatedApplications ??= [];
         }
         return state;
+    }
+
+    internal static void UpgradeFormat(SunshineOwnershipState state)
+    {
+        if (state.FormatVersion == LegacyFormatVersion)
+        {
+            state.FormatVersion = CurrentFormatVersion;
+        }
     }
 
     internal static void Save(SunshineOwnershipState state)
@@ -173,6 +195,10 @@ internal static class SunshineOwnershipJournal
         {
             ConfigurationDirectory = normalized,
             HostMode = hostMode,
+            LegacyDisplayOwnershipMigrationCompleted =
+                state.FormatVersion == CurrentFormatVersion
+                    ? true
+                    : null,
         };
         state.Locations.Add(created);
         return created;

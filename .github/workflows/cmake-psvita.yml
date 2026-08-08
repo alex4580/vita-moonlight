@@ -91,6 +91,14 @@ jobs:
             -o /tmp/vita-moonlight-xml-status-test
           /tmp/vita-moonlight-xml-status-test
 
+      - name: Run authenticated stream-boundary protocol vectors
+        run: |
+          cc -std=c99 -Wall -Wextra -Werror -Ilibgamestream \
+            tests/stream_boundary_protocol_test.c \
+            libgamestream/bridge_protocol.c \
+            -o /tmp/vita-moonlight-stream-boundary-test
+          /tmp/vita-moonlight-stream-boundary-test
+
       - name: Compile and run Vita display geometry tests
         run: |
           set -euo pipefail

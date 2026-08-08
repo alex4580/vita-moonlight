@@ -115,6 +115,7 @@ add_executable(${PROJECT_NAME}.elf
 	src/gui/ui_diagnostics.c
 
 	libgamestream/client.c
+	libgamestream/bridge_protocol.c
 	libgamestream/crypto.c
 	libgamestream/http.c
 	libgamestream/mkcert.c

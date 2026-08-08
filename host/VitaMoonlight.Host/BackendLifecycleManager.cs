@@ -439,17 +439,11 @@ internal static class BackendLifecycleManager
                 () => HostRecoveryAgentManager.Install(ExecutablePath()),
                 stepErrors);
         }
-        if (state.ManagedVirtualDisplayInstancesToRestore.Count > 0)
-        {
-            TryStep(
-                "re-enable the managed virtual display device",
-                () => SetManagedVirtualDisplaysWithPhysicalSafety(
-                    state.ManagedVirtualDisplayInstancesToRestore,
-                    enabled: true),
-                stepErrors);
-        }
+        // Enabled host features are idle-ready, not display-armed. The exact
+        // managed device remains disabled until a journaled Vita stream start
+        // owns the display transaction.
         TryStep(
-            "perform the final physical-display safety verification",
+            "enter the safe idle display state",
             RestoreAndVerifyPhysicalOnly,
             stepErrors);
 
@@ -483,10 +477,8 @@ internal static class BackendLifecycleManager
             RestoreAndVerifyPhysicalOnly,
             rollbackErrors);
         TryStep(
-            "return the managed virtual display to its paused state",
-            () => SetManagedVirtualDisplaysWithPhysicalSafety(
-                state.ManagedVirtualDisplayInstancesToRestore,
-                enabled: false),
+            "return the managed virtual display to its idle state",
+            RestoreAndVerifyPhysicalOnly,
             rollbackErrors);
         TryStep(
             "reverify the physical display after enable rollback",
@@ -536,6 +528,10 @@ internal static class BackendLifecycleManager
         // Sunshine is a shared dependency and is never part of the Vita-owned
         // backend lifecycle. Keep the parameter for installer compatibility.
         _ = restoreSunshine;
+        // Retaining the shared driver package must never retain an available
+        // 960x544 fallback monitor after Vita safeguards are removed.
+        _ = restoreManagedVdd;
+        RestoreAndVerifyPhysicalOnlyLocked(transaction);
         BackendStateLoadResult loaded;
         try
         {
@@ -544,11 +540,11 @@ internal static class BackendLifecycleManager
         catch (Exception error) when (IsOperationalError(error))
         {
             // Uninstall must remain possible when a durable Disabled marker
-            // outlives corrupt snapshots. Shared VDD state is then unknown, so
-            // leave it unchanged and remove only exact Vita-owned resources.
+            // outlives corrupt snapshots. The physical-only, VDD-disabled
+            // invariant above is authoritative even when preferences are not.
             return new BackendUninstallHandoff(
                 ErrorReport(
-                    "The Vita host-feature state is unreadable. Uninstall left the shared virtual display device and Sunshine unchanged. " +
+                    "The Vita host-feature state is unreadable. Uninstall kept Sunshine unchanged and left the retained virtual display safely disabled. " +
                     error.Message,
                     BackendDesiredState.Disabled,
                     preferencePersisted: true),
@@ -574,36 +570,11 @@ internal static class BackendLifecycleManager
         try
         {
             RestoreAndVerifyPhysicalOnlyLocked(transaction);
-            if (restoreManagedVdd &&
-                state.ManagedVirtualDisplayInstancesToRestore.Count > 0)
-            {
-                var savedInstanceIds =
-                    state.ManagedVirtualDisplayInstancesToRestore.ToHashSet(
-                        StringComparer.OrdinalIgnoreCase);
-                var presentSavedInstanceIds = DisplayWizardAdapter
-                    .InspectManagedDriverDevices()
-                    .Where(device =>
-                        device.Present &&
-                        savedInstanceIds.Contains(device.InstanceId))
-                    .Select(device => device.InstanceId)
-                    .ToArray();
-                try
-                {
-                    DisplayWizardAdapter.SetManagedDriverEnabled(
-                        transaction,
-                        presentSavedInstanceIds,
-                        enabled: true);
-                }
-                finally
-                {
-                    RestoreAndVerifyPhysicalOnlyLocked(transaction);
-                }
-            }
             var restored = BackendLifecycleStateStore.WithNextRevision(
                 state,
                 BackendDesiredState.Disabled,
                 BackendLifecycleStatus.Partial,
-                "The exact managed-VDD state was temporarily restored for uninstall. " +
+                "Uninstall prepared a physical-only desktop and disabled the Vita virtual display. " +
                 "If uninstall is cancelled or fails, run Pause Vita host features again.");
             BackendLifecycleStateStore.SaveLocked(transaction, restored);
             return new BackendUninstallHandoff(
@@ -646,7 +617,7 @@ internal static class BackendLifecycleManager
             if (rollbackErrors.Count == 0)
             {
                 throw new InvalidOperationException(
-                    "Uninstall could not restore the previously enabled managed Vita display. " +
+                "Uninstall could not verify the idle managed Vita display state. " +
                     "The original paused state and physical desktop were restored.",
                     error);
             }
@@ -794,13 +765,38 @@ internal static class BackendLifecycleManager
             if (state.ManagedVirtualDisplayInstancesToRestore.Any(instanceId =>
                     !components.ManagedVirtualDisplayDevices.Any(device =>
                         device.Present &&
-                        device.Enabled &&
                         string.Equals(
                             device.InstanceId,
                             instanceId,
                             StringComparison.OrdinalIgnoreCase))))
             {
-                issues.Add("A previously enabled managed virtual display instance has not been restored.");
+                issues.Add("A recorded managed virtual display instance is no longer present.");
+            }
+            if (components.RecoveryPending)
+            {
+                if (!components.ManagedVirtualDisplayEnabled)
+                {
+                    issues.Add(
+                        "A Vita stream transaction is pending, but its managed virtual display device is not enabled.");
+                }
+            }
+            else
+            {
+                if (components.ActivePhysicalDisplayCount <= 0)
+                {
+                    issues.Add(
+                        "No active physical display was detected while the Vita host is idle.");
+                }
+                if (components.ManagedVirtualDisplayActive)
+                {
+                    issues.Add(
+                        "The managed virtual display is active without a Vita stream transaction.");
+                }
+                if (components.ManagedVirtualDisplayEnabled)
+                {
+                    issues.Add(
+                        "The managed virtual display device is still enabled while the Vita host is idle.");
+                }
             }
         }
 
@@ -824,7 +820,12 @@ internal static class BackendLifecycleManager
 
     private static BackendPersistedState CaptureCurrentAsEnabled()
     {
-        var devices = DisplayWizardAdapter.InspectManagedDriverDevices();
+        // Pause authority comes from the exact protected VDD journal, never
+        // from a hardware-ID-wide enumeration. A missing journal with a
+        // present MTT node is an unowned/ambiguous configuration and fails
+        // before the lifecycle snapshot can authorize a later toggle.
+        var devices = ManagedVddOwnershipJournal
+            .RequireOwnedPresentDevices(required: false);
         var recoveryTask = RecoveryTaskManager.GetInstallationState();
         ExactScheduledTaskManager.RequireKnown(
             recoveryTask,
@@ -841,7 +842,7 @@ internal static class BackendLifecycleManager
             rescueTask.State == ExactScheduledTaskState.Present ||
                 rescueAgentRunning,
             devices
-                .Where(device => device.Present && device.Enabled)
+                .Where(device => device.Present)
                 .Select(device => device.InstanceId)
                 .ToArray(),
             SunshineBackendController.CaptureManagedState());
@@ -974,10 +975,9 @@ internal static class BackendLifecycleManager
         // recovery or verification fails, no task or device pause is
         // attempted.
         new SessionManager().RestoreIfPendingLocked(transaction);
-        var topology = new DisplayTopologyService();
-        topology.RecoverPhysicalDisplays();
-        topology.DisableManagedVirtualDisplays();
-        UninstallManager.VerifyPhysicalOnlyTopology(topology);
+        ManagedVirtualDisplayRuntime.ReconcileIdleLocked(
+            transaction,
+            requireManagedDevice: false);
     }
 
     private static void TryStep(

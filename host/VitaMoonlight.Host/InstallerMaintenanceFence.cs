@@ -590,6 +590,43 @@ internal static class InstallerMaintenanceFence
                     ? "Installer maintenance cannot end because one or more pre-existing Vita recovery safeguards have not been restored. Run setup again to finish recovery."
                     : "Installer maintenance cannot end because Vita host features are Paused but a Vita recovery task is still installed. Run setup again to finish the pause operation.");
         }
+
+        // Task presence alone is not a safe handoff. Prove the display-side
+        // invariant while holding the same cross-process lease used by every
+        // stream and recovery mutation, then keep the durable maintenance
+        // fence if any part is unfinished.
+        using var displayTransaction = DisplayTransactionLock.Acquire();
+        if (File.Exists(HostStatePaths.RecoveryFile))
+        {
+            throw new InvalidOperationException(
+                "Installer maintenance cannot end while a display recovery transaction is pending. Setup can be retried without losing the saved physical layout.");
+        }
+        var suspend = DisplaySuspendIntentStore.Inspect();
+        if (suspend.Disposition != DisplaySuspendIntentDisposition.Missing)
+        {
+            throw new InvalidOperationException(
+                "Installer maintenance cannot end while Windows suspend/resume display recovery is active or incomplete.");
+        }
+        var topology = new DisplayTopologyService();
+        if (!topology.TryCaptureExactPhysicalOnlySnapshot(
+                out var physical) ||
+            physical is null)
+        {
+            throw new InvalidOperationException(
+                "Installer maintenance cannot end because Windows did not expose a complete, available, physical-only display layout.");
+        }
+        var ownedDevices = File.Exists(
+                ManagedVddOwnershipJournal.JournalFile)
+            ? ManagedVddOwnershipJournal
+                .RequireOwnedPresentDevicesLocked(
+                    displayTransaction,
+                    required: false)
+            : [];
+        if (ownedDevices.Any(device => device.Enabled))
+        {
+            throw new InvalidOperationException(
+                "Installer maintenance cannot end because the exact Vita-owned virtual display device is still enabled while idle.");
+        }
     }
 
     internal static bool CanEndForTest(
