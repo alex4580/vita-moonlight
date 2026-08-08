@@ -210,7 +210,7 @@
       }
     ],
     "stager": "tools/stage-vita-dependency-sources.py",
-    "stager_sha256": "2fc61abf7c88181aa2dd0e1db51f21aba5a02389af8e4a4c8347a661e3245281"
+    "stager_sha256": "32c721b015fc0c56f42fe779a67c6cebd91ae658561a24f4718acb4118288cb6"
   },
   "compiled_component_coverage": [
     {

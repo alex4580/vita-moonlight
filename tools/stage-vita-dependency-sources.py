@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 import hashlib
+import http.client
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -15,6 +16,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import urllib.error
 import urllib.request
 
@@ -26,6 +28,8 @@ MANIFEST_SCHEMA = "vita-moonlight/vita-source-dependency-manifest/v1"
 HEX40 = re.compile(r"[0-9a-f]{40}")
 HEX64 = re.compile(r"[0-9a-f]{64}")
 SAFE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]*")
+DOWNLOAD_RETRY_DELAYS_SECONDS = (1, 2, 4)
+TRANSIENT_HTTP_STATUSES = frozenset({408, 425, 429, 500, 502, 503, 504})
 EXPECTED_ORDER = [
     "zlib",
     "bzip2",
@@ -43,6 +47,10 @@ EXPECTED_ORDER = [
 
 class DependencySourceError(RuntimeError):
     """Raised when dependency provenance or staging fails closed."""
+
+
+class TransientDownloadError(RuntimeError):
+    """Raised only for source-download failures that are safe to retry."""
 
 
 def utc_now() -> str:
@@ -237,7 +245,304 @@ def validate_lock(lock: dict) -> dict:
     return recipe
 
 
-def obtain_archive(item: dict, cache: Path) -> Path:
+def open_source_response(request: urllib.request.Request):
+    try:
+        return urllib.request.urlopen(request, timeout=60)
+    except urllib.error.HTTPError as exc:
+        if exc.code in TRANSIENT_HTTP_STATUSES:
+            raise TransientDownloadError(f"HTTP {exc.code}: {exc.reason}") from exc
+        raise DependencySourceError(f"source server returned HTTP {exc.code}: {exc.reason}") from exc
+    except (
+        urllib.error.URLError,
+        http.client.IncompleteRead,
+        TimeoutError,
+        ConnectionError,
+        OSError,
+    ) as exc:
+        raise TransientDownloadError(str(exc)) from exc
+
+
+def download_archive_once(item: dict, request: urllib.request.Request, partial: Path) -> None:
+    response = open_source_response(request)
+    try:
+        with response:
+            declared = response.headers.get("Content-Length")
+            try:
+                declared_size = int(declared) if declared is not None else None
+            except (TypeError, ValueError) as exc:
+                raise DependencySourceError(
+                    f"{item['name']}: server returned an invalid Content-Length"
+                ) from exc
+            if declared_size is not None and declared_size != item["size"]:
+                raise DependencySourceError(
+                    f"{item['name']}: server length {declared} differs from source lock"
+                )
+            try:
+                output = partial.open("wb")
+            except OSError as exc:
+                raise DependencySourceError(f"could not write {partial}: {exc}") from exc
+            with output:
+                copied = 0
+                while True:
+                    try:
+                        chunk = response.read(1024 * 1024)
+                    except (
+                        urllib.error.URLError,
+                        http.client.IncompleteRead,
+                        TimeoutError,
+                        ConnectionError,
+                        OSError,
+                    ) as exc:
+                        raise TransientDownloadError(str(exc)) from exc
+                    if not chunk:
+                        break
+                    copied += len(chunk)
+                    if copied > item["size"]:
+                        raise DependencySourceError(
+                            f"{item['name']}: download exceeded locked size"
+                        )
+                    try:
+                        output.write(chunk)
+                    except OSError as exc:
+                        raise DependencySourceError(f"could not write {partial}: {exc}") from exc
+                if copied != item["size"]:
+                    raise TransientDownloadError(
+                        f"{item['name']}: download ended at {copied} of "
+                        f"{item['size']} locked bytes"
+                    )
+    except (DependencySourceError, TransientDownloadError):
+        raise
+
+
+def retry_transient_download(
+    name: str,
+    operation,
+    *,
+    sleeper=time.sleep,
+    announce: bool = True,
+) -> None:
+    attempts = len(DOWNLOAD_RETRY_DELAYS_SECONDS) + 1
+    for attempt in range(1, attempts + 1):
+        try:
+            operation()
+            return
+        except TransientDownloadError as exc:
+            if attempt == attempts:
+                raise DependencySourceError(
+                    f"could not download {name} after {attempts} attempts: {exc}"
+                ) from exc
+            delay = DOWNLOAD_RETRY_DELAYS_SECONDS[attempt - 1]
+            if announce:
+                print(
+                    f"temporary download failure for {name} "
+                    f"(attempt {attempt}/{attempts}: {exc}); retrying in {delay}s",
+                    file=sys.stderr,
+                )
+            sleeper(delay)
+
+
+def self_test_download_retries() -> None:
+    attempts = 0
+    delays: list[int] = []
+
+    def succeeds_after_two_retries() -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise TransientDownloadError("simulated HTTP 502")
+
+    retry_transient_download(
+        "retry-policy-test",
+        succeeds_after_two_retries,
+        sleeper=delays.append,
+        announce=False,
+    )
+    if attempts != 3 or delays != [1, 2]:
+        raise DependencySourceError("download retry self-test did not follow its backoff policy")
+
+    exhausted = 0
+
+    def always_transient() -> None:
+        nonlocal exhausted
+        exhausted += 1
+        raise TransientDownloadError("simulated timeout")
+
+    try:
+        retry_transient_download(
+            "retry-exhaustion-test",
+            always_transient,
+            sleeper=lambda _delay: None,
+            announce=False,
+        )
+    except DependencySourceError as exc:
+        if "after 4 attempts" not in str(exc):
+            raise DependencySourceError("download retry exhaustion message is incomplete") from exc
+    else:
+        raise DependencySourceError("download retry self-test did not fail closed")
+    if exhausted != 4:
+        raise DependencySourceError("download retry self-test used the wrong attempt count")
+
+    if 502 not in TRANSIENT_HTTP_STATUSES or 429 not in TRANSIENT_HTTP_STATUSES:
+        raise DependencySourceError("download retry self-test is missing transient HTTP statuses")
+    if 404 in TRANSIENT_HTTP_STATUSES:
+        raise DependencySourceError("download retry self-test would retry a permanent HTTP error")
+
+    original_urlopen = urllib.request.urlopen
+
+    def incomplete_open(*_args, **_kwargs):
+        raise http.client.IncompleteRead(b"partial", 100)
+
+    urllib.request.urlopen = incomplete_open
+    try:
+        try:
+            open_source_response(urllib.request.Request("https://example.invalid/source"))
+        except TransientDownloadError:
+            pass
+        else:
+            raise DependencySourceError(
+                "download retry self-test did not classify an incomplete response as transient"
+            )
+    finally:
+        urllib.request.urlopen = original_urlopen
+
+    class ShortResponse:
+        headers: dict[str, str] = {}
+
+        def __init__(self, payload: bytes = b"short") -> None:
+            self.payload = payload
+            self.sent = False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, _exc_type, _exc, _traceback) -> bool:
+            return False
+
+        def read(self, _size: int) -> bytes:
+            if self.sent:
+                return b""
+            self.sent = True
+            return self.payload
+
+    namespace = globals()
+    original_open_source_response = namespace["open_source_response"]
+    namespace["open_source_response"] = lambda _request: ShortResponse()
+    try:
+        with tempfile.TemporaryDirectory(prefix="vita-download-retry-test-") as temporary:
+            partial = Path(temporary) / "short.partial"
+            try:
+                download_archive_once(
+                    {"name": "short-response-test", "size": 10},
+                    urllib.request.Request("https://example.invalid/source"),
+                    partial,
+                )
+            except TransientDownloadError as exc:
+                if "download ended at 5 of 10 locked bytes" not in str(exc):
+                    raise DependencySourceError(
+                        "short-response retry diagnostic is incomplete"
+                    ) from exc
+            else:
+                raise DependencySourceError(
+                    "download retry self-test accepted a truncated response"
+                )
+    finally:
+        namespace["open_source_response"] = original_open_source_response
+
+    git_fetch_attempts = 0
+    original_run = namespace["run"]
+    original_delays = namespace["DOWNLOAD_RETRY_DELAYS_SECONDS"]
+
+    def flaky_git_run(command, **_kwargs) -> str:
+        nonlocal git_fetch_attempts
+        git_fetch_attempts += 1
+        if command[:4] != ["git", "-C", "retry-test", "fetch"]:
+            raise DependencySourceError("git fetch retry self-test used an unexpected command")
+        if git_fetch_attempts == 1:
+            raise DependencySourceError("simulated transient git transport failure")
+        return ""
+
+    namespace["run"] = flaky_git_run
+    namespace["DOWNLOAD_RETRY_DELAYS_SECONDS"] = (0,)
+    try:
+        fetch_git_commit(
+            Path("retry-test"),
+            "git-fetch-retry-test",
+            "0" * 40,
+            announce_retries=False,
+        )
+    finally:
+        namespace["run"] = original_run
+        namespace["DOWNLOAD_RETRY_DELAYS_SECONDS"] = original_delays
+    if git_fetch_attempts != 2:
+        raise DependencySourceError("git fetch retry self-test used the wrong attempt count")
+
+    verified_payload = b"deterministic verified Vita dependency source"
+    verified_item = {
+        "name": "retry-cleanup-test.tar",
+        "url": "https://example.invalid/source",
+        "size": len(verified_payload),
+        "sha256": hashlib.sha256(verified_payload).hexdigest(),
+    }
+    response_payloads = [b"short", verified_payload]
+    response_attempts = 0
+
+    def short_then_complete(_request):
+        nonlocal response_attempts
+        response_attempts += 1
+        return ShortResponse(response_payloads.pop(0))
+
+    original_delays = namespace["DOWNLOAD_RETRY_DELAYS_SECONDS"]
+    namespace["DOWNLOAD_RETRY_DELAYS_SECONDS"] = (0,)
+    namespace["open_source_response"] = short_then_complete
+    try:
+        with tempfile.TemporaryDirectory(prefix="vita-download-cleanup-test-") as temporary:
+            cache = Path(temporary)
+            target = obtain_archive(verified_item, cache, announce_retries=False)
+            if (
+                response_attempts != 2
+                or target.read_bytes() != verified_payload
+                or target.with_name(target.name + ".partial").exists()
+            ):
+                raise DependencySourceError(
+                    "download retry self-test did not replace a truncated partial cleanly"
+                )
+    finally:
+        namespace["open_source_response"] = original_open_source_response
+        namespace["DOWNLOAD_RETRY_DELAYS_SECONDS"] = original_delays
+
+    corrupted_attempts = 0
+
+    def corrupted_response(_request):
+        nonlocal corrupted_attempts
+        corrupted_attempts += 1
+        return ShortResponse(b"x" * len(verified_payload))
+
+    namespace["open_source_response"] = corrupted_response
+    try:
+        with tempfile.TemporaryDirectory(prefix="vita-download-integrity-test-") as temporary:
+            cache = Path(temporary)
+            target = cache / verified_item["name"]
+            partial = target.with_name(target.name + ".partial")
+            try:
+                obtain_archive(verified_item, cache, announce_retries=False)
+            except DependencySourceError as exc:
+                if "bytes differ from lock" not in str(exc):
+                    raise DependencySourceError(
+                        "download retry integrity diagnostic is incomplete"
+                    ) from exc
+            else:
+                raise DependencySourceError(
+                    "download retry self-test accepted exact-size bytes with the wrong hash"
+                )
+            if corrupted_attempts != 1 or target.exists() or partial.exists():
+                raise DependencySourceError(
+                    "download retry self-test did not clean a rejected integrity input"
+                )
+    finally:
+        namespace["open_source_response"] = original_open_source_response
+
+
+def obtain_archive(item: dict, cache: Path, *, announce_retries: bool = True) -> Path:
     name = item["name"]
     if not isinstance(name, str) or SAFE_NAME.fullmatch(name) is None:
         raise DependencySourceError(f"invalid archive name {name!r}")
@@ -258,26 +563,21 @@ def obtain_archive(item: dict, cache: Path) -> Path:
     request = urllib.request.Request(
         item["url"], headers={"User-Agent": "vita-moonlight-dependency-source/1"}
     )
-    try:
-        with urllib.request.urlopen(request, timeout=60) as response, partial.open("wb") as output:
-            declared = response.headers.get("Content-Length")
-            if declared is not None and int(declared) != item["size"]:
-                raise DependencySourceError(
-                    f"{name}: server length {declared} differs from source lock"
-                )
-            copied = 0
-            while chunk := response.read(1024 * 1024):
-                copied += len(chunk)
-                if copied > item["size"]:
-                    raise DependencySourceError(f"{name}: download exceeded locked size")
-                output.write(chunk)
-    except (OSError, ValueError, urllib.error.URLError) as exc:
+
+    def attempt() -> None:
         partial.unlink(missing_ok=True)
-        if isinstance(exc, DependencySourceError):
-            raise
-        raise DependencySourceError(f"could not download {name}: {exc}") from exc
-    locked_regular_file(partial, item["size"], item["sha256"], name)
-    partial.replace(target)
+        download_archive_once(item, request, partial)
+
+    try:
+        retry_transient_download(name, attempt, announce=announce_retries)
+        locked_regular_file(partial, item["size"], item["sha256"], name)
+        partial.replace(target)
+    except DependencySourceError:
+        partial.unlink(missing_ok=True)
+        raise
+    except OSError as exc:
+        partial.unlink(missing_ok=True)
+        raise DependencySourceError(f"could not cache {name}: {exc}") from exc
     return target
 
 
@@ -336,6 +636,28 @@ def run(command: list[str], *, cwd: Path | None = None, env: dict[str, str] | No
     return result.stdout.strip()
 
 
+def fetch_git_commit(
+    clone: Path,
+    component: str,
+    commit: str,
+    *,
+    announce_retries: bool = True,
+) -> None:
+    command = ["git", "-C", str(clone), "fetch", "--quiet", "--depth=1", "origin", commit]
+
+    def attempt() -> None:
+        try:
+            run(command)
+        except DependencySourceError as exc:
+            raise TransientDownloadError(f"git fetch failed: {exc}") from exc
+
+    retry_transient_download(
+        f"{component} git source",
+        attempt,
+        announce=announce_retries,
+    )
+
+
 def export_git_source(item: dict, destination: Path) -> None:
     commit = str(item.get("commit", ""))
     repository = str(item.get("repository", ""))
@@ -348,7 +670,7 @@ def export_git_source(item: dict, destination: Path) -> None:
         archive_path = Path(temporary) / "source.tar"
         run(["git", "init", "--quiet", str(clone)])
         run(["git", "-C", str(clone), "remote", "add", "origin", repository])
-        run(["git", "-C", str(clone), "fetch", "--quiet", "--depth=1", "origin", commit])
+        fetch_git_commit(clone, item["component"], commit)
         actual = run(["git", "-C", str(clone), "rev-parse", "FETCH_HEAD"])
         if actual != commit:
             raise DependencySourceError(f"{item['component']}: fetched {actual}, expected {commit}")
@@ -546,6 +868,7 @@ def main() -> int:
     if args.self_test:
         if args.output_dir or args.manifest or args.finalize_install:
             raise DependencySourceError("--self-test cannot stage or finalize")
+        self_test_download_retries()
         print(
             "Vita dependency source self-test passed: "
             f"components={len(EXPECTED_ORDER)}, patches={len(recipe['patches'])}, "
