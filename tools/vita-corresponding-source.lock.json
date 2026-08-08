@@ -42,7 +42,7 @@
       "name": "freetype-2.14.3.tar.xz",
       "sha256": "36bc4f1cc413335368ee656c42afca65c5a3987e8768cc28cf11ba775e785a5f",
       "size": 2670220,
-      "url": "https://download.savannah.gnu.org/releases/freetype/freetype-2.14.3.tar.xz",
+      "url": "https://download-mirror.savannah.gnu.org/releases/freetype/freetype-2.14.3.tar.xz",
       "version": "2.14.3"
     },
     {
@@ -339,7 +339,7 @@
       "sha256": "ecefad2b6deec9ba448ba4635c4a596091b515b5b6e67e67bc0bec0b487868bd"
     }
   ],
-  "locked_at_utc": "2026-08-08T00:32:32Z",
+  "locked_at_utc": "2026-08-08T12:30:06Z",
   "mbedtls_source_lock": "tools/vita-mbedtls-source.lock.json",
   "schema": "vita-moonlight/vita-corresponding-source-lock/v1",
   "submodules": [
