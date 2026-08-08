@@ -78,6 +78,10 @@ Source: "{#SunshineDir}\*"; DestDir: "{app}\tools\Sunshine"; Flags: ignoreversio
 Source: "..\..\tools\summarize-vita-log.py"; DestDir: "{app}\tools\SupportLog"; Flags: ignoreversion
 Source: "..\..\README.md"; DestDir: "{app}"; DestName: "README.md"; Flags: ignoreversion
 Source: "..\..\PRIVACY.md"; DestDir: "{app}"; DestName: "PRIVACY.md"; Flags: ignoreversion
+Source: "..\..\THIRD_PARTY_NOTICES.txt"; DestDir: "{app}"; DestName: "THIRD_PARTY_NOTICES.txt"; Flags: ignoreversion
+Source: "..\..\licenses\vita\*"; DestDir: "{app}\licenses\vita"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\..\third_party\h264bitstream\LICENSE"; DestDir: "{app}\licenses\vita"; DestName: "LGPL-2.1-h264bitstream.txt"; Flags: ignoreversion
+Source: "..\..\assets\LICENSE-Mononoki.txt"; DestDir: "{app}\licenses\vita"; DestName: "OFL-Mononoki.txt"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}\host"; Flags: ignoreversion
 Source: "..\BETA_SMOKE_TEST.md"; DestDir: "{app}\host"; Flags: ignoreversion
 Source: "..\END_TO_END_TEST.md"; DestDir: "{app}\host"; Flags: ignoreversion
@@ -385,6 +389,19 @@ begin
     ErrorText :=
       'Setup could not start its protected maintenance helper. No installed ' +
       'host process or recovery safeguard was changed.';
+    exit;
+  end;
+  if ResultCode = 4 then
+  begin
+    RestartRequiredByPrerequisite := True;
+    HostError := ReadMaintenanceHelperError;
+    if HostError <> '' then
+      HostError := #13#10 + #13#10 + HostError;
+    ErrorText :=
+      'Windows requires a restart before Vita Moonlight can safely recover ' +
+      'the physical display for setup or repair.' + HostError + #13#10 + #13#10 +
+      'No application files or recovery safeguards were replaced. Restart ' +
+      'Windows, confirm the physical monitor is visible, then run this installer again.';
     exit;
   end;
   if ResultCode <> 0 then

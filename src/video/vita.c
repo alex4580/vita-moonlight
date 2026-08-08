@@ -26,6 +26,7 @@
 #include "../util.h"
 #include "../input/vita.h"
 #include "vita.h"
+#include "scaling.h"
 #include "sps.h"
 
 #include <Limelight.h>
@@ -206,18 +207,7 @@ static void atomic_store_fps(uint32_t rendered, uint32_t target) {
   atomic_store_u32(&fps_snapshot, packed);
 }
 
-typedef struct {
-  unsigned int texture_width;
-  unsigned int texture_height;
-  float origin_x;
-  float origin_y;
-  float region_x1;
-  float region_y1;
-  float region_x2;
-  float region_y2;
-} image_scaling_settings;
-
-static image_scaling_settings image_scaling = {0};
+static VitaScalingSettings image_scaling = {0};
 
 static void draw_stream_surface(bool count_video_frame) {
   uint32_t request_generation =
@@ -247,59 +237,30 @@ static void draw_stream_surface(bool count_video_frame) {
 }
 
 void update_scaling_settings(int width, int height) {
-  image_scaling.texture_width = SCREEN_WIDTH;
-  image_scaling.texture_height = SCREEN_HEIGHT;
-  image_scaling.origin_x = 0;
-  image_scaling.origin_y = 0;
-  image_scaling.region_x1 = 0;
-  image_scaling.region_y1 = 0;
-  image_scaling.region_x2 = image_scaling.texture_width;
-  image_scaling.region_y2 = image_scaling.texture_height;
-
-  double scaled_width = (double) SCREEN_HEIGHT * width / height;
-  double scaled_height = (double) SCREEN_WIDTH * height / width;
-
-  if (SCREEN_WIDTH * height == SCREEN_HEIGHT * width) {
-    // streaming resolution ratio matches Vita's screen ratio
-    // use default setting
-  } else if (SCREEN_WIDTH * height > SCREEN_HEIGHT * width) {
-    // host ratio example: 4:3, 16:10
-    // Vita ratio range: 2:16 (64 x 544) - native (960 x 544)
-    if (config.center_region_only) {
-      image_scaling.texture_height = VITA_DECODER_RESOLUTION(scaled_height);
-      image_scaling.region_y1 = VITA_DECODER_RESOLUTION((scaled_height - SCREEN_HEIGHT) / 2);
-      image_scaling.region_y2 = VITA_DECODER_RESOLUTION((scaled_height + SCREEN_HEIGHT) / 2);
-    } else {
-      image_scaling.texture_width = VITA_DECODER_RESOLUTION(scaled_width);
-      image_scaling.region_x2 = VITA_DECODER_RESOLUTION(scaled_width);
-      image_scaling.origin_x = round((double) (SCREEN_WIDTH - image_scaling.texture_width) / 2);
-    }
-  } else {
-    // host ratio example: 16:9, 21:9, 32:9
-    // Vita ratio range: native (960 x 544) - 15:1 (960 x 64)
-    if (config.center_region_only) {
-      image_scaling.texture_width = VITA_DECODER_RESOLUTION(scaled_width);
-      image_scaling.region_x1 = VITA_DECODER_RESOLUTION((scaled_width - SCREEN_WIDTH) / 2);
-      image_scaling.region_x2 = VITA_DECODER_RESOLUTION((scaled_width + SCREEN_WIDTH) / 2);
-    } else {
-      image_scaling.texture_height = VITA_DECODER_RESOLUTION(scaled_height);
-      image_scaling.region_y2 = VITA_DECODER_RESOLUTION(scaled_height);
-      image_scaling.origin_y = round((double) (SCREEN_HEIGHT - image_scaling.texture_height) / 2);
-    }
+  if (!vita_scaling_calculate(
+          width, height, config.center_region_only, &image_scaling)) {
+    /* Moonlight never negotiates non-positive dimensions, but retain a safe
+     * native fallback so a malformed setup cannot create invalid Vita2D
+     * coordinates before the decoder reports its own setup error. */
+    (void)vita_scaling_calculate(
+        SCREEN_WIDTH, SCREEN_HEIGHT, false, &image_scaling);
+    vita_debug_event(
+        VITA_DEBUG_LEVEL_ERROR, "decoder.scaling",
+        "state=fallback source_width=%d source_height=%d", width, height);
   }
 
   printf("update_scaling_settings: width = %u\n", width);
   printf("update_scaling_settings: height = %u\n", height);
-  printf("update_scaling_settings: scaled_width = %f\n", scaled_width);
-  printf("update_scaling_settings: scaled_height = %f\n", scaled_height);
   printf("update_scaling_settings: image_scaling.texture_width = %u\n", image_scaling.texture_width);
   printf("update_scaling_settings: image_scaling.texture_height = %u\n", image_scaling.texture_height);
-  printf("update_scaling_settings: image_scaling.origin_x = %f\n", image_scaling.origin_x);
-  printf("update_scaling_settings: image_scaling.origin_y = %f\n", image_scaling.origin_y);
-  printf("update_scaling_settings: image_scaling.region_x1 = %f\n", image_scaling.region_x1);
-  printf("update_scaling_settings: image_scaling.region_y1 = %f\n", image_scaling.region_y1);
-  printf("update_scaling_settings: image_scaling.region_x2 = %f\n", image_scaling.region_x2);
-  printf("update_scaling_settings: image_scaling.region_y2 = %f\n", image_scaling.region_y2);
+  printf("update_scaling_settings: image_scaling.destination_x = %f\n", image_scaling.destination_x);
+  printf("update_scaling_settings: image_scaling.destination_y = %f\n", image_scaling.destination_y);
+  printf("update_scaling_settings: image_scaling.source_x = %f\n", image_scaling.source_x);
+  printf("update_scaling_settings: image_scaling.source_y = %f\n", image_scaling.source_y);
+  printf("update_scaling_settings: image_scaling.source_width = %f\n", image_scaling.source_width);
+  printf("update_scaling_settings: image_scaling.source_height = %f\n", image_scaling.source_height);
+  printf("update_scaling_settings: image_scaling.scale_x = %f\n", image_scaling.scale_x);
+  printf("update_scaling_settings: image_scaling.scale_y = %f\n", image_scaling.scale_y);
 }
 
 static int vita_pacer_thread_main(SceSize args, void *argp) {
@@ -309,6 +270,9 @@ static int vita_pacer_thread_main(SceSize args, void *argp) {
 
   while (atomic_load_u32(&active_pacer_thread)) {
     uint64_t now = sceKernelGetSystemTimeWide();
+    /* Keep diagnostics honest during a total video freeze. This is a cheap
+     * no-op unless an overlay, the diagnostics screen, or logging is active. */
+    ui_diagnostics_tick(now);
 
     if (now - last_check_time >= PACER_SAMPLE_INTERVAL_US) {
       uint64_t elapsed_us = now - last_check_time;
@@ -328,7 +292,8 @@ static int vita_pacer_thread_main(SceSize args, void *argp) {
 
     bool live_ui =
         stream_overlay_is_open() ||
-        ui_diagnostics_get_overlay_mode() != UI_DIAGNOSTICS_OVERLAY_OFF;
+        ui_diagnostics_get_overlay_mode() != UI_DIAGNOSTICS_OVERLAY_OFF ||
+        atomic_load_u32(&poor_net_indicator_requested) != 0;
     bool redraw_pending =
         atomic_load_u32(&redraw_request_generation) !=
         atomic_load_u32(&rendered_redraw_generation);
@@ -877,18 +842,23 @@ static int vita_submit_decode_unit(PDECODE_UNIT decodeUnit) {
 void draw_streaming(vita2d_texture *frame_texture) {
   // ui is still rendering in the background, clear the screen first
   vita2d_clear_screen();
-  vita2d_draw_texture_part(frame_texture,
-                           image_scaling.origin_x,
-                           image_scaling.origin_y,
-                           image_scaling.region_x1,
-                           image_scaling.region_y1,
-                           image_scaling.region_x2,
-                           image_scaling.region_y2);
+  vita2d_draw_texture_part_scale(frame_texture,
+                                 image_scaling.destination_x,
+                                 image_scaling.destination_y,
+                                 image_scaling.source_x,
+                                 image_scaling.source_y,
+                                 image_scaling.source_width,
+                                 image_scaling.source_height,
+                                 image_scaling.scale_x,
+                                 image_scaling.scale_y);
 }
 
 void draw_indicators() {
   if (atomic_load_u32(&poor_net_indicator_requested)) {
-    vita2d_font_draw_text(font, 40, 500, RGBA8(0xFF, 0xFF, 0xFF, poor_net_indicator.alpha), 64, ICON_NETWORK);
+    vita2d_font_draw_text(
+        font, 40, 500,
+        RGBA8(0xFF, 0xFF, 0xFF, poor_net_indicator.alpha),
+        26, "NETWORK");
     poor_net_indicator.alpha += (0x4 * (poor_net_indicator.plus ? 1 : -1));
     if (poor_net_indicator.alpha == 0) {
       poor_net_indicator.plus = !poor_net_indicator.plus;
@@ -900,7 +870,8 @@ void draw_indicators() {
   }
 
   if (dc_tracker.currently_sprinting) {
-    vita2d_font_draw_text(font, 40, 50, RGBA8(0xFF, 0xFF, 0xFF, 0xAA), 48, ICON_SPRINTING);
+    vita2d_font_draw_text(
+        font, 40, 50, RGBA8(0xFF, 0xFF, 0xFF, 0xAA), 28, "RUN");
   }
 
 }
@@ -942,11 +913,15 @@ void vitavideo_request_redraw() {
 }
 
 void vitavideo_show_poor_net_indicator() {
-  atomic_store_u32(&poor_net_indicator_requested, 1);
+  if (atomic_exchange_u32(&poor_net_indicator_requested, 1) == 0) {
+    vitavideo_request_redraw();
+  }
 }
 
 void vitavideo_hide_poor_net_indicator() {
-  atomic_store_u32(&poor_net_indicator_requested, 0);
+  if (atomic_exchange_u32(&poor_net_indicator_requested, 0) != 0) {
+    vitavideo_request_redraw();
+  }
 }
 
 int vitavideo_initialized() {

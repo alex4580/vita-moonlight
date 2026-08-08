@@ -1,0 +1,23 @@
+Vita Moonlight Opus 1.6.1 CMake compatibility patch
+Copyright (C) 2026 Vita Moonlight contributors
+SPDX-License-Identifier: GPL-3.0-or-later
+
+Opus's CMake build adds the NEON implementation sources when NEON is presumed,
+but it only defines the matching MAY_HAVE capability macros when runtime
+detection is requested.  The public headers consequently omit declarations
+used by those sources.  A Vita always exposes the same ARMv7 NEON capability,
+so make the presumed configuration advertise the compiler capability too.
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index a336daf..0879a17 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -590,6 +590,8 @@ if(NOT OPUS_DISABLE_INTRINSICS)
+     if(OPUS_PRESUME_NEON)
+       target_compile_definitions(opus
+                                  PRIVATE
++                                 OPUS_ARM_MAY_HAVE_NEON
++                                 OPUS_ARM_MAY_HAVE_NEON_INTR
+                                  OPUS_ARM_PRESUME_NEON
+                                  OPUS_ARM_PRESUME_NEON_INTR)
+     endif()

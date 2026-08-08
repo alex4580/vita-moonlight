@@ -42,6 +42,16 @@ typedef struct _HTTP_DATA {
 } HTTP_DATA, *PHTTP_DATA;
 
 int http_init(const char* keyDirectory, int logLevel);
+/*
+ * Recovery initialization is used only by the pairing transaction journal.
+ * It lets the client authenticate the exact Sunshine identity recorded before
+ * a crash without first replacing any damaged on-disk artifacts.  Passing
+ * NULL for a credential path selects the normal file in keyDirectory; passing
+ * NULL for recoveryServerPin loads the committed pin files normally.
+ */
+int http_init_with_recovery(
+    const char* keyDirectory, int logLevel, const char* certificatePath,
+    const char* keyPath, const char* recoveryServerPin);
 PHTTP_DATA http_create_data();
 int http_request(char* url, PHTTP_DATA data);
 int http_request_with_timeout(char* url, PHTTP_DATA data, long timeoutSeconds);
@@ -54,5 +64,8 @@ void http_cleanup(void);
  * exchange instead of disabling all server authentication.
  */
 bool http_has_server_pin(void);
+bool http_server_pin_is_valid(const char* pin);
+int http_copy_server_pin(char* pin, size_t pinSize);
+int http_set_server_pin(const char* pin, bool persist);
 int http_set_server_pin_from_pem(const char* certificatePem, bool persist);
 int http_reload_server_pin(void);

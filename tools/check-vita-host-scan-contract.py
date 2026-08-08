@@ -15,7 +15,7 @@ DISCOVERY_SOURCE = ROOT / "src" / "gui" / "ui_device.c"
 
 def function_body(source: str, name: str) -> str:
     match = re.search(
-        rf"\b(?:void|int|SceUID|static\s+void|static\s+int|static\s+bool)\s+{re.escape(name)}\s*\([^)]*\)\s*\{{",
+        rf"\b(?:void|bool|int|SceUID|static\s+void|static\s+int|static\s+bool)\s+{re.escape(name)}\s*\([^)]*\)\s*\{{",
         source,
     )
     if match is None:
@@ -99,9 +99,33 @@ def main() -> int:
     require("if (mdns_active) udp_sniffer_vita_poll();" in worker and
             "known_devices.devices[i].paired" in worker,
             "an unpaired-only saved list must not start discovery traffic")
-    require(worker.find("copy_host_string(pending_ip_update") <
-            worker.find("pending_ip_update_idx = selected"),
-            "an IP-change address must be complete before its index is published")
+    require(
+        "static SceUID host_state_mutex = -1" in source
+        and "host_scan_get_snapshot(" in source
+        and "!lock_host_state()" in function_body(
+            source, "host_scan_get_snapshot"
+        )
+        and "copy_host_string(pending_ip_update" in function_body(
+            source, "update_cached_host_status"
+        )
+        and function_body(source, "update_cached_host_status").find(
+            "copy_host_string(pending_ip_update"
+        )
+        < function_body(source, "update_cached_host_status").find(
+            "pending_ip_update_idx = index"
+        ),
+        "host status and a complete IP-change payload must be published through one locked snapshot",
+    )
+    require(
+        worker.count("HOST_OFFLINE, info.internal, false") >= 2
+        and "status == HOST_IP_CHANGED" in worker,
+        "stale mDNS address hints must be cleared for unpaired, saved-address, and offline states",
+    )
+    require(
+        worker.find("ping_host(first_saved")
+        < worker.find("ping_host(discovered_ip"),
+        "saved addresses must be probed before an unauthenticated mDNS hint",
+    )
     require("SO_NONBLOCK" in probe or "O_NONBLOCK" in probe,
             "reachability probes must use non-blocking sockets")
     require("select(" in probe and "getsockopt(" in probe and

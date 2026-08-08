@@ -35,7 +35,7 @@ static void mdns_found_cb(int idx, const char *host, const char *pcname,
     (void)host;
     (void)port;
     if (pcname != NULL && ip != NULL &&
-            strcmp(pcname, mdns_hostname_ref) == 0) {
+            device_name_equal(pcname, mdns_hostname_ref)) {
         strncpy(mdns_found_ip, ip, sizeof(mdns_found_ip) - 1);
         mdns_found_ip[sizeof(mdns_found_ip) - 1] = '\0';
         mdns_found = 1;
@@ -68,9 +68,12 @@ bool find_host_ip_mdns(const char *hostname, char *out_ip, size_t out_len) {
     return true;
 }
 
-volatile int g_host_scan_thread_status = 0;
-volatile int g_host_status_changed = 0;
-struct host_status g_host_status[MAX_HOSTS];
+static int g_host_scan_thread_status = 0;
+static int g_host_status_changed = 0;
+static struct host_status g_host_status[MAX_HOSTS];
+static int pending_ip_update_idx = -1;
+static char pending_ip_update[64] = "";
+static SceUID host_state_mutex = -1;
 
 enum host_scan_state {
     HOST_SCAN_STOPPED = 0,
@@ -93,6 +96,45 @@ static char scan_mdns_ip[MAX_HOSTS][64];
 static char cached_host_name[MAX_HOSTS][256];
 
 static bool ping_host(const char *ip, uint16_t port);
+static void copy_host_string(
+    char *destination, size_t destination_size, const char *source);
+
+static int scan_state_load(void) {
+    return __atomic_load_n(&g_host_scan_thread_status, __ATOMIC_ACQUIRE);
+}
+
+static void scan_state_store(int state) {
+    __atomic_store_n(&g_host_scan_thread_status, state, __ATOMIC_RELEASE);
+}
+
+int host_scan_state(void) {
+    return scan_state_load();
+}
+
+bool host_scan_take_status_changed(void) {
+    return __atomic_exchange_n(
+        &g_host_status_changed, 0, __ATOMIC_ACQ_REL) != 0;
+}
+
+static bool ensure_host_state_mutex(void) {
+    if (host_state_mutex >= 0) return true;
+    SceUID created = sceKernelCreateMutex(
+        "vita-moonlight-host-state", 0, 0, NULL);
+    if (created < 0) return false;
+    host_state_mutex = created;
+    return true;
+}
+
+static bool lock_host_state(void) {
+    return host_state_mutex >= 0 &&
+        sceKernelLockMutex(host_state_mutex, 1, NULL) >= 0;
+}
+
+static void unlock_host_state(void) {
+    if (host_state_mutex >= 0) {
+        (void)sceKernelUnlockMutex(host_state_mutex, 1);
+    }
+}
 
 static void copy_host_string(char *destination, size_t destination_size,
         const char *source) {
@@ -108,17 +150,62 @@ static int active_host_count(void) {
     return count < MAX_HOSTS ? count : MAX_HOSTS;
 }
 
-static bool update_cached_host_status(int index, int status, const char *ip) {
+static bool update_cached_host_status(
+        int index, int status, const char *ip, bool publish_pending) {
     if (index < 0 || index >= MAX_HOSTS) return false;
     if (ip == NULL) ip = "";
+
+    if (!lock_host_state()) return false;
 
     bool changed = g_host_status[index].status != status ||
         strcmp(g_host_status[index].current_ip, ip) != 0;
     g_host_status[index].status = status;
     copy_host_string(g_host_status[index].current_ip,
         sizeof(g_host_status[index].current_ip), ip);
-    if (changed) g_host_status_changed = 1;
+    if (publish_pending) {
+        copy_host_string(pending_ip_update, sizeof(pending_ip_update), ip);
+        pending_ip_update_idx = index;
+    } else if (pending_ip_update_idx == index) {
+        pending_ip_update_idx = -1;
+        pending_ip_update[0] = '\0';
+    }
+    unlock_host_state();
+    if (changed) {
+        __atomic_store_n(&g_host_status_changed, 1, __ATOMIC_RELEASE);
+    }
     return changed;
+}
+
+static void clear_pending_ip_update_for_host(int index) {
+    if (!lock_host_state()) return;
+    if (index < 0 || pending_ip_update_idx == index) {
+        pending_ip_update_idx = -1;
+        pending_ip_update[0] = '\0';
+    }
+    unlock_host_state();
+}
+
+void host_scan_clear_pending_ip_update(int index) {
+    clear_pending_ip_update_for_host(index);
+}
+
+bool host_scan_get_snapshot(
+        int index, struct host_status *status, char *pending_ip,
+        size_t pending_ip_size, bool *has_pending_ip) {
+    if (status == NULL || index < 0 || index >= MAX_HOSTS ||
+            !lock_host_state()) {
+        return false;
+    }
+    *status = g_host_status[index];
+    bool pending = pending_ip_update_idx == index &&
+                   pending_ip_update[0] != '\0';
+    if (pending_ip != NULL && pending_ip_size != 0) {
+        copy_host_string(pending_ip, pending_ip_size,
+                         pending ? pending_ip_update : "");
+    }
+    if (has_pending_ip != NULL) *has_pending_ip = pending;
+    unlock_host_state();
+    return true;
 }
 
 static int offline_retry_ticks(unsigned int failure_count) {
@@ -139,6 +226,7 @@ static int offline_retry_ticks(unsigned int failure_count) {
 static void reconcile_host_status_cache(void) {
     struct host_status previous_status[MAX_HOSTS];
     char previous_name[MAX_HOSTS][256];
+    if (!lock_host_state()) return;
     memcpy(previous_status, g_host_status, sizeof(previous_status));
     memcpy(previous_name, cached_host_name, sizeof(previous_name));
 
@@ -147,8 +235,8 @@ static void reconcile_host_status_cache(void) {
         int previous_index = -1;
         for (int candidate = 0; candidate < MAX_HOSTS; candidate++) {
             if (previous_name[candidate][0] != '\0' &&
-                    strcmp(previous_name[candidate],
-                           known_devices.devices[i].name) == 0) {
+                    device_name_equal(previous_name[candidate],
+                                      known_devices.devices[i].name)) {
                 previous_index = candidate;
                 break;
             }
@@ -170,6 +258,7 @@ static void reconcile_host_status_cache(void) {
         memset(&g_host_status[i], 0, sizeof(g_host_status[i]));
         cached_host_name[i][0] = '\0';
     }
+    unlock_host_state();
 }
 
 /* One long-lived listener populates a cache for every saved host. */
@@ -185,7 +274,8 @@ static void host_scan_mdns_cb(int idx, const char *host, const char *pcname,
 
     int count = active_host_count();
     for (int i = 0; i < count; i++) {
-        if (strcmp(advertised_name, known_devices.devices[i].name) == 0) {
+        if (device_name_equal(
+                advertised_name, known_devices.devices[i].name)) {
             copy_host_string(scan_mdns_ip[i], sizeof(scan_mdns_ip[i]), ip);
         }
     }
@@ -217,7 +307,7 @@ static int host_scan_thread(SceSize args, void *argp) {
         udp_sniffer_vita_set_callback(host_scan_mdns_cb);
     }
 
-    while (g_host_scan_thread_status == HOST_SCAN_RUNNING) {
+    while (scan_state_load() == HOST_SCAN_RUNNING) {
         if (mdns_active) udp_sniffer_vita_poll();
 
         int count = active_host_count();
@@ -237,12 +327,11 @@ static int host_scan_thread(SceSize args, void *argp) {
         }
 
         if (selected >= 0 &&
-                g_host_scan_thread_status == HOST_SCAN_RUNNING) {
+                scan_state_load() == HOST_SCAN_RUNNING) {
             /* Avoid retaining a pointer that UI code can invalidate. */
             device_info_t info = known_devices.devices[selected];
             const char *discovered_ip = scan_mdns_ip[selected];
             const char *reachable_ip = NULL;
-            bool internal_already_probed = false;
 
             /* Saved-but-unpaired entries are visible for recovery and retry,
              * but must not generate background traffic before trust exists. */
@@ -250,57 +339,62 @@ static int host_scan_thread(SceSize args, void *argp) {
                 failure_count[selected] = 0;
                 cooldown_ticks[selected] = HOST_OFFLINE_MAX_RETRY_TICKS;
                 update_cached_host_status(
-                    selected, HOST_OFFLINE, info.internal);
+                    selected, HOST_OFFLINE, info.internal, false);
                 goto scanner_tick_complete;
             }
 
-            if (discovered_ip[0] != '\0') {
-                internal_already_probed =
-                    strcmp(discovered_ip, info.internal) == 0;
-                if (ping_host(discovered_ip, info.port)) {
-                    reachable_ip = discovered_ip;
-                } else {
-                    /* Do not pay the timeout for a stale advertisement on
-                     * every later retry. A fresh mDNS answer repopulates it. */
-                    scan_mdns_ip[selected][0] = '\0';
-                }
+            /* Probe user-saved addresses before any unauthenticated mDNS
+             * hint. This prevents a same-name LAN advertisement from
+             * delaying or visually replacing a working pinned computer. */
+            const char *first_saved =
+                info.prefer_external && info.external[0] != '\0'
+                    ? info.external : info.internal;
+            const char *second_saved = first_saved == info.external
+                ? info.internal : info.external;
+            if (first_saved[0] != '\0' &&
+                    ping_host(first_saved, info.port)) {
+                reachable_ip = first_saved;
             }
-            if (reachable_ip == NULL && info.internal[0] != '\0' &&
-                    !internal_already_probed &&
-                    g_host_scan_thread_status == HOST_SCAN_RUNNING &&
-                    ping_host(info.internal, info.port)) {
-                reachable_ip = info.internal;
+            if (reachable_ip == NULL && second_saved[0] != '\0' &&
+                    strcmp(second_saved, first_saved) != 0 &&
+                    scan_state_load() == HOST_SCAN_RUNNING &&
+                    ping_host(second_saved, info.port)) {
+                reachable_ip = second_saved;
+            }
+            if (reachable_ip == NULL && discovered_ip[0] != '\0' &&
+                    strcmp(discovered_ip, info.internal) != 0 &&
+                    strcmp(discovered_ip, info.external) != 0 &&
+                    scan_state_load() == HOST_SCAN_RUNNING &&
+                    ping_host(discovered_ip, info.port)) {
+                reachable_ip = discovered_ip;
             }
 
             if (reachable_ip != NULL) {
-                int status = strcmp(reachable_ip, info.internal) == 0
-                    ? HOST_ONLINE
-                    : HOST_IP_CHANGED;
+                bool saved_address =
+                    strcmp(reachable_ip, info.internal) == 0 ||
+                    strcmp(reachable_ip, info.external) == 0;
+                int status = saved_address ? HOST_ONLINE : HOST_IP_CHANGED;
                 bool changed = update_cached_host_status(
-                    selected, status, reachable_ip);
+                    selected, status, reachable_ip,
+                    status == HOST_IP_CHANGED);
                 failure_count[selected] = 0;
                 cooldown_ticks[selected] = HOST_ONLINE_RECHECK_TICKS;
 
                 if (changed && status == HOST_IP_CHANGED) {
-                    extern int pending_ip_update_idx;
-                    extern char pending_ip_update[64];
-                    copy_host_string(pending_ip_update,
-                        sizeof(pending_ip_update), reachable_ip);
-                    /* Publish the index only after the complete address. */
-                    __atomic_thread_fence(__ATOMIC_RELEASE);
-                    pending_ip_update_idx = selected;
                     vita_debug_log("[SCAN] Host %s moved from %s to %s\n",
                         info.name, info.internal, reachable_ip);
-                } else if (changed) {
-                    vita_debug_log("[SCAN] Host %s is reachable at %s\n",
-                        info.name, reachable_ip);
+                } else {
+                    if (changed) {
+                        vita_debug_log("[SCAN] Host %s is reachable at %s\n",
+                            info.name, reachable_ip);
+                    }
                 }
             } else {
                 if (failure_count[selected] < 32) failure_count[selected]++;
                 cooldown_ticks[selected] =
                     offline_retry_ticks(failure_count[selected]);
                 if (update_cached_host_status(
-                        selected, HOST_OFFLINE, info.internal)) {
+                        selected, HOST_OFFLINE, info.internal, false)) {
                     vita_debug_log("[SCAN] Host %s is offline; retry in %d ms\n",
                         info.name,
                         cooldown_ticks[selected] * (HOST_SCAN_TICK_US / 1000));
@@ -309,7 +403,7 @@ static int host_scan_thread(SceSize args, void *argp) {
         }
 
 scanner_tick_complete:
-        if (g_host_scan_thread_status == HOST_SCAN_RUNNING) {
+        if (scan_state_load() == HOST_SCAN_RUNNING) {
             sceKernelDelayThread(HOST_SCAN_TICK_US);
         }
     }
@@ -319,13 +413,17 @@ scanner_tick_complete:
         udp_sniffer_vita_deinit();
     }
     vita_debug_log("[SCAN] Host scanner stopped\n");
-    g_host_scan_thread_status = HOST_SCAN_STOPPED;
+    scan_state_store(HOST_SCAN_STOPPED);
     return 0;
 }
 
 void start_host_scan_thread(void) {
+    if (!ensure_host_state_mutex()) {
+        vita_debug_log("[SCAN] Unable to create host-state mutex\n");
+        return;
+    }
     if (host_scan_thread_id >= 0) {
-        if (g_host_scan_thread_status == HOST_SCAN_RUNNING) return;
+        if (scan_state_load() == HOST_SCAN_RUNNING) return;
         stop_host_scan_thread();
         if (host_scan_thread_id >= 0) return;
     }
@@ -341,12 +439,12 @@ void start_host_scan_thread(void) {
     }
 
     host_scan_thread_id = tid;
-    g_host_scan_thread_status = HOST_SCAN_RUNNING;
+    scan_state_store(HOST_SCAN_RUNNING);
     int result = sceKernelStartThread(tid, 0, NULL);
     if (result < 0) {
         vita_debug_log("[SCAN] Unable to start host scanner thread: 0x%08x\n",
             (unsigned int)result);
-        g_host_scan_thread_status = HOST_SCAN_STOPPED;
+        scan_state_store(HOST_SCAN_STOPPED);
         if (sceKernelDeleteThread(tid) >= 0) host_scan_thread_id = -1;
     }
 }
@@ -354,11 +452,11 @@ void start_host_scan_thread(void) {
 void stop_host_scan_thread(void) {
     SceUID tid = host_scan_thread_id;
     if (tid < 0) {
-        g_host_scan_thread_status = HOST_SCAN_STOPPED;
+        scan_state_store(HOST_SCAN_STOPPED);
         return;
     }
 
-    g_host_scan_thread_status = HOST_SCAN_STOP_REQUESTED;
+    scan_state_store(HOST_SCAN_STOP_REQUESTED);
     int result = sceKernelWaitThreadEnd(tid, NULL, NULL);
     if (result < 0) {
         vita_debug_log("[SCAN] Unable to join host scanner thread: 0x%08x\n",
@@ -374,7 +472,7 @@ void stop_host_scan_thread(void) {
     }
 
     host_scan_thread_id = -1;
-    g_host_scan_thread_status = HOST_SCAN_STOPPED;
+    scan_state_store(HOST_SCAN_STOPPED);
 }
 #endif
 

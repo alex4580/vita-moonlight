@@ -1,4 +1,5 @@
 #include <stdlib.h>
+#include <errno.h>
 #include <string.h>
 #include <dirent.h>
 #include <unistd.h>
@@ -16,7 +17,17 @@
 #define DEVICE_FILE "device.ini"
 
 
-#define BOOL(v) strcmp((v), "true") == 0
+bool device_name_equal(const char *left, const char *right) {
+  if (left == NULL || right == NULL) return left == right;
+  while (*left != '\0' && *right != '\0') {
+    unsigned char a = (unsigned char)*left++;
+    unsigned char b = (unsigned char)*right++;
+    if (a >= 'A' && a <= 'Z') a = (unsigned char)(a + ('a' - 'A'));
+    if (b >= 'A' && b <= 'Z') b = (unsigned char)(b + ('a' - 'A'));
+    if (a != b) return false;
+  }
+  return *left == *right;
+}
 
 static void copy_text(char *out, size_t out_size, const char *value) {
   if (out == NULL || out_size == 0) return;
@@ -39,6 +50,25 @@ static void copy_device(device_info_t *out, const device_info_t *info) {
   out->prefer_external = info->prefer_external;
 }
 
+static bool device_records_equal(const device_info_t *left,
+                                 const device_info_t *right) {
+  if (left == NULL || right == NULL) return false;
+
+  device_info_t normalized_left;
+  device_info_t normalized_right;
+  copy_device(&normalized_left, left);
+  copy_device(&normalized_right, right);
+  return strcmp(normalized_left.name, normalized_right.name) == 0 &&
+         strcmp(normalized_left.display_name,
+                normalized_right.display_name) == 0 &&
+         normalized_left.paired == normalized_right.paired &&
+         strcmp(normalized_left.internal, normalized_right.internal) == 0 &&
+         strcmp(normalized_left.external, normalized_right.external) == 0 &&
+         strcmp(normalized_left.mac, normalized_right.mac) == 0 &&
+         normalized_left.port == normalized_right.port &&
+         normalized_left.prefer_external == normalized_right.prefer_external;
+}
+
 static bool valid_device_directory(const char *name) {
   if (name == NULL || name[0] == '\0' || !strcmp(name, ".") ||
       !strcmp(name, "..")) {
@@ -55,6 +85,19 @@ static bool valid_device_directory(const char *name) {
 static bool valid_ini_value(const char *value) {
   return value != NULL && strchr(value, '\r') == NULL &&
          strchr(value, '\n') == NULL;
+}
+
+static bool parse_ini_bool(const char *value, bool *out) {
+  if (value == NULL || out == NULL) return false;
+  if (strcmp(value, "true") == 0) {
+    *out = true;
+    return true;
+  }
+  if (strcmp(value, "false") == 0) {
+    *out = false;
+    return true;
+  }
+  return false;
 }
 
 static bool device_directory_path(char *out, size_t out_size,
@@ -75,7 +118,7 @@ static bool device_directory_path(char *out, size_t out_size,
 bool remove_device(const char *name) {
   int idx = -1;
   for (int i = 0; i < known_devices.count; i++) {
-    if (!strcmp(known_devices.devices[i].name, name)) {
+    if (device_name_equal(known_devices.devices[i].name, name)) {
       idx = i;
       break;
     }
@@ -136,7 +179,7 @@ device_infos_t known_devices = {0};
 device_info_t* find_device(const char *name) {
   // TODO: mutex
   for (int i = 0; i < known_devices.count; i++) {
-    if (!strcmp(name, known_devices.devices[i].name)) {
+    if (device_name_equal(name, known_devices.devices[i].name)) {
       return &known_devices.devices[i];
     }
   }
@@ -174,7 +217,7 @@ static int device_ini_handle(void *out, const char *section, const char *name,
   device_info_t *info = out;
 
   if (strcmp(name, "paired") == 0) {
-    info->paired = BOOL(value);
+    if (!parse_ini_bool(value, &info->paired)) return 0;
   } else if (strcmp(name, "display_name") == 0) {
     copy_text(info->display_name, sizeof(info->display_name), value);
   } else if (strcmp(name, "internal") == 0) {
@@ -184,12 +227,31 @@ static int device_ini_handle(void *out, const char *section, const char *name,
   } else if (strcmp(name, "mac") == 0) {
     copy_text(info->mac, sizeof(info->mac), value);
   } else if (strcmp(name, "port") == 0) {
-    long port = strtol(value, NULL, 10);
-    if (port > 0 && port <= UINT16_MAX) info->port = (uint16_t)port;
+    errno = 0;
+    char *end = NULL;
+    long port = strtol(value, &end, 10);
+    if (errno == 0 && end != value && *end == '\0' &&
+        port > 0 && port <= UINT16_MAX) {
+      info->port = (uint16_t)port;
+    } else {
+      return 0;
+    }
   } else if (strcmp(name, "prefer_external") == 0) {
-    info->prefer_external = BOOL(value);
+    if (!parse_ini_bool(value, &info->prefer_external)) return 0;
   }
   return 1;
+}
+
+static bool parse_device_candidate(const char *path, const char *device_name,
+                                   device_info_t *out, int *parse_result) {
+  if (path == NULL || device_name == NULL || out == NULL) return false;
+  memset(out, 0, sizeof(*out));
+  copy_text(out->name, sizeof(out->name), device_name);
+  /* Older device.ini files did not persist the port. */
+  out->port = 47989;
+  int result = ini_parse(path, device_ini_handle, out);
+  if (parse_result != NULL) *parse_result = result;
+  return result == 0 && out->internal[0] != '\0' && out->port != 0;
 }
 
 device_info_t* append_device(const device_info_t *info) {
@@ -244,7 +306,8 @@ device_info_t* upsert_device(const device_info_t *info) {
    * clear authentication, a user-facing alias, the learned external address,
    * or a MAC address. Authoritative pairing code may update those fields on
    * the returned canonical record after this merge. */
-  device_info_t merged = *info;
+  device_info_t merged;
+  copy_device(&merged, info);
   if (p->paired) merged.paired = true;
   if (merged.display_name[0] == '\0' ||
       !strcmp(merged.display_name, merged.name)) {
@@ -259,7 +322,10 @@ device_info_t* upsert_device(const device_info_t *info) {
     copy_text(merged.mac, sizeof(merged.mac), p->mac);
   }
   if (merged.port == 0) merged.port = p->port;
-  copy_device(p, &merged);
+  /* merged is already normalized and fully self-contained. Assigning the
+   * value directly also makes it unambiguous that the returned pointer is the
+   * canonical collection entry, never the temporary merge buffer. */
+  *p = merged;
   return p;
 }
 
@@ -301,32 +367,49 @@ void load_all_known_devices() {
 bool load_device_info(device_info_t *info) {
   char path[DEVICE_PATH_CAPACITY] = {0};
   char backup_path[DEVICE_PATH_CAPACITY] = {0};
+  char temporary_path[DEVICE_PATH_CAPACITY] = {0};
   if (info == NULL || !device_file_path(path, sizeof(path), info->name)) {
     return false;
   }
   int backup_length = snprintf(
       backup_path, sizeof(backup_path), "%s.bak", path);
-  if (backup_length < 0 || (size_t)backup_length >= sizeof(backup_path)) {
+  int temporary_length = snprintf(
+      temporary_path, sizeof(temporary_path), "%s.tmp", path);
+  if (backup_length < 0 || (size_t)backup_length >= sizeof(backup_path) ||
+      temporary_length < 0 ||
+      (size_t)temporary_length >= sizeof(temporary_path)) {
     return false;
   }
   vita_debug_log("load_device_info: reading %s\n", path);
 
-  // for backward compatibility
-  info->port = 47989;
-  int ret = ini_parse(path, device_ini_handle, info);
-  bool valid = ret == 0 && info->internal[0] != '\0' && info->port != 0;
-  if (!valid) {
-    /* Recover the last complete record if power was lost during promotion. */
-    char preserved_name[sizeof(info->name)];
-    copy_text(preserved_name, sizeof(preserved_name), info->name);
-    memset(info, 0, sizeof(*info));
-    copy_text(info->name, sizeof(info->name), preserved_name);
-    info->port = 47989;
-    ret = ini_parse(backup_path, device_ini_handle, info);
-    valid = ret == 0 && info->internal[0] != '\0' && info->port != 0;
-    if (valid) {
+  char preserved_name[sizeof(info->name)];
+  copy_text(preserved_name, sizeof(preserved_name), info->name);
+  /* A valid primary is the last committed record. If it is absent or torn,
+   * the transaction order is primary -> .bak, then .tmp -> primary, so the
+   * complete .tmp is the intended next record and must beat the older backup.
+   * Reversing those siblings can silently resurrect paired=false after a
+   * successful pairing interrupted in the final rename window. */
+  const char *candidates[] = {path, temporary_path, backup_path};
+  int selected = -1;
+  int ret = -1;
+  device_info_t parsed;
+  for (size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); ++i) {
+    if (parse_device_candidate(
+            candidates[i], preserved_name, &parsed, &ret)) {
+      selected = (int)i;
+      break;
+    }
+  }
+
+  bool valid = selected >= 0;
+  if (valid) {
+    copy_device(info, &parsed);
+    if (selected != 0) {
+      /* Recover a complete backup, or the complete first-save .tmp left by a
+       * power loss.  Continue using the parsed record even if promotion is
+       * temporarily unavailable; its source remains intact for next boot. */
       sceIoRemove(path);
-      sceIoRename(backup_path, path);
+      (void)sceIoRename(candidates[selected], path);
     }
   }
   if (valid) {
@@ -339,7 +422,9 @@ bool load_device_info(device_info_t *info) {
     vita_debug_log("load_device_info:   info->prefer_external = %s\n", info->prefer_external ? "true" : "false");
     return true;
   } else {
-    vita_debug_log("load_device_info: ini_parse returned %d\n", ret);
+    vita_debug_log(
+        "load_device_info: no complete primary, backup, or temporary record "
+        "(last parser result %d)\n", ret);
     return false;
   }
 }
@@ -348,7 +433,8 @@ bool save_device_info(const device_info_t *info) {
   char path[DEVICE_PATH_CAPACITY] = {0};
   char temporary_path[DEVICE_PATH_CAPACITY] = {0};
   char backup_path[DEVICE_PATH_CAPACITY] = {0};
-  if (info == NULL || !valid_ini_value(info->display_name) ||
+  if (info == NULL || info->internal[0] == '\0' || info->port == 0 ||
+      !valid_ini_value(info->display_name) ||
       !valid_ini_value(info->internal) || !valid_ini_value(info->external) ||
       !valid_ini_value(info->mac) ||
       !device_file_path(path, sizeof(path), info->name)) {
@@ -408,6 +494,21 @@ bool save_device_info(const device_info_t *info) {
     return false;
   }
 
+  /* Verify the exact staged record before rotating the only committed copy.
+   * This also prevents a caller from receiving success for a file that the
+   * next launch would reject and omit from Saved computers. */
+  device_info_t staged;
+  int staged_parse_result = -1;
+  if (!parse_device_candidate(
+          temporary_path, info->name, &staged, &staged_parse_result) ||
+      !device_records_equal(&staged, info)) {
+    sceIoRemove(temporary_path);
+    vita_debug_log(
+        "save_device_info: staged record did not verify (parser %d)\n",
+        staged_parse_result);
+    return false;
+  }
+
   SceIoStat existing = {0};
   bool had_existing = sceIoGetstat(path, &existing) >= 0;
   sceIoRemove(backup_path);
@@ -420,6 +521,20 @@ bool save_device_info(const device_info_t *info) {
     if (had_existing) sceIoRename(backup_path, path);
     sceIoRemove(temporary_path);
     vita_debug_log("save_device_info: could not commit device file\n");
+    return false;
+  }
+  device_info_t committed;
+  int committed_parse_result = -1;
+  if (!parse_device_candidate(
+          path, info->name, &committed, &committed_parse_result) ||
+      !device_records_equal(&committed, info)) {
+    /* Keep the operation transactional even if storage reported a successful
+     * rename but the installed record cannot be read back exactly. */
+    (void)sceIoRemove(path);
+    if (had_existing) (void)sceIoRename(backup_path, path);
+    vita_debug_log(
+        "save_device_info: committed record did not verify (parser %d)\n",
+        committed_parse_result);
     return false;
   }
   if (had_existing) sceIoRemove(backup_path);

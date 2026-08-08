@@ -19,7 +19,8 @@ bool vita_motion_init(void);
 bool vita_motion_shutdown(void);
 bool vita_motion_begin_stream(bool allow_motion);
 bool vita_motion_end_stream(void);
-void vita_motion_set_state(uint8_t motion_type, uint16_t report_rate);
+/* Returns true only when the requested sensor is actually reporting. */
+bool vita_motion_set_state(uint8_t motion_type, uint16_t report_rate);
 void vita_motion_get_status(VitaMotionStatus *status);
 
 #define VITA_MOTION_MIN_REPORT_RATE 1

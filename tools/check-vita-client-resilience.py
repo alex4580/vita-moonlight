@@ -42,14 +42,20 @@ def function_body(source: str, signature: str, next_signature: str) -> str:
 def main() -> int:
     config = read("src/config.c")
     config_header = read("src/config.h")
+    ime = read("src/gui/ime.c")
+    ime_header = read("src/gui/ime.h")
+    ime_text = read("src/gui/ime_text.h")
     check_dir = read("src/check_dir.c")
     check_dir_header = read("src/check_dir.h")
     main_source = read("src/main.c")
     ui = read("src/gui/ui.c")
     ui_connect = read("src/gui/ui_connect.c")
+    wake_on_lan = read("src/wake_on_lan.c")
     settings = read("src/gui/ui_settings.c")
     overlay = read("src/gui/ui_stream_overlay.c")
     diagnostics = read("src/gui/ui_diagnostics.c")
+    keyboard_system = read("src/keyboardsystem.c")
+    keyboard_ime = read("src/input/keyboard_ime.h")
     shortcuts = read("src/input/shortcuts.c")
     vita_input = read("src/input/vita.c")
     power = read("src/power/vita.c")
@@ -115,6 +121,17 @@ def main() -> int:
         "src/check_dir.c: startup storage must be app-owned, writable, and fail-fast",
     )
     require(
+        "inventory_storage_root(" in check_dir
+        and "choose_existing_root(" in check_dir
+        and check_dir.find("inventory_storage_root(&inventories")
+        < check_dir.find("ensure_directory(directory)")
+        and 'STORAGE_ROOT_MARKER ".vita-moonlight-root"' in check_dir
+        and '(.path = "ux0:data")' not in check_dir
+        and '{.path = "ux0:data"}' in check_dir
+        and "Pairing identities were not merged or overwritten" in check_dir,
+        "src/check_dir.c: upgrades must inventory all modern and legacy roots before creation and fail closed on conflicting pairing stores",
+    )
+    require(
         "display_error(" in function_body(
             settings, "void ui_settings_save_config()", "\n}"
         )
@@ -144,6 +161,29 @@ def main() -> int:
     require(
         "config_save(config_path, &config)" not in diagnostics,
         "src/gui/ui_diagnostics.c: per-run support logging must not write preferences",
+    )
+
+    require(
+        "size_t text_size" in ime_header
+        and "ime_utf16_to_utf8(" in ime
+        and "text, text_size" in ime
+        and "strcpy(text" not in ime
+        and "strcpy(userText" not in ime
+        and "destination_bytes" in ime_text
+        and "destination_units" in ime_text,
+        "src/gui/ime.c: Vita keyboard conversion and every caller buffer must be size-bounded",
+    )
+
+    require(
+        'const char *broadcast = "255.255.255.255";' in ui
+        and "strcpy(last_dot+1" not in ui
+        and "void ui_connect_address(char *addr, size_t addr_size)" in ui_connect
+        and "snprintf(addr, addr_size" in ui_connect
+        and "parse_mac_address(" in wake_on_lan
+        and "strlen(text) != 17" in wake_on_lan
+        and "inet_pton(AF_INET" in wake_on_lan
+        and "sent == (int)sizeof(packet)" in wake_on_lan,
+        "Vita UI: Wake-on-LAN and displayed connection addresses must not copy untrusted host text out of bounds",
     )
 
     require(
@@ -208,11 +248,33 @@ def main() -> int:
         "src/input/shortcuts.c: START-led shortcuts need a humane window and release barrier",
     )
     require(
+        "e->param.text.caretIndex" in keyboard_system
+        and "e->param.text.editLengthChange" in keyboard_system
+        and "vita_keyboard_ime_interpret(" in keyboard_system
+        and "output_text[IME_MAX_TEXT_UNITS + 1]" in keyboard_system
+        and "param.maxTextLength     = IME_MAX_TEXT_UNITS" in keyboard_system
+        and "initial_text_update" in keyboard_ime
+        and "VITA_KEYBOARD_IME_ACTION_BACKSPACE" in keyboard_ime,
+        "src/keyboardsystem.c: UPDATE_TEXT must use its text-union payload and the native-tested event interpreter",
+    )
+    require(
+        "if (selected_item == MAIN_KEYBOARD)" in overlay
+        and "if (stream_overlay_close()) {\n      keyboardsystem_open_keyboard();"
+        in overlay,
+        "src/gui/ui_stream_overlay.c: opening the IME must dismiss the stream menu first",
+    )
+    require(
         "suppress_remote_input_until_release = true;" in vita_input
         and "LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_LEFT)"
         in vita_input
         and "mapped_actions" in vita_input,
         "src/input/vita.c: reconnect/teardown must release and suppress stale input",
+    )
+    require(
+        "pad_snapshot" not in vita_input
+        and "curr_snapshot" not in vita_input
+        and "Never snapshot and replay controller state here" in vita_input,
+        "src/input/vita.c: the synchronous IME must never replay a stale controller snapshot",
     )
     require(
         "termination_in_progress" in connection

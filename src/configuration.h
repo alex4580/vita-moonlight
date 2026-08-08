@@ -18,3 +18,7 @@
  */
 
 #define COMPILE_OPTIONS "VITA"
+
+#ifndef VITA_BUILD_ID
+#define VITA_BUILD_ID "source"
+#endif

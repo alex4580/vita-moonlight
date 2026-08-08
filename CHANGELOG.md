@@ -1,10 +1,26 @@
 ## 0.14.8
 
+* Kept a saved computer visible when Sunshine revokes or forgets the Vita.
+  The pinned HTTPS probe now treats Sunshine's exact unauthorised response as
+  **Pairing required**, falls back only to public discovery metadata, and
+  preserves every other certificate or transport failure as a hard error.
 * Fixed the Vita pairing retry path that could authorize the client in
   Sunshine but leave the real saved-computer entry unpaired or hidden until a
   restart. Failed and cancelled attempts now remain visible as **Pairing
   required**, successful pairing is committed before the app continues, and
   journaled device storage survives an interrupted write.
+* Fixed upgrades that could create a new empty data folder before checking the
+  Vita's historical storage locations, making existing computers appear to
+  disappear. Startup now inventories every supported legacy/current root
+  first, reuses one authoritative writable store, and refuses to merge
+  ambiguous pairing identities.
+* Fixed the in-stream Vita keyboard to read `UPDATE_TEXT` from the correct IME
+  union member, reserve its terminator, and return directly to live video.
+  Native event vectors now cover characters, Backspace, arrows, Enter, close,
+  and the initial sentinel update without logging typed text.
+* Corrected native-aspect rendering so 960x544 fills the Vita panel, 960x540
+  produces only the expected two-pixel top and bottom bars, and crop/fill never
+  samples outside the hardware decoder texture.
 * Isolated every PIN attempt with a fresh Sunshine pairing session identity and
   kept the final certificate-pinned pairing challenge authoritative. Aborted
   attempts can be retried without inheriting stale Sunshine session state.
@@ -20,6 +36,10 @@
   jitter into drops of future decoded frames. Completed frames now present
   immediately for lower latency and smoother motion; optional Vita vblank
   synchronization remains available for tear control.
+* Restored the Vita network pool to 4 MiB so Moonlight's 2.13 MiB video receive
+  buffer fits without silently stepping down, while retaining nearly 2 MiB for
+  audio, control, discovery, and allocator overhead. No bitrate, resolution,
+  packet-size, FEC, or image-quality reduction was made.
 * Enforced Sunshine launch-mode optimization for managed Vita sessions and
   removed the misleading client switch that could leave the physical desktop
   selected after choosing a Vita resolution.
@@ -36,6 +56,11 @@
   selects only the managed MTT display, validates fresh post-restart Sunshine
   inventory, rejects unhealthy driver devices, and restores a usable physical
   mode after suspend without replacing a healthy desktop mode.
+* Added a fail-closed installer and emergency bootstrap for a broken older
+  installation that exposes only one active managed MTT display. It rescans
+  first, may restart only that exact enabled device while backend features are
+  enabled, and refuses to replace files or clear safeguards until Windows
+  proves a physical-only layout.
 * Made the public Windows path unambiguous: Sunshine always installs with the
   required managed Vita display. Apollo is preserved but removed from the
   installer and GUI until separately qualified; its retained experimental CLI
@@ -57,6 +82,10 @@
   clean install, in-place upgrade, same-version repair, Vita reinstall,
   interrupted pairing retry, Pause/Enable, and both shared-component uninstall
   choices.
+* Replaced the unlicensed mDNS submodule and opaque Vita dependency packages
+  with project-owned, hash-locked clean-room/source recipes and corresponding-
+  source packaging. Vita discovery, TLS, media, font, compression, and audio
+  dependencies are now reproducible from reviewed upstream source inputs.
 * Moved the deliberately unsigned Windows preview exception to the exact
   `v0.14.8-beta.1` tag. The workflow verifies its Unknown-publisher status,
   paired artifact identity, SHA-256 manifest, and GitHub provenance; every

@@ -19,17 +19,15 @@
 
 #include "http.h"
 #include "errors.h"
+#include "crypto.h"
 
-#include <ctype.h>
+#include <errno.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <curl/curl.h>
-#include <openssl/evp.h>
-#include <openssl/pem.h>
-#include <openssl/sha.h>
-#include <openssl/x509.h>
 
 #define HTTP_PATH_MAX 1024
 #define HTTP_MAX_RESPONSE_SIZE (1024 * 1024)
@@ -42,12 +40,13 @@ static char keyDirectoryPath[HTTP_PATH_MAX];
 static char serverPin[SPKI_PIN_BUFFER_SIZE];
 
 typedef enum _PIN_FILE_STATE {
-  PIN_FILE_MISSING,
+  PIN_FILE_ABSENT,
   PIN_FILE_INVALID,
+  PIN_FILE_IO_ERROR,
   PIN_FILE_VALID
 } PIN_FILE_STATE;
 
-static bool is_valid_pin(const char *pin) {
+bool http_server_pin_is_valid(const char *pin) {
   const char prefix[] = "sha256//";
   const size_t prefixLength = sizeof(prefix) - 1;
   const size_t expectedLength = prefixLength + 44; /* SHA-256 in base64 */
@@ -57,14 +56,14 @@ static bool is_valid_pin(const char *pin) {
     return false;
   }
 
-  for (size_t i = prefixLength; i < expectedLength; ++i) {
+  for (size_t i = prefixLength; i + 1 < expectedLength; ++i) {
     unsigned char c = (unsigned char)pin[i];
-    if (!(isalnum(c) || c == '+' || c == '/' ||
-          (c == '=' && i == expectedLength - 1))) {
+    if (!((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') ||
+          (c >= 'a' && c <= 'z') || c == '+' || c == '/')) {
       return false;
     }
   }
-  return true;
+  return pin[expectedLength - 1] == '=';
 }
 
 static int apply_server_pin(void) {
@@ -95,22 +94,33 @@ static int build_pin_path(char *path, size_t pathSize, const char *suffix) {
 
 static PIN_FILE_STATE read_pin_file(
     const char *path, char pin[SPKI_PIN_BUFFER_SIZE]) {
+  struct stat status;
+  if (stat(path, &status) != 0) {
+    return errno == ENOENT ? PIN_FILE_ABSENT : PIN_FILE_IO_ERROR;
+  }
+  if (!S_ISREG(status.st_mode)) return PIN_FILE_INVALID;
+
   FILE *file = fopen(path, "rb");
-  if (file == NULL) return PIN_FILE_MISSING;
+  if (file == NULL) return PIN_FILE_IO_ERROR;
 
   char storedPin[SPKI_PIN_BUFFER_SIZE];
   if (fgets(storedPin, sizeof(storedPin), file) == NULL) {
-    fclose(file);
-    return PIN_FILE_INVALID;
+    bool readError = ferror(file) != 0;
+    bool ioError = fclose(file) != 0;
+    ioError = ioError || readError;
+    return ioError ? PIN_FILE_IO_ERROR : PIN_FILE_INVALID;
   }
 
   bool completeLine = strchr(storedPin, '\n') != NULL || feof(file);
   bool hasTrailingData = completeLine && fgetc(file) != EOF;
-  fclose(file);
+  bool readError = ferror(file) != 0;
+  bool ioError = fclose(file) != 0;
+  ioError = ioError || readError;
+  if (ioError) return PIN_FILE_IO_ERROR;
   if (!completeLine || hasTrailingData) return PIN_FILE_INVALID;
 
   storedPin[strcspn(storedPin, "\r\n")] = '\0';
-  if (!is_valid_pin(storedPin)) return PIN_FILE_INVALID;
+  if (!http_server_pin_is_valid(storedPin)) return PIN_FILE_INVALID;
 
   snprintf(pin, SPKI_PIN_BUFFER_SIZE, "%s", storedPin);
   return PIN_FILE_VALID;
@@ -119,36 +129,44 @@ static PIN_FILE_STATE read_pin_file(
 int http_reload_server_pin(void) {
   char pinPath[HTTP_PATH_MAX];
   char backupPath[HTTP_PATH_MAX];
+  char temporaryPath[HTTP_PATH_MAX];
   if (build_pin_path(pinPath, sizeof(pinPath), NULL) != GS_OK ||
-      build_pin_path(backupPath, sizeof(backupPath), ".bak") != GS_OK) {
+      build_pin_path(backupPath, sizeof(backupPath), ".bak") != GS_OK ||
+      build_pin_path(temporaryPath, sizeof(temporaryPath), ".tmp") != GS_OK) {
     gs_error = "Server identity file path is too long";
     return GS_FAILED;
   }
 
   serverPin[0] = '\0';
-  PIN_FILE_STATE primaryState = read_pin_file(pinPath, serverPin);
-  if (primaryState == PIN_FILE_VALID) return apply_server_pin();
+  char primaryPin[SPKI_PIN_BUFFER_SIZE] = {0};
+  char temporaryPin[SPKI_PIN_BUFFER_SIZE] = {0};
+  char backupPin[SPKI_PIN_BUFFER_SIZE] = {0};
+  PIN_FILE_STATE primaryState = read_pin_file(pinPath, primaryPin);
+  PIN_FILE_STATE temporaryState = read_pin_file(temporaryPath, temporaryPin);
+  PIN_FILE_STATE backupState = read_pin_file(backupPath, backupPin);
 
-  PIN_FILE_STATE backupState = read_pin_file(backupPath, serverPin);
-  if (backupState == PIN_FILE_VALID) {
-    /*
-     * A crash can leave either a missing or incomplete primary. Keep using the
-     * authenticated backup even if Vita's rename cannot repair it immediately;
-     * the next load will retry the same recovery path.
-     */
-    remove(pinPath);
-    rename(backupPath, pinPath);
+  /* Transaction order is old primary -> .bak, then validated .tmp -> primary.
+   * Therefore a valid primary is authoritative; without one, .tmp is the
+   * intended next value and .bak is the last committed fallback. A torn
+   * lower-authority sibling must not hide an otherwise recoverable host. */
+  const char *selectedPin = primaryState == PIN_FILE_VALID ? primaryPin :
+      temporaryState == PIN_FILE_VALID ? temporaryPin :
+      backupState == PIN_FILE_VALID ? backupPin : NULL;
+  if (selectedPin != NULL) {
+    snprintf(serverPin, sizeof(serverPin), "%s", selectedPin);
     return apply_server_pin();
   }
 
   int clearResult = apply_server_pin();
   if (clearResult != GS_OK) return clearResult;
-  if (primaryState == PIN_FILE_MISSING && backupState == PIN_FILE_MISSING) {
+  if (primaryState == PIN_FILE_ABSENT &&
+      temporaryState == PIN_FILE_ABSENT &&
+      backupState == PIN_FILE_ABSENT) {
     return GS_OK;
   }
 
-  gs_error = "The saved Sunshine identity is invalid; remove this PC and pair it again";
-  return GS_INVALID;
+  gs_error = "The saved Sunshine identity files are damaged; no files were replaced";
+  return GS_IO_ERROR;
 }
 
 static int persist_server_pin(void) {
@@ -162,27 +180,82 @@ static int persist_server_pin(void) {
     return GS_FAILED;
   }
 
+  char primaryPin[SPKI_PIN_BUFFER_SIZE] = {0};
+  char temporaryPin[SPKI_PIN_BUFFER_SIZE] = {0};
+  char backupPin[SPKI_PIN_BUFFER_SIZE] = {0};
+  PIN_FILE_STATE primaryState = read_pin_file(pinPath, primaryPin);
+  PIN_FILE_STATE temporaryState = read_pin_file(temporaryPath, temporaryPin);
+  PIN_FILE_STATE backupState = read_pin_file(backupPath, backupPin);
+
+  const char *recoveryPath = temporaryState == PIN_FILE_VALID ? temporaryPath :
+      backupState == PIN_FILE_VALID ? backupPath : NULL;
+  bool hasValidPin = primaryState == PIN_FILE_VALID || recoveryPath != NULL;
+  bool hasAnyArtifact = primaryState != PIN_FILE_ABSENT ||
+      temporaryState != PIN_FILE_ABSENT || backupState != PIN_FILE_ABSENT;
+  if (!hasValidPin && hasAnyArtifact) {
+    gs_error = "The saved Sunshine identity files are damaged; authenticated recovery data was preserved";
+    return GS_IO_ERROR;
+  }
+  if (primaryState != PIN_FILE_VALID && recoveryPath != NULL) {
+    bool recoveredTemporary = recoveryPath == temporaryPath;
+    if ((primaryState != PIN_FILE_ABSENT && remove(pinPath) != 0) ||
+        rename(recoveryPath, pinPath) != 0) {
+      gs_error = "Could not normalize the current Sunshine identity";
+      return GS_IO_ERROR;
+    }
+    primaryState = PIN_FILE_VALID;
+    if (recoveredTemporary) {
+      temporaryState = PIN_FILE_ABSENT;
+    } else {
+      backupState = PIN_FILE_ABSENT;
+    }
+  }
+  if (temporaryState != PIN_FILE_ABSENT && remove(temporaryPath) != 0) {
+    gs_error = "Could not replace the staged Sunshine identity";
+    return GS_IO_ERROR;
+  }
+  temporaryState = PIN_FILE_ABSENT;
+
   FILE *file = fopen(temporaryPath, "wb");
   if (file == NULL) {
     gs_error = "Could not save the paired Sunshine identity";
     return GS_IO_ERROR;
   }
 
-  bool writeOk = fprintf(file, "%s\n", serverPin) > 0;
+  bool writeOk = fprintf(file, "%s\n", serverPin) > 0 && fflush(file) == 0;
   bool closeOk = fclose(file) == 0;
   if (!writeOk || !closeOk) {
-    remove(temporaryPath);
     gs_error = "Could not finish saving the paired Sunshine identity";
     return GS_IO_ERROR;
   }
 
+  char stagedPin[SPKI_PIN_BUFFER_SIZE];
+  if (read_pin_file(temporaryPath, stagedPin) != PIN_FILE_VALID ||
+      strcmp(stagedPin, serverPin) != 0) {
+    gs_error = "The staged Sunshine identity did not verify";
+    return GS_IO_ERROR;
+  }
+
   /* Vita's filesystem does not guarantee replacement-by-rename. */
-  remove(backupPath);
-  bool hadPreviousPin = rename(pinPath, backupPath) == 0;
+  bool hadPreviousPin = primaryState == PIN_FILE_VALID;
+  if (hadPreviousPin && backupState != PIN_FILE_ABSENT &&
+      remove(backupPath) != 0) {
+    gs_error = "Could not rotate the previous Sunshine identity backup";
+    return GS_IO_ERROR;
+  }
+  if (hadPreviousPin && rename(pinPath, backupPath) != 0) {
+    gs_error = "Could not preserve the previous Sunshine identity";
+    return GS_IO_ERROR;
+  }
   if (rename(temporaryPath, pinPath) != 0) {
-    remove(temporaryPath);
     if (hadPreviousPin) rename(backupPath, pinPath);
     gs_error = "Could not install the paired Sunshine identity";
+    return GS_IO_ERROR;
+  }
+  char committedPin[SPKI_PIN_BUFFER_SIZE];
+  if (read_pin_file(pinPath, committedPin) != PIN_FILE_VALID ||
+      strcmp(committedPin, serverPin) != 0) {
+    gs_error = "The committed Sunshine identity did not verify";
     return GS_IO_ERROR;
   }
   if (hadPreviousPin) remove(backupPath);
@@ -194,53 +267,41 @@ int http_set_server_pin_from_pem(const char *certificatePem, bool persist) {
     return GS_INVALID;
   }
 
-  int ret = GS_FAILED;
-  BIO *bio = BIO_new_mem_buf((void *)certificatePem, -1);
-  X509 *certificate = NULL;
-  EVP_PKEY *publicKey = NULL;
-  unsigned char *der = NULL;
-  if (bio == NULL ||
-      (certificate = PEM_read_bio_X509(bio, NULL, NULL, NULL)) == NULL ||
-      (publicKey = X509_get_pubkey(certificate)) == NULL) {
+  char calculatedPin[GS_CRYPTO_SPKI_PIN_LENGTH + 1];
+  if (!gs_crypto_spki_pin_from_pem(certificatePem, calculatedPin)) {
     gs_error = "Sunshine returned an invalid pairing certificate";
-    goto cleanup;
+    return GS_INVALID;
   }
 
-  int derLength = i2d_PUBKEY(publicKey, &der);
-  if (derLength <= 0 || der == NULL) {
-    gs_error = "Could not read Sunshine's pairing identity";
-    goto cleanup;
-  }
-
-  unsigned char digest[SHA256_DIGEST_LENGTH];
-  unsigned char encoded[48];
-  SHA256(der, (size_t)derLength, digest);
-  int encodedLength = EVP_EncodeBlock(encoded, digest, sizeof(digest));
-  if (encodedLength != 44) {
-    gs_error = "Could not encode Sunshine's pairing identity";
-    goto cleanup;
-  }
-
-  int written = snprintf(
-      serverPin, sizeof(serverPin), "sha256//%.*s", encodedLength, encoded);
-  if (written <= 0 || (size_t)written >= sizeof(serverPin) ||
-      apply_server_pin() != GS_OK) {
-    serverPin[0] = '\0';
-    goto cleanup;
-  }
-
-  ret = persist ? persist_server_pin() : GS_OK;
-
-cleanup:
-  if (der != NULL) OPENSSL_free(der);
-  if (publicKey != NULL) EVP_PKEY_free(publicKey);
-  if (certificate != NULL) X509_free(certificate);
-  if (bio != NULL) BIO_free(bio);
-  return ret;
+  return http_set_server_pin(calculatedPin, persist);
 }
 
 bool http_has_server_pin(void) {
   return serverPin[0] != '\0';
+}
+
+int http_copy_server_pin(char *pin, size_t pinSize) {
+  if (pin == NULL || pinSize == 0 || !http_has_server_pin()) return GS_INVALID;
+  int written = snprintf(pin, pinSize, "%s", serverPin);
+  return written > 0 && (size_t)written < pinSize ? GS_OK : GS_INVALID;
+}
+
+int http_set_server_pin(const char *pin, bool persist) {
+  if (curl == NULL || !http_server_pin_is_valid(pin)) {
+    gs_error = "The authenticated Sunshine identity is invalid";
+    return GS_INVALID;
+  }
+
+  char previousPin[SPKI_PIN_BUFFER_SIZE];
+  snprintf(previousPin, sizeof(previousPin), "%s", serverPin);
+  snprintf(serverPin, sizeof(serverPin), "%s", pin);
+  int ret = apply_server_pin();
+  if (ret == GS_OK && persist) ret = persist_server_pin();
+  if (ret != GS_OK) {
+    snprintf(serverPin, sizeof(serverPin), "%s", previousPin);
+    (void)apply_server_pin();
+  }
+  return ret;
 }
 
 static size_t _write_curl(void *contents, size_t size, size_t nmemb, void *userp)
@@ -270,11 +331,20 @@ static size_t _write_curl(void *contents, size_t size, size_t nmemb, void *userp
   return realsize;
 }
 
-int http_init(const char* keyDirectory, int logLevel) {
+int http_init_with_recovery(
+    const char* keyDirectory, int logLevel, const char* certificatePath,
+    const char* keyPath, const char* recoveryServerPin) {
   http_cleanup();
   if (keyDirectory == NULL) {
     gs_error = "Pairing data path is missing";
     return GS_INVALID;
+  }
+  const curl_version_info_data *curlVersion =
+      curl_version_info(CURLVERSION_NOW);
+  if (curlVersion == NULL || curlVersion->ssl_version == NULL ||
+      strstr(curlVersion->ssl_version, "mbedTLS") == NULL) {
+    gs_error = "This Vita build does not contain the required mbedTLS network backend";
+    return GS_FAILED;
   }
   curl = curl_easy_init();
   debug = logLevel >= 2;
@@ -298,6 +368,15 @@ int http_init(const char* keyDirectory, int logLevel) {
   char keyFilePath[4096];
   int keyPathLength = snprintf(
       keyFilePath, sizeof(keyFilePath), "%s/%s", keyDirectory, KEY_FILE_NAME);
+  if (certificatePath != NULL) {
+    certificatePathLength = snprintf(
+        certificateFilePath, sizeof(certificateFilePath), "%s",
+        certificatePath);
+  }
+  if (keyPath != NULL) {
+    keyPathLength = snprintf(
+        keyFilePath, sizeof(keyFilePath), "%s", keyPath);
+  }
   if (certificatePathLength < 0 ||
       (size_t)certificatePathLength >= sizeof(certificateFilePath) ||
       keyPathLength < 0 || (size_t)keyPathLength >= sizeof(keyFilePath)) {
@@ -307,7 +386,6 @@ int http_init(const char* keyDirectory, int logLevel) {
   }
 
   curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
-  curl_easy_setopt(curl, CURLOPT_SSLENGINE_DEFAULT, 1L);
   curl_easy_setopt(curl, CURLOPT_SSLCERTTYPE,"PEM");
   curl_easy_setopt(curl, CURLOPT_SSLCERT, certificateFilePath);
   curl_easy_setopt(curl, CURLOPT_SSLKEYTYPE, "PEM");
@@ -321,9 +399,16 @@ int http_init(const char* keyDirectory, int logLevel) {
   curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
   curl_easy_setopt(curl, CURLOPT_TIMEOUT, HTTP_TIMEOUT_ORDINARY_SECONDS);
 
-  int ret = http_reload_server_pin();
+  int ret = recoveryServerPin == NULL
+      ? http_reload_server_pin()
+      : http_set_server_pin(recoveryServerPin, false);
   if (ret != GS_OK) http_cleanup();
   return ret;
+}
+
+int http_init(const char* keyDirectory, int logLevel) {
+  return http_init_with_recovery(
+      keyDirectory, logLevel, NULL, NULL, NULL);
 }
 
 static const char *request_path(const char *url) {
@@ -377,6 +462,7 @@ int http_request_with_timeout(char* url, PHTTP_DATA data, long timeoutSeconds) {
 #if LIBCURL_VERSION_NUM >= 0x072700
     } else if (res == CURLE_SSL_PINNEDPUBKEYNOTMATCH) {
       gs_error = "Sunshine's identity changed. Re-pair only if you expected its certificate to change";
+      return GS_IDENTITY_CHANGED;
 #endif
     } else {
       gs_error = curl_easy_strerror(res);

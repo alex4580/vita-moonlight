@@ -1,0 +1,227 @@
+diff --git a/src/ControlStream.c b/src/ControlStream.c
+index 2b5182e..110be55 100644
+--- a/src/ControlStream.c
++++ b/src/ControlStream.c
+@@ -1532,6 +1532,7 @@ static void requestIdrFrame(void) {
+         }
+     }
+ 
++    addVideoStreamDiagnosticCount(VIDEO_DIAGNOSTIC_IDR_REQUEST_SENT, 1);
+     Limelog("IDR frame request sent\n");
+ }
+ 
+diff --git a/src/Limelight-internal.h b/src/Limelight-internal.h
+index e1314c5..7bd2dd1 100644
+--- a/src/Limelight-internal.h
++++ b/src/Limelight-internal.h
+@@ -10,6 +10,7 @@
+ #include "RtpAudioQueue.h"
+ #include "RtpVideoQueue.h"
+ #include "ByteBuffer.h"
++#include "video_diagnostics.h"
+ 
+ #include <enet/enet.h>
+ 
+@@ -141,6 +142,18 @@ void notifyKeyFrameReceived(void);
+ int startVideoStream(void* rendererContext, int drFlags);
+ void stopVideoStream(void);
+ 
++typedef enum _VIDEO_DIAGNOSTIC_COUNTER {
++    VIDEO_DIAGNOSTIC_RTP_PACKET_OUT_OF_SEQUENCE,
++    VIDEO_DIAGNOSTIC_FEC_DATA_PACKET_RECOVERED,
++    VIDEO_DIAGNOSTIC_FEC_BLOCK_FAILED,
++    VIDEO_DIAGNOSTIC_NETWORK_FRAME_LOST,
++    VIDEO_DIAGNOSTIC_DEPACKETIZER_CORRUPT_FRAME,
++    VIDEO_DIAGNOSTIC_DECODE_UNIT_QUEUE_OVERFLOW,
++    VIDEO_DIAGNOSTIC_IDR_REQUEST_SENT,
++} VIDEO_DIAGNOSTIC_COUNTER;
++
++void addVideoStreamDiagnosticCount(VIDEO_DIAGNOSTIC_COUNTER counter, uint32_t amount);
++
+ int initializeAudioStream(void);
+ int notifyAudioPortNegotiationComplete(void);
+ void destroyAudioStream(void);
+diff --git a/src/RtpVideoQueue.c b/src/RtpVideoQueue.c
+index dfbed48..904003b 100644
+--- a/src/RtpVideoQueue.c
++++ b/src/RtpVideoQueue.c
+@@ -160,6 +160,9 @@ static bool queuePacket(PRTP_VIDEO_QUEUE queue, PRTPV_QUEUE_ENTRY newEntry, PRTP
+     // FEC recovery packets are synthesized by us, so don't use them to determine OOS data
+     if (!isFecRecovery) {
+         if (outOfSequence) {
++            queue->stats.packetCountOOS++;
++            addVideoStreamDiagnosticCount(
++                VIDEO_DIAGNOSTIC_RTP_PACKET_OUT_OF_SEQUENCE, 1);
+             // This packet was received after a higher sequence number packet, so note that we
+             // received an out of order packet to disable our speculative RFI recovery logic.
+             queue->lastOosFramePresentationTimestamp = newEntry->presentationTimeUs;
+@@ -334,7 +337,9 @@ static int reconstructFrame(PRTP_VIDEO_QUEUE queue) {
+     // If this fails, something is probably wrong with our FEC state.
+     LC_ASSERT(ret == 0);
+ 
+-    if (queue->bufferDataPackets != queue->receivedDataPackets) {
++    uint32_t recoveredDataPackets =
++            queue->bufferDataPackets - queue->receivedDataPackets;
++    if (recoveredDataPackets != 0) {
+ #ifdef FEC_VERBOSE
+         Limelog("Recovered %d video data shards from frame %d\n",
+                 queue->bufferDataPackets - queue->receivedDataPackets,
+@@ -450,6 +455,15 @@ cleanup_packets:
+         }
+     }
+ 
++    // Count only a fully successful recovery. reed_solomon_reconstruct() may
++    // succeed before the recovered NV packets fail the sanity checks above.
++    if (ret == 0 && recoveredDataPackets != 0) {
++        queue->stats.packetCountFecRecovered += recoveredDataPackets;
++        addVideoStreamDiagnosticCount(
++            VIDEO_DIAGNOSTIC_FEC_DATA_PACKET_RECOVERED,
++            recoveredDataPackets);
++    }
++
+ cleanup:
+     reed_solomon_release(rs);
+ 
+@@ -593,6 +607,12 @@ int RtpvAddPacket(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, PRTPV_
+     if (queue->pendingFecBlockList.count == 0 || queue->currentFrameNumber != nvPacket->frameIndex ||
+             queue->multiFecCurrentBlockNumber != fecCurrentBlockNumber) {
+         if (queue->pendingFecBlockList.count != 0) {
++            // This nonempty block is about to be abandoned. Count it once here,
++            // before any of the mutually exclusive purge/return paths below.
++            queue->stats.packetCountFecFailed++;
++            addVideoStreamDiagnosticCount(
++                VIDEO_DIAGNOSTIC_FEC_BLOCK_FAILED, 1);
++
+             // Report the final status of the FEC queue before dropping this frame
+             reportFinalFrameFecStatus(queue);
+ 
+@@ -609,6 +629,9 @@ int RtpvAddPacket(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, PRTPV_
+                 // we must manually advance the queue to the next frame. Parsing this
+                 // frame further is not possible.
+                 if (queue->currentFrameNumber == nvPacket->frameIndex) {
++                    addVideoStreamDiagnosticCount(
++                        VIDEO_DIAGNOSTIC_NETWORK_FRAME_LOST, 1);
++
+                     // Discard any unsubmitted buffers from the previous frame
+                     purgeListEntries(&queue->pendingFecBlockList);
+                     purgeListEntries(&queue->completedFecBlockList);
+@@ -637,6 +660,12 @@ int RtpvAddPacket(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, PRTPV_
+         // or block 0 of a new frame.
+         uint8_t expectedFecBlockNumber = (queue->currentFrameNumber == nvPacket->frameIndex ? queue->multiFecCurrentBlockNumber : 0);
+         if (fecCurrentBlockNumber != expectedFecBlockNumber) {
++            addVideoStreamDiagnosticCount(
++                VIDEO_DIAGNOSTIC_NETWORK_FRAME_LOST,
++                queue->currentFrameNumber == nvPacket->frameIndex
++                    ? 1
++                    : nvPacket->frameIndex - queue->currentFrameNumber + 1);
++
+             // Report the final status of the FEC queue before dropping this frame
+             reportFinalFrameFecStatus(queue);
+ 
+@@ -675,6 +704,10 @@ int RtpvAddPacket(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, PRTPV_
+         if (queue->currentFrameNumber != nvPacket->frameIndex) {
+             LC_ASSERT_VT(queue->currentFrameNumber < nvPacket->frameIndex);
+ 
++            addVideoStreamDiagnosticCount(
++                VIDEO_DIAGNOSTIC_NETWORK_FRAME_LOST,
++                nvPacket->frameIndex - queue->currentFrameNumber);
++
+             // If the frame immediately preceding this one was lost, we may have already
+             // reported it using our speculative RFI logic. Don't report it again.
+             if (queue->currentFrameNumber + 1 != nvPacket->frameIndex || !queue->reportedLostFrame) {
+diff --git a/src/VideoDepacketizer.c b/src/VideoDepacketizer.c
+index 43f2df9..4148c26 100644
+--- a/src/VideoDepacketizer.c
++++ b/src/VideoDepacketizer.c
+@@ -511,6 +511,8 @@ static void reassembleFrame(int frameNumber, bool frameIsLTR) {
+ 
+             if ((VideoCallbacks.capabilities & CAPABILITY_DIRECT_SUBMIT) == 0) {
+                 if (LbqOfferQueueItem(&decodeUnitQueue, qdu, &qdu->entry) == LBQ_BOUND_EXCEEDED) {
++                    addVideoStreamDiagnosticCount(
++                        VIDEO_DIAGNOSTIC_DECODE_UNIT_QUEUE_OVERFLOW, 1);
+                     Limelog("Video decode unit queue overflow\n");
+ 
+                     // RFI recovery is not supported here
+@@ -784,6 +786,8 @@ static void processRtpPayload(PNV_VIDEO_PACKET videoPacket, int length,
+     // the streamPacketIndex not matching correctly should find nearly all of the rest.
+     if (isBefore24(streamPacketIndex, U24(lastPacketInStream + 1)) ||
+             (!(flags & FLAG_SOF) && streamPacketIndex != U24(lastPacketInStream + 1))) {
++        addVideoStreamDiagnosticCount(
++            VIDEO_DIAGNOSTIC_DEPACKETIZER_CORRUPT_FRAME, 1);
+         Limelog("Depacketizer detected corrupt frame: %d", frameIndex);
+         decodingFrame = false;
+         nextFrameNumber = frameIndex + 1;
+diff --git a/src/VideoStream.c b/src/VideoStream.c
+index 402b056..080d74d 100644
+--- a/src/VideoStream.c
++++ b/src/VideoStream.c
+@@ -6,6 +6,7 @@
+ #define FIRST_FRAME_PORT 47996
+ 
+ static RTP_VIDEO_QUEUE rtpQueue;
++static VideoStreamDiagnostics videoDiagnostics;
+ 
+ static SOCKET rtpSocket = INVALID_SOCKET;
+ static SOCKET firstFrameSocket = INVALID_SOCKET;
+@@ -417,3 +418,61 @@ int startVideoStream(void* rendererContext, int drFlags) {
+ const RTP_VIDEO_STATS* LiGetRTPVideoStats(void) {
+     return &rtpQueue.stats;
+ }
++
++void addVideoStreamDiagnosticCount(VIDEO_DIAGNOSTIC_COUNTER counter, uint32_t amount) {
++    uint32_t* destination;
++
++    if (amount == 0) {
++        return;
++    }
++
++    switch (counter) {
++        case VIDEO_DIAGNOSTIC_RTP_PACKET_OUT_OF_SEQUENCE:
++            destination = &videoDiagnostics.rtpPacketsOutOfSequence;
++            break;
++        case VIDEO_DIAGNOSTIC_FEC_DATA_PACKET_RECOVERED:
++            destination = &videoDiagnostics.fecDataPacketsRecovered;
++            break;
++        case VIDEO_DIAGNOSTIC_FEC_BLOCK_FAILED:
++            destination = &videoDiagnostics.fecBlocksFailed;
++            break;
++        case VIDEO_DIAGNOSTIC_NETWORK_FRAME_LOST:
++            destination = &videoDiagnostics.networkFramesLost;
++            break;
++        case VIDEO_DIAGNOSTIC_DEPACKETIZER_CORRUPT_FRAME:
++            destination = &videoDiagnostics.depacketizerCorruptFrames;
++            break;
++        case VIDEO_DIAGNOSTIC_DECODE_UNIT_QUEUE_OVERFLOW:
++            destination = &videoDiagnostics.decodeUnitQueueOverflows;
++            break;
++        case VIDEO_DIAGNOSTIC_IDR_REQUEST_SENT:
++            destination = &videoDiagnostics.idrRequestsSent;
++            break;
++        default:
++            return;
++    }
++
++    __atomic_fetch_add(destination, amount, __ATOMIC_RELAXED);
++}
++
++bool LiGetVideoStreamDiagnosticsSnapshot(VideoStreamDiagnostics* snapshot) {
++    if (snapshot == NULL) {
++        return false;
++    }
++
++    snapshot->rtpPacketsOutOfSequence = __atomic_load_n(
++        &videoDiagnostics.rtpPacketsOutOfSequence, __ATOMIC_RELAXED);
++    snapshot->fecDataPacketsRecovered = __atomic_load_n(
++        &videoDiagnostics.fecDataPacketsRecovered, __ATOMIC_RELAXED);
++    snapshot->fecBlocksFailed = __atomic_load_n(
++        &videoDiagnostics.fecBlocksFailed, __ATOMIC_RELAXED);
++    snapshot->networkFramesLost = __atomic_load_n(
++        &videoDiagnostics.networkFramesLost, __ATOMIC_RELAXED);
++    snapshot->depacketizerCorruptFrames = __atomic_load_n(
++        &videoDiagnostics.depacketizerCorruptFrames, __ATOMIC_RELAXED);
++    snapshot->decodeUnitQueueOverflows = __atomic_load_n(
++        &videoDiagnostics.decodeUnitQueueOverflows, __ATOMIC_RELAXED);
++    snapshot->idrRequestsSent = __atomic_load_n(
++        &videoDiagnostics.idrRequestsSent, __ATOMIC_RELAXED);
++    return true;
++}

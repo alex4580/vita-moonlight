@@ -339,7 +339,8 @@ void connection_set_motion_state(uint16_t controller, uint8_t motion_type, uint1
   (void)controller;
 
   //TODO: Multicontroller support here someday? Can't afford pstv tho
-  if (!config.enable_motion_controls || config.controller_type != 2) {
+  if (report_rate != 0 &&
+      (!config.enable_motion_controls || config.controller_type != 2)) {
     vita_debug_event(
         VITA_DEBUG_LEVEL_INFO, "motion.state",
         "state=ignored reason=profile_disabled sensor_type=%u",
@@ -347,13 +348,15 @@ void connection_set_motion_state(uint16_t controller, uint8_t motion_type, uint1
     return;
   }
 
-  vita_motion_set_state(motion_type, report_rate);
+  bool motion_enabled = vita_motion_set_state(motion_type, report_rate);
   vita_debug_event(
       VITA_DEBUG_LEVEL_INFO, "motion.state",
       "state=%s sensor_type=%u report_hz=%u",
-      report_rate == 0 ? "disabled" : "enabled",
+      report_rate == 0
+          ? "disabled"
+          : (motion_enabled ? "enabled" : "unavailable"),
       (unsigned int)motion_type,
-      (unsigned int)(report_rate == 0
+      (unsigned int)(!motion_enabled
           ? 0
           : vita_motion_clamp_report_rate(report_rate)));
 }

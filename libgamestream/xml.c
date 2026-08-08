@@ -745,5 +745,9 @@ int xml_status(char *data, size_t len) {
   else {
     gs_error = "Sunshine rejected the request without a status message";
   }
-  return GS_ERROR;
+  /* Current Sunshine returns this exact status from its HTTPS certificate
+   * verifier when the pinned server is still genuine but no longer trusts the
+   * Vita certificate.  Preserve that distinction so saved hosts can offer a
+   * fresh PIN exchange instead of being misreported as offline. */
+  return query.status == 401 ? GS_CLIENT_UNAUTHORIZED : GS_ERROR;
 }

@@ -12,6 +12,9 @@
 
 #include <vita2d.h>
 
+#include "guilib.h"
+#include "ime_text.h"
+
 #define SCE_IME_DIALOG_MAX_TITLE_LENGTH	(128)
 //#define SCE_IME_DIALOG_MAX_TEXT_LENGTH	(512)
 
@@ -21,57 +24,21 @@
 #define IME_DIALOG_RESULT_CANCELED 3
 
 
-static uint16_t ime_title_utf16[SCE_IME_DIALOG_MAX_TITLE_LENGTH];
+static uint16_t ime_title_utf16[SCE_IME_DIALOG_MAX_TITLE_LENGTH + 1];
 static uint16_t ime_initial_text_utf16[SCE_IME_DIALOG_MAX_TEXT_LENGTH];
 static uint16_t ime_input_text_utf16[SCE_IME_DIALOG_MAX_TEXT_LENGTH + 1];
-static uint8_t ime_input_text_utf8[SCE_IME_DIALOG_MAX_TEXT_LENGTH + 1];
-
-void utf16_to_utf8(uint16_t *src, uint8_t *dst) {
-  int i;
-  for (i = 0; src[i]; i++) {
-    if ((src[i] & 0xFF80) == 0) {
-      *(dst++) = src[i] & 0xFF;
-    } else if((src[i] & 0xF800) == 0) {
-      *(dst++) = ((src[i] >> 6) & 0xFF) | 0xC0;
-      *(dst++) = (src[i] & 0x3F) | 0x80;
-    } else if((src[i] & 0xFC00) == 0xD800 && (src[i + 1] & 0xFC00) == 0xDC00) {
-      *(dst++) = (((src[i] + 64) >> 8) & 0x3) | 0xF0;
-      *(dst++) = (((src[i] >> 2) + 16) & 0x3F) | 0x80;
-      *(dst++) = ((src[i] >> 4) & 0x30) | 0x80 | ((src[i + 1] << 2) & 0xF);
-      *(dst++) = (src[i + 1] & 0x3F) | 0x80;
-      i += 1;
-    } else {
-      *(dst++) = ((src[i] >> 12) & 0xF) | 0xE0;
-      *(dst++) = ((src[i] >> 6) & 0x3F) | 0x80;
-      *(dst++) = (src[i] & 0x3F) | 0x80;
-    }
-  }
-
-  *dst = '\0';
-}
-
-void utf8_to_utf16(const uint8_t *src, uint16_t *dst) {
-  int i;
-  for (i = 0; src[i];) {
-    if ((src[i] & 0xE0) == 0xE0) {
-      *(dst++) = ((src[i] & 0x0F) << 12) | ((src[i + 1] & 0x3F) << 6) | (src[i + 2] & 0x3F);
-      i += 3;
-    } else if ((src[i] & 0xC0) == 0xC0) {
-      *(dst++) = ((src[i] & 0x1F) << 6) | (src[i + 1] & 0x3F);
-      i += 2;
-    } else {
-      *(dst++) = src[i];
-      i += 1;
-    }
-  }
-
-  *dst = '\0';
-}
-
-void initImeDialog(SceImeType type, const char *title, char *initial_text, int max_text_length) {
+static int initImeDialog(SceImeType type, const char *title,
+                         const char *initial_text, int max_text_length) {
   // Convert UTF8 to UTF16
-  utf8_to_utf16((const uint8_t *)title, ime_title_utf16);
-  utf8_to_utf16((const uint8_t *)initial_text, ime_initial_text_utf16);
+  if (!ime_utf8_to_utf16(title, ime_title_utf16,
+                         sizeof(ime_title_utf16) /
+                             sizeof(ime_title_utf16[0])) ||
+      !ime_utf8_to_utf16(initial_text, ime_initial_text_utf16,
+                         sizeof(ime_initial_text_utf16) /
+                             sizeof(ime_initial_text_utf16[0]))) {
+    return -1;
+  }
+  memset(ime_input_text_utf16, 0, sizeof(ime_input_text_utf16));
 
   SceImeDialogParam param;
   sceImeDialogParamInit(&param);
@@ -85,28 +52,22 @@ void initImeDialog(SceImeType type, const char *title, char *initial_text, int m
   param.initialText = ime_initial_text_utf16;
   param.inputTextBuffer = ime_input_text_utf16;
 
-  //int res =
-  sceImeDialogInit(&param);
-  return ;
+  return sceImeDialogInit(&param);
 }
 
-void oslOskGetText(char *text){
-  // Convert UTF16 to UTF8
-  utf16_to_utf8(ime_input_text_utf16, ime_input_text_utf8);
-  strcpy(text,(char*)ime_input_text_utf8);
-}
-
-
-int ime_dialog_type(SceImeType type, char *text, const char *title, const char *def) {
+static int ime_dialog_type(SceImeType type, char *text, size_t text_size,
+                           const char *title, const char *def) {
+  if (text == NULL || text_size == 0 || title == NULL) return -1;
   sceCommonDialogSetConfigParam(&(SceCommonDialogConfigParam){});
 
-  char userText[512];
-  if (def) {
-    strcpy(userText, def);
+  if (def == NULL) def = "";
+  if (initImeDialog(type, title, def, 128) < 0) {
+    text[0] = '\0';
+    display_error("The Vita on-screen keyboard could not be opened.");
+    return -1;
   }
 
   int ret = 0;
-  initImeDialog(type, title, userText, 128);
 
   while (1) {
     vita2d_start_drawing();
@@ -119,14 +80,18 @@ int ime_dialog_type(SceImeType type, char *text, const char *title, const char *
       sceImeDialogGetResult(&result);
 
       if (result.button == SCE_IME_DIALOG_BUTTON_CLOSE) {
-        status = IME_DIALOG_RESULT_CANCELED;
         ret = -1;
-        break;
-      } else {
-        oslOskGetText(userText);
+      } else if (!ime_utf16_to_utf8(
+                     ime_input_text_utf16,
+                     sizeof(ime_input_text_utf16) /
+                         sizeof(ime_input_text_utf16[0]),
+                     text, text_size)) {
+        /* The IME may contain more UTF-8 bytes than the destination can
+         * represent. Never truncate into a saved address, name, or setting. */
+        text[0] = '\0';
+        ret = -2;
       }
-
-      strcpy(text, userText);
+      vita2d_end_drawing();
       break;
     }
 
@@ -137,13 +102,22 @@ int ime_dialog_type(SceImeType type, char *text, const char *title, const char *
   }
 
   sceImeDialogTerm();
+  if (ret == -2) {
+    display_error(
+        "That text needs more storage than this field allows.\n"
+        "Enter a shorter value and try again.");
+  }
   return ret;
 }
 
-int ime_dialog_string(char *text, const char *title, const char *def) {
-  return ime_dialog_type(SCE_IME_TYPE_DEFAULT, text, title, def);
+int ime_dialog_string(char *text, size_t text_size, const char *title,
+                      const char *def) {
+  return ime_dialog_type(
+      SCE_IME_TYPE_DEFAULT, text, text_size, title, def);
 }
 
-int ime_dialog_number(char *text, const char *title, const char *def) {
-  return ime_dialog_type(SCE_IME_TYPE_EXTENDED_NUMBER, text, title, def);
+int ime_dialog_number(char *text, size_t text_size, const char *title,
+                      const char *def) {
+  return ime_dialog_type(
+      SCE_IME_TYPE_EXTENDED_NUMBER, text, text_size, title, def);
 }

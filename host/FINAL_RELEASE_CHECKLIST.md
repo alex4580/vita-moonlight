@@ -12,7 +12,8 @@ release notes.
       intended Git tag agree.
 - [ ] Download both CI artifacts from that commit; do not combine files from
       different workflow runs.
-- [ ] Record SHA-256 hashes for the VPK, installer, and portable ZIP.
+- [ ] Record SHA-256 hashes for the VPK, Vita source archive, installer, and
+      portable ZIP.
 
 | Field | Value |
 |---|---|
@@ -110,8 +111,9 @@ release notes.
       paused, and double PS always returns to LiveArea. Safe Guide, Immediate
       Guide, and System / LiveArea match the documented behavior; START + L +
       R opens the overlay without leaking input.
-- [ ] Every destructive overlay action requires the second **X** confirmation,
-      and **O** cancels it.
+- [ ] Every destructive overlay action requires a second press of the
+      configured Confirm button, and the configured Cancel button backs out.
+      The on-screen X/O hints must follow **Swap X and O in Moonlight**.
 - [ ] The pre-stream Settings screen and the in-stream Stream/Input pages show
       identical values for their shared controls; negotiated changes apply
       only after the documented controlled reconnect.
@@ -305,9 +307,29 @@ release notes.
 - [ ] Installer and portable ZIP contain the same companion build, simple root
       README, `host` and `docs` guide trees (including community testing,
       logging/support, compatibility, Vita tuning, building, and releasing),
-      the packaged support-log summarizer, licenses, and
-      `THIRD_PARTY_NOTICES.md`. Every packaged relative documentation link
-      resolves.
+      the packaged support-log summarizer, the Windows host notices, the Vita
+      `THIRD_PARTY_NOTICES.txt` index, and every exact license under
+      `licenses/vita`. Every packaged relative documentation link resolves.
+- [ ] Inspect the VPK contents. It contains `licenses/THIRD_PARTY_NOTICES.txt`,
+      the project GPL, h264bitstream LGPL, Mononoki OFL, and every exact license
+      named in the notice index. No `nerdfont.ttf` or former `mdnsniff`
+      submodule payload is present.
+- [ ] Run `tools/check-vita-mdns-parser.py`,
+      `tools/stage-vita-dependency-sources.py --self-test`,
+      `tools/stage-vita-mbedtls.py --self-test`,
+      `tools/build-vita-source-bundle.py --self-test`, and
+      `tools/check-release-contract.py` from a clean recursive checkout. All
+      pass.
+- [ ] The Vita workflow stages every locked official dependency source, builds
+      the complete project-owned source chain into the pinned SDK, and
+      finalizes `vitasdk-dependencies.json`. Its status is `complete`, its
+      source list is nonempty, and every required installed output has a valid
+      SHA-256 and byte count.
+- [ ] The tag workflow produces exactly one `*-Vita-Source.tar.gz` for the
+      frozen candidate. Its `SOURCE_BUNDLE_STATUS.txt` and
+      `SOURCE_MANIFEST.json` both report complete Corresponding Source, and
+      the workflow used `--require-complete`. Never bypass this gate or use
+      GitHub's generic source archive as a substitute.
 - [ ] Scan release assets with Microsoft Defender and VirusTotal or document
       why an external scan was not used.
 - [ ] Configure the mandatory `WINDOWS_CERTIFICATE_BASE64` and
@@ -324,6 +346,9 @@ release notes.
 
 - [ ] Draft PR has no unresolved blocking review comments.
 - [ ] Vita and Windows workflows pass on the frozen commit.
+- [ ] The Vita source archive, VPK, installer, portable ZIP, dependency
+      manifest, signing manifest, and checksum manifest are attached to and
+      attested by the same release workflow run.
 - [ ] PR is merged into the `vita` release branch with the tested commit
       ancestry intact.
 - [ ] Create and push `v0.14.8` only after the hardware and safety gates pass.

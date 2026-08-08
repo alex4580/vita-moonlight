@@ -68,9 +68,28 @@ def main() -> int:
         "device.ini must use a checked, recoverable journaled write",
     )
     require(
-        "ini_parse(backup_path" in device
-        and "sceIoRename(backup_path, path)" in device,
-        "device.ini loading must recover the last complete backup",
+        "const char *candidates[] = {path, temporary_path, backup_path};"
+        in device
+        and "parse_device_candidate(" in device
+        and "sceIoRename(candidates[selected], path)" in device,
+        "device.ini loading must prefer a complete intended .tmp over the older backup after an interrupted commit",
+    )
+    require(
+        "info->internal[0] == '\\0'" in save
+        and "info->port == 0" in save
+        and save.count("parse_device_candidate(") >= 2
+        and save.count("device_records_equal(") >= 2
+        and "sceIoRename(backup_path, path)" in save,
+        "device.ini writes must reject unloadable records and read back the staged and committed copies transactionally",
+    )
+    require(
+        "static bool parse_ini_bool(" in device
+        and 'strcmp(value, "true") == 0' in device
+        and 'strcmp(value, "false") == 0' in device
+        and "if (!parse_ini_bool(value, &info->paired)) return 0;" in device
+        and "if (!parse_ini_bool(value, &info->prefer_external)) return 0;"
+        in device,
+        "malformed saved booleans must reject the candidate instead of silently changing pairing state",
     )
     require(
         "info = upsert_device(info);" in pairing
@@ -80,6 +99,12 @@ def main() -> int:
         < pairing.find("if (connection_paired() != 0)")
         and pairing.count("if (!save_device_info(info))") >= 2,
         "pair/re-pair must mutate and persist the canonical saved record",
+    )
+    require(
+        "static char active_saved_host_name[256]" in connect
+        and "find_device(active_saved_host_name)" in connect
+        and "find_device_by_address(server.serverInfo.address)" not in connect,
+        "pair completion must update the selected saved identity, not an ambiguous record sharing its IP address",
     )
     require(
         'MENU_SEPARATOR("Saved computers")' in ui

@@ -590,7 +590,8 @@ static int settings_loop(int id, void *context, const input_data *input) {
         char value[512];
         int ret;
         if ((ret = ime_dialog_number(
-                 value, "Enter bitrate in Kbps (1000-30000)", "")) == 0) {
+                 value, sizeof(value),
+                 "Enter bitrate in Kbps (1000-30000)", "")) == 0) {
           int bitrate = atoi(value);
           if (bitrate >= 1000 && bitrate <= 30000) {
             config.stream.bitrate = bitrate;
@@ -642,7 +643,8 @@ static int settings_loop(int id, void *context, const input_data *input) {
       }
       char value[512];
       if (ime_dialog_number(
-              value, "Enter horizontal gyro sensitivity (0.1-5.0)", "") == 0) {
+              value, sizeof(value),
+              "Enter horizontal gyro sensitivity (0.1-5.0)", "") == 0) {
         float scalar;
         if (parse_sensitivity(value, &scalar)) {
           config.motion_controls_scalar_x = scalar;
@@ -662,7 +664,8 @@ static int settings_loop(int id, void *context, const input_data *input) {
       }
       char value[512];
       if (ime_dialog_number(
-              value, "Enter vertical gyro sensitivity (0.1-5.0)", "") == 0) {
+              value, sizeof(value),
+              "Enter vertical gyro sensitivity (0.1-5.0)", "") == 0) {
         float scalar;
         if (parse_sensitivity(value, &scalar)) {
           config.motion_controls_scalar_y = scalar;
@@ -690,7 +693,8 @@ static int settings_loop(int id, void *context, const input_data *input) {
         char value[512];
         int ret;
         if ((ret = ime_dialog_number(
-                 value, "Enter sprint double-tap window in milliseconds", "")) == 0) {
+                 value, sizeof(value),
+                 "Enter sprint double-tap window in milliseconds", "")) == 0) {
           int stp = atoi(value);
           if (stp >= 50 && stp <= 1000) {
             config.double_tap_sprint_step_time = stp;

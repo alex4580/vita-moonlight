@@ -89,13 +89,13 @@ Vita-display switching and Force SDR are enabled under **Streaming**, and use
 The pre-stream Settings screen and in-stream menu use the same saved
 configuration.
 
-| Settings category | Available before a stream | Matching in-stream access |
+| Settings category | Available before a stream | In-stream access |
 |---|---|---|
 | **Stream quality** | Preset, managed resolution, FPS, and bitrate | **Stream & virtual display**, plus Apply resolution + reconnect |
-| **Advanced streaming** | Host optimization, packet recovery, network mode, optional display synchronization, and aspect scaling | **Stream & virtual display**, plus Apply resolution + reconnect |
-| **Controller** | Controller preset, gyro/sensitivity, sprint helper, PS behavior, shoulder swap, and graphical button mapping | **Controller & input**, plus Apply input changes + reconnect |
+| **Advanced streaming** | Packet recovery, network mode, optional display synchronization, and aspect scaling | The same four controls under **Stream & virtual display**, plus Apply resolution + reconnect |
+| **Controller** | Controller preset, gyro/sensitivity, sprint helper, PS behavior, shoulder swap, and graphical button mapping | Profile, gyro, sprint, PS, touch mode, and shoulder swap under **Controller & input**; sensitivity and graphical mapping remain pre-stream |
 | **Touch and keyboard** | Touch mode, front/rear zones, mouse acceleration, and keyboard layout | Core touch mode under **Controller & input**; keyboard on the main stream menu |
-| **System and support** | Performance overlay, Start/Stop support log, PC audio, Vita power behavior, and X/O layout | Performance overlay, Real-time diagnostics, and Start/Stop support log on the main stream menu |
+| **System and support** | Performance overlay, Start/Stop support log, PC audio, Vita power behavior, and X/O layout | Performance overlay, Real-time diagnostics, and Start/Stop support log; audio, power, and X/O layout remain pre-stream |
 
 Immediate settings such as performance-overlay mode update while streaming.
 Stream-format settings and controller type require a reconnect. Each in-stream
@@ -165,7 +165,7 @@ Opening this screen collects the metrics required to update it, but does not
 write a file. Choose **Start support log** on the main in-stream menu, or press
 **Triangle** while this screen says **Not capturing**. After reproducing the
 problem, choose **Stop and save support log** or press Triangle again. Press
-**O** or **START** to return.
+the configured **Cancel** button (O by default) or **START** to return.
 
 Support logging is off by default. When it is not capturing, Vita Moonlight
 does not open, create, or write a support-log file. A capture writes:
@@ -220,7 +220,9 @@ Focus a text field in the streamed Windows application first. Then either hold
 **START** and tap **D-pad Left** within one second, or choose **Open on-screen
 keyboard** from the in-stream menu. Typed characters are forwarded
 immediately; Backspace, Left/Right, and Enter are sent as PC keys. Close or
-minimize the Vita keyboard to return to the stream.
+minimize the Vita keyboard to return to the stream. When opened from the
+in-stream menu, that menu closes first so the keyboard returns directly to
+live video.
 
 Select the matching US, Spanish, or Latin American layout under
 **Settings > Touch and keyboard > Keyboard layout**. The keyboard translates
@@ -337,7 +339,7 @@ keyboard code. Set a corner to **None** when touches there should continue to
 the selected normal touch mode.
 
 The **Enabled** row in the graphical editor and the **Front-touch zones** row
-in the main Input menu control the same setting. Geometry, enabled state, and
+under **Touch and keyboard** control the same setting. Geometry, enabled state, and
 assignments take effect immediately; leaving Settings writes them to the main
 Moonlight configuration. No reconnect is required. Reset restores a 150-pixel
 corner size with top-left opening the stream menu, bottom-left sending PC
@@ -351,6 +353,9 @@ Guide, and the other corners unassigned.
 | **Safe PC Guide** | Waits 250 ms, then sends a single PS as Guide. Quick double-PS remains local. | Steam Guide works with a small delay. |
 | **Immediate PC Guide** | Sends Guide immediately; double-PS still releases to LiveArea. | Lowest Guide delay, but the first event can trigger Steam, Windows, or paused media before the second press is known. |
 | **System / LiveArea** | Vita retains PS; one press leaves Moonlight. | No captured double-tap and no PC Guide event. |
+
+The in-stream menu displays the active Confirm and Cancel buttons, so its
+button hints also follow **Swap X and O in Moonlight**.
 
 ## Practical tuning order
 

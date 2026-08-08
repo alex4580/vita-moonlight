@@ -32,6 +32,9 @@ internal sealed record PhysicalDisplayModeRepairResult(
         new([], []);
 }
 
+internal sealed class PhysicalDisplayUnavailableException(string message)
+    : InvalidOperationException(message);
+
 internal sealed record DisplayRecoveryRecord(
     int FormatVersion,
     DateTimeOffset CapturedAt,
@@ -225,7 +228,7 @@ internal sealed class DisplayTopologyService
         }
         if (selected.Length == 0)
         {
-            throw new InvalidOperationException(
+            throw new PhysicalDisplayUnavailableException(
                 "No physical display path was found for emergency recovery after Windows display enumeration was retried.");
         }
 
@@ -438,6 +441,26 @@ internal sealed class DisplayTopologyService
         return physical
             .Where(display => display.IsActive)
             .ToArray();
+    }
+
+    /// <summary>
+    /// Identifies the one topology in which installer/emergency recovery may
+    /// safely consider restarting the Vita VDD: Windows exposes exactly one
+    /// active, available path and that path belongs to the explicitly managed
+    /// MTT device. A physical path, another virtual-display product, or an
+    /// ambiguous set of managed paths always fails closed.
+    /// </summary>
+    internal static DisplayDescriptor? SelectExactManagedVddOnlyRecoveryPath(
+        IEnumerable<DisplayDescriptor> displays)
+    {
+        var active = displays
+            .Where(display => display.IsActive)
+            .ToArray();
+        return active.Length == 1 &&
+               active[0].IsAvailable &&
+               IsManagedVirtualDisplay(active[0])
+            ? active[0]
+            : null;
     }
 
     internal void SaveRecovery(

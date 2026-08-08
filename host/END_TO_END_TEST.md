@@ -296,7 +296,8 @@ panel label.
    nothing.
 5. Open **Real-time diagnostics**. It should show understandable session,
    decoder, network, controller, gyro, overlay, and support-log state. It must
-   not start a support log by itself. Press **O** or **START** to return.
+   not start a support log by itself. Press the configured **Cancel** button
+   (O by default) or **START** to return.
 6. Test **Reliable**, **Recommended**, **High quality**, and **Remote / VPN**.
    Confirm their visible values are respectively:
    - 960x544, 30 FPS, 5 Mbps, Auto;

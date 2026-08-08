@@ -15,6 +15,7 @@
 #include "../util.h"
 #include "../device.h"
 #include "../debug.h"
+#include "../check_host.h"
 
 #include "client.h"
 #include "errors.h"
@@ -73,20 +74,26 @@ static int send_windows_task_manager_shortcut(void) {
 SERVER_DATA server;
 PAPP_LIST server_applist;
 int pos[2];
+/* The selected saved record is an identity, while an IP address is only a
+ * route. Two records can legitimately share an address after a Sunshine
+ * rename, so pairing completion must never look up its owner by address. */
+static char active_saved_host_name[256];
 
 #define HOST_KEY_DIRECTORY_CAPACITY 1024u
 #define HOST_KEY_FILE_SUFFIX_RESERVE 32u
 #define HOST_KEY_COMPONENT_MAX 255u
 
 static const char *connection_error_message(void) {
-  if (gs_error != NULL &&
-      (strstr(gs_error, "identity changed") != NULL ||
-       strstr(gs_error, "saved Sunshine identity") != NULL)) {
-    return "This PC's Sunshine identity no longer matches the saved PC.\n"
-           "Delete the saved PC in Vita Moonlight, add it again, then choose "
-           "Pair securely.";
-  }
   return gs_error == NULL ? "No additional details" : gs_error;
+}
+
+static void display_identity_changed(const char *name) {
+  display_error(
+      "This PC's Sunshine identity changed\n%s\n\n"
+      "The saved PC was kept for your safety. If you expected Sunshine to "
+      "create a new certificate, delete this saved PC, add it again, then "
+      "choose Pair securely. Otherwise, do not re-pair.",
+      name == NULL ? "" : name);
 }
 
 static bool build_host_key_directory(char *output, size_t output_size,
@@ -157,6 +164,7 @@ static bool release_host_client_state(void) {
 
   gs_free_applist(&server_applist);
   gs_cleanup(&server);
+  active_saved_host_name[0] = '\0';
   return true;
 }
 
@@ -323,7 +331,8 @@ int ui_connect_loop(int id, void *context, const input_data *input) {
           return 1;
         }
         // After pairing, save server MAC into known device if present
-        device_info_t *dev = find_device_by_address(server.serverInfo.address);
+        device_info_t *dev = active_saved_host_name[0] != '\0'
+            ? find_device(active_saved_host_name) : NULL;
         if (dev) {
           dev->paired = true;
           char mac[18] = {0};
@@ -338,6 +347,10 @@ int ui_connect_loop(int id, void *context, const input_data *input) {
           // Notify user pairing succeeded: show a short message so the PIN dialog
           // (which was drawn earlier) is replaced by a success message.
           flash_message("Paired: %s", dev->name);
+        } else {
+          display_error(
+              "Pairing succeeded, but the selected saved computer could not "
+              "be updated. Return to Saved computers and reconnect it.");
         }
         /* No media connection exists yet. Remain in LI_PAIRED while the
          * menu reloads so the applications view can open immediately. */
@@ -559,6 +572,10 @@ int ui_connect(char *name, char *address, uint16_t port) {
         release_host_client_state();
         return 0;
       }
+    } else if (ret == GS_IDENTITY_CHANGED) {
+      display_identity_changed(address);
+      release_host_client_state();
+      return 0;
     } else if (ret == GS_ERROR) {
       display_error("Gamestream error: %s\n", connection_error_message());
       release_host_client_state();
@@ -569,6 +586,9 @@ int ui_connect(char *name, char *address, uint16_t port) {
       release_host_client_state();
       return 0;
     }
+
+    snprintf(active_saved_host_name, sizeof(active_saved_host_name), "%s",
+             name);
 
     vita_debug_event(
         ret == GS_OK ? VITA_DEBUG_LEVEL_INFO : VITA_DEBUG_LEVEL_WARNING,
@@ -721,6 +741,20 @@ device_info_t* ui_connect_and_pairing(device_info_t *info) {
   vita_debug_event(
       VITA_DEBUG_LEVEL_INFO, "stream.action",
       "action=connect state=starting phase=host_init");
+  device_info_t *saved = find_device(info->name);
+  if (saved != NULL && saved != info) {
+    if (strcmp(saved->internal, info->internal) != 0) {
+      display_error(
+          "A saved computer already uses the Sunshine name '%s'.\n\n"
+          "To protect its pairing identity, use Change IP on the saved "
+          "computer or give one PC a unique Sunshine name.",
+          saved->name);
+      return NULL;
+    }
+    /* Case-only rediscovery and duplicate discovery records must use the
+     * canonical credential-directory spelling already stored on disk. */
+    info = saved;
+  }
   char key_dir[HOST_KEY_DIRECTORY_CAPACITY];
   if (!build_host_key_directory(key_dir, sizeof(key_dir), info->name)) {
     display_error("Can't save pairing data for this PC.\n%s",
@@ -758,6 +792,10 @@ device_info_t* ui_connect_and_pairing(device_info_t *info) {
       release_host_client_state();
       return NULL;
     }
+  } else if (ret == GS_IDENTITY_CHANGED) {
+    display_identity_changed(info->name);
+    release_host_client_state();
+    return NULL;
   } else if (ret == GS_ERROR) {
     display_error("Gamestream error: %s\n", connection_error_message());
     release_host_client_state();
@@ -820,8 +858,11 @@ device_info_t* ui_connect_and_pairing(device_info_t *info) {
 
   ret = gs_pair(&server, pin);
   if (ret != GS_OK) {
-    display_error("Pairing failed: %d\n%s", ret,
-                  connection_error_message());
+    info->paired = false;
+    (void)save_device_info(info);
+    display_error("Pairing failed: %d\n%s\n\n"
+                  "This PC remains saved as Pairing required so you can retry.",
+                  ret, connection_error_message());
     release_host_client_state();
     return NULL;
   }
@@ -867,20 +908,30 @@ void ui_connect_resume() {
 
 void ui_connect_manual() {
   device_info_t info = {0};
-  if (ime_dialog_string(info.name, "Enter Name:", "") != 0) {
+  if (ime_dialog_string(
+          info.name, sizeof(info.name), "Enter Name:", "") != 0) {
     return;
   }
-  if (ime_dialog_string(info.internal, "Enter IP or Address:", "") != 0) {
+  if (ime_dialog_string(info.internal, sizeof(info.internal),
+                        "Enter IP or Address:", "") != 0) {
     return;
   }
   info.port = 47989;
   ui_connect_and_pairing(&info);
 }
 
-bool check_connection(const char *name, const char *addr, uint16_t port) {
+typedef enum host_probe_result {
+  HOST_PROBE_FAILED = 0,
+  HOST_PROBE_PAIRED,
+  HOST_PROBE_SECURE_PAIRING_REQUIRED,
+  HOST_PROBE_IDENTITY_CHANGED,
+} host_probe_result_t;
+
+static host_probe_result_t probe_connection(
+    const char *name, const char *addr, uint16_t port) {
   // someone already connected
   if (connection_is_ready() || addr == NULL || addr[0] == '\0') {
-    return false;
+    return HOST_PROBE_FAILED;
   }
 
   flash_message("Check connecting to:\n %s:%d...", addr, port);
@@ -892,36 +943,132 @@ bool check_connection(const char *name, const char *addr, uint16_t port) {
 
   char key_dir[HOST_KEY_DIRECTORY_CAPACITY];
   if (!build_host_key_directory(key_dir, sizeof(key_dir), name))
-    return false;
+    return HOST_PROBE_FAILED;
 
   SERVER_DATA probe = {0};
   int ret = gs_init(
       &probe, addr, port, key_dir, log_level,
       config.unsupported_version);
-  bool reachable = ret == GS_OK && probe.paired;
+  host_probe_result_t result = HOST_PROBE_FAILED;
+  if (ret == GS_OK && probe.paired) {
+    result = HOST_PROBE_PAIRED;
+  } else if (ret == GS_OK && probe.securePairingRequired) {
+    /* An older Vita build can have a saved paired=true UI hint without the
+     * authenticated Sunshine pin introduced by the secure-pairing upgrade.
+     * Preserve this distinct state so the saved-computer flow can offer the
+     * required PIN exchange instead of reporting the reachable PC offline. */
+    result = HOST_PROBE_SECURE_PAIRING_REQUIRED;
+  } else if (ret == GS_IDENTITY_CHANGED) {
+    result = HOST_PROBE_IDENTITY_CHANGED;
+  }
   gs_cleanup(&probe);
-  return reachable;
+  return result;
 }
 
-void ui_connect_paired_device(device_info_t *info) {
+bool check_connection(const char *name, const char *addr, uint16_t port) {
+  /* Address changes are trusted only after the saved Sunshine pin verifies.
+   * Callers which intentionally handle the one-time no-pin migration use the
+   * tri-state helper directly. */
+  return probe_connection(name, addr, port) == HOST_PROBE_PAIRED;
+}
+
+void ui_connect_paired_device(
+    device_info_t *info, int host_index, const char *discovered_ip) {
   if (!info->paired) {
-    display_error("Unpaired device\n%s", info->name);
+    /* The first reachable pairing attempt is saved before the PIN exchange.
+     * Keep that entry actionable after a wrong PIN, timeout, or Vita restart. */
+    (void)ui_connect_and_pairing(info);
     return;
   }
 
   char *addr = NULL;
-  if (info->prefer_external && check_connection(info->name, info->external, info->port)) {
-    addr = info->external;
-  } else if (check_connection(info->name, info->internal, info->port)) {
-    addr = info->internal;
-  } else if (check_connection(info->name, info->external, info->port)) {
-    addr = info->external;
+  char *identity_changed_addr = NULL;
+  host_probe_result_t probe_result = HOST_PROBE_FAILED;
+  if (info->prefer_external) {
+    probe_result = probe_connection(
+        info->name, info->external, info->port);
+    if (probe_result == HOST_PROBE_IDENTITY_CHANGED) {
+      identity_changed_addr = info->external;
+    } else if (probe_result != HOST_PROBE_FAILED) {
+      addr = info->external;
+    }
   }
-  info->prefer_external = addr == info->external;
-  if (!save_device_info(info)) {
-    vita_debug_event(
-        VITA_DEBUG_LEVEL_WARNING, "host.state",
-        "action=save_preferred_address state=failed");
+  if (addr == NULL) {
+    probe_result = probe_connection(
+        info->name, info->internal, info->port);
+    if (probe_result == HOST_PROBE_IDENTITY_CHANGED) {
+      if (identity_changed_addr == NULL) identity_changed_addr = info->internal;
+    } else if (probe_result != HOST_PROBE_FAILED) {
+      addr = info->internal;
+    }
+  }
+  if (addr == NULL && !info->prefer_external) {
+    probe_result = probe_connection(
+        info->name, info->external, info->port);
+    if (probe_result == HOST_PROBE_IDENTITY_CHANGED) {
+      if (identity_changed_addr == NULL) identity_changed_addr = info->external;
+    } else if (probe_result != HOST_PROBE_FAILED) {
+      addr = info->external;
+    }
+  }
+
+  /* mDNS names are unauthenticated and can collide. Only consider the hint
+   * after every saved address has failed, then require the existing Sunshine
+   * certificate pin before offering to persist or use it. */
+  if (addr == NULL && identity_changed_addr == NULL &&
+      discovered_ip != NULL && discovered_ip[0] != '\0' &&
+      strcmp(discovered_ip, info->internal) != 0 &&
+      strcmp(discovered_ip, info->external) != 0) {
+    host_probe_result_t discovered_result = probe_connection(
+        info->name, discovered_ip, info->port);
+    if (discovered_result == HOST_PROBE_PAIRED) {
+      char prompt[320];
+      snprintf(
+          prompt, sizeof(prompt),
+          "%s was securely verified at a new local address.\n\n"
+          "Old: %s\nNew: %s\n\nUse and save the new address?",
+          info->display_name[0] ? info->display_name : info->name,
+          info->internal[0] ? info->internal : "(none)", discovered_ip);
+      if (!display_confirm(prompt)) {
+        host_scan_clear_pending_ip_update(host_index);
+        return;
+      }
+
+      char previous_internal[sizeof(info->internal)];
+      strncpy(
+          previous_internal, info->internal,
+          sizeof(previous_internal) - 1);
+      previous_internal[sizeof(previous_internal) - 1] = '\0';
+      strncpy(info->internal, discovered_ip, sizeof(info->internal) - 1);
+      info->internal[sizeof(info->internal) - 1] = '\0';
+      info->prefer_external = false;
+      if (!save_device_info(info)) {
+        strncpy(
+            info->internal, previous_internal,
+            sizeof(info->internal) - 1);
+        info->internal[sizeof(info->internal) - 1] = '\0';
+        display_error(
+            "The verified new address could not be saved.\n"
+            "Check free storage and try again.");
+        return;
+      }
+      host_scan_clear_pending_ip_update(host_index);
+      addr = info->internal;
+      probe_result = HOST_PROBE_PAIRED;
+    } else {
+      host_scan_clear_pending_ip_update(host_index);
+      if (discovered_result == HOST_PROBE_IDENTITY_CHANGED) {
+        display_error(
+            "A same-name PC was discovered at a new address, but it did not "
+            "match the saved Sunshine identity.\n\n"
+            "The saved address and pairing were not changed.");
+        return;
+      }
+    }
+  }
+  if (addr == NULL && identity_changed_addr != NULL) {
+    addr = identity_changed_addr;
+    probe_result = HOST_PROBE_IDENTITY_CHANGED;
   }
 
   if (addr == NULL) {
@@ -929,6 +1076,40 @@ void ui_connect_paired_device(device_info_t *info) {
                   gs_error == NULL ? "Check that Sunshine is running"
                                    : connection_error_message());
     return;
+  }
+
+  info->prefer_external = addr == info->external;
+
+  if (probe_result == HOST_PROBE_IDENTITY_CHANGED) {
+    display_identity_changed(info->name);
+    return;
+  }
+
+  if (probe_result == HOST_PROBE_SECURE_PAIRING_REQUIRED) {
+    /* Re-open the selected reachable address, then durably replace the stale
+     * paired UI hint before the Pair securely action becomes visible. If the
+     * user cancels or the PIN times out, the saved entry remains available as
+     * Pairing required and a later retry cannot fall back into this dead end. */
+    if (!ui_connect(info->name, addr, info->port)) {
+      return;
+    }
+    info->paired = false;
+    if (!save_device_info(info)) {
+      info->paired = true;
+      release_host_client_state();
+      display_error("This PC needs a one-time secure pairing upgrade, but "
+                    "the Vita could not save that state.\n"
+                    "Check free storage and try again.");
+      return;
+    }
+    while (ui_connected_menu() == QUIT_RELOAD);
+    return;
+  }
+
+  if (!save_device_info(info)) {
+    vita_debug_event(
+        VITA_DEBUG_LEVEL_WARNING, "host.state",
+        "action=save_preferred_address state=failed");
   }
 
   if (!ui_connect(info->name, addr, info->port)) {
@@ -942,6 +1123,8 @@ bool ui_connect_connected() {
   return connection_is_ready();
 }
 
-void ui_connect_address(char *addr) {
-  strcpy(addr, server.serverInfo.address);
+void ui_connect_address(char *addr, size_t addr_size) {
+  if (addr == NULL || addr_size == 0) return;
+  snprintf(addr, addr_size, "%s",
+           server.serverInfo.address == NULL ? "" : server.serverInfo.address);
 }

@@ -23,6 +23,9 @@ internal sealed record UninstallFinalizationResult(
 
 internal static class UninstallManager
 {
+    private const int PhysicalRecoveryAttemptsAfterRescan = 5;
+    private const int PhysicalRecoveryAttemptsAfterVddRestart = 15;
+    private const int PhysicalRecoveryRetryDelayMilliseconds = 250;
     private static readonly string[] CurrentRootStateFiles =
     [
         "display-recovery.json",
@@ -160,7 +163,8 @@ internal static class UninstallManager
 
     internal static UninstallPreparationResult
         RecoverPhysicalAndDiscardPendingTransactionForInstallerMaintenanceBootstrap(
-            int ownerProcessId)
+            int ownerProcessId,
+            bool allowManagedVddRestart)
     {
         return WithSunshineStopped(
             () =>
@@ -170,14 +174,189 @@ internal static class UninstallManager
                            .AcquireForInstallerMaintenanceBootstrap(
                                ownerProcessId))
                 {
-                    result = RecoverPhysicalAndDiscardPendingTransactionLocked(
-                        transaction);
+                    result =
+                        RecoverPhysicalAndDiscardPendingTransactionWithManagedVddBootstrapLocked(
+                            transaction,
+                            allowManagedVddRestart,
+                            "Installer maintenance");
                 }
                 MachineStateSecurity.SecureAfterLegacyMigration();
                 return result;
             },
             "Installer maintenance legacy display recovery");
     }
+
+    /// <summary>
+    /// Emergency recovery may use the same narrowly gated bridge as installer
+    /// maintenance, but only after its caller has established that Vita host
+    /// features are Enabled and stopped Sunshine if it was running.
+    /// </summary>
+    internal static UninstallPreparationResult
+        RecoverPhysicalAndDiscardPendingTransactionForEmergencyLocked(
+            DisplayTransactionLease transaction) =>
+        RecoverPhysicalAndDiscardPendingTransactionWithManagedVddBootstrapLocked(
+            transaction,
+            allowManagedVddRestart: true,
+            "Emergency recovery");
+
+    private static UninstallPreparationResult
+        RecoverPhysicalAndDiscardPendingTransactionWithManagedVddBootstrapLocked(
+            DisplayTransactionLease transaction,
+            bool allowManagedVddRestart,
+            string operationName)
+    {
+        transaction.RequireActive();
+        PhysicalDisplayUnavailableException initialFailure;
+        try
+        {
+            return RecoverPhysicalAndDiscardPendingTransactionLocked(
+                transaction);
+        }
+        catch (PhysicalDisplayUnavailableException error)
+        {
+            initialFailure = error;
+        }
+
+        RequireExactManagedVddOnlyRecoveryTopology(operationName);
+        Exception? rescanFailure = null;
+        try
+        {
+            DisplayWizardAdapter.RescanDisplayDevicesForRecovery();
+        }
+        catch (Exception error) when (IsManagedVddBootstrapOperationalError(error))
+        {
+            rescanFailure = error;
+        }
+
+        if (TryRecoverPhysicalAfterBootstrapLocked(
+                transaction,
+                PhysicalRecoveryAttemptsAfterRescan,
+                out var afterRescan,
+                out _))
+        {
+            Console.WriteLine(
+                $"{operationName} recovered the physical display after a Windows device rescan; no display device was restarted.");
+            return afterRescan!;
+        }
+
+        if (!allowManagedVddRestart)
+        {
+            throw new InvalidOperationException(
+                $"{operationName} found only the Vita virtual display. Windows device rescan did not restore a physical path, and Vita host features are Paused, so the managed display was not restarted or re-enabled. " +
+                "Connect or enable a physical monitor, then retry. " +
+                (rescanFailure is null
+                    ? string.Empty
+                    : "Device rescan response: " + rescanFailure.Message),
+                rescanFailure ?? initialFailure);
+        }
+
+        // Re-read the topology immediately before the only disruptive bridge.
+        // A physical or unrelated virtual path appearing after the rescan must
+        // cancel the restart rather than broadening its target.
+        RequireExactManagedVddOnlyRecoveryTopology(operationName);
+
+        string? restartedInstance = null;
+        Exception? restartFailure = null;
+        try
+        {
+            restartedInstance =
+                DisplayWizardAdapter.RestartExactManagedVddForRecovery(
+                    transaction);
+        }
+        catch (HostRestartRequiredException)
+        {
+            throw;
+        }
+        catch (Exception error) when (IsManagedVddBootstrapOperationalError(error))
+        {
+            restartFailure = error;
+        }
+
+        if (TryRecoverPhysicalAfterBootstrapLocked(
+                transaction,
+                PhysicalRecoveryAttemptsAfterVddRestart,
+                out var afterRestart,
+                out var finalFailure))
+        {
+            Console.WriteLine(
+                $"{operationName} restarted exact managed VDD {restartedInstance ?? "<restart returned an error>"} and then proved a physical-only display layout.");
+            return afterRestart!;
+        }
+
+        var details = new List<string>
+        {
+            initialFailure.Message,
+        };
+        if (rescanFailure is not null)
+        {
+            details.Add("device rescan: " + rescanFailure.Message);
+        }
+        if (restartFailure is not null)
+        {
+            details.Add("exact managed VDD restart: " + restartFailure.Message);
+        }
+        if (finalFailure is not null)
+        {
+            details.Add("final physical-display proof: " + finalFailure.Message);
+        }
+        throw new InvalidOperationException(
+            $"{operationName} could not prove a physical-only display layout after a Windows device rescan and a restart of only the exact managed Vita VDD. " +
+            "No unrelated virtual display, shared driver package, scheduled task, or product file was changed. " +
+            "The host and recovery state were kept for another safe retry. " +
+            string.Join(" ", details),
+            restartFailure ?? rescanFailure ?? finalFailure ?? initialFailure);
+    }
+
+    private static void RequireExactManagedVddOnlyRecoveryTopology(
+        string operationName)
+    {
+        var selected = DisplayTopologyService
+            .SelectExactManagedVddOnlyRecoveryPath(
+                new DisplayTopologyService().ListDisplays());
+        if (selected is null)
+        {
+            throw new InvalidOperationException(
+                $"{operationName} did not restart any display device because Windows no longer exposes the exact one-managed-VDD-only recovery topology. " +
+                "A physical display, another virtual-display product, no active path, or an ambiguous managed topology requires manual review.");
+        }
+    }
+
+    private static bool TryRecoverPhysicalAfterBootstrapLocked(
+        DisplayTransactionLease transaction,
+        int attempts,
+        out UninstallPreparationResult? result,
+        out PhysicalDisplayUnavailableException? lastFailure)
+    {
+        result = null;
+        lastFailure = null;
+        for (var attempt = 0; attempt < attempts; attempt++)
+        {
+            try
+            {
+                result = RecoverPhysicalAndDiscardPendingTransactionLocked(
+                    transaction);
+                return true;
+            }
+            catch (PhysicalDisplayUnavailableException error)
+            {
+                lastFailure = error;
+            }
+            if (attempt < attempts - 1)
+            {
+                Thread.Sleep(PhysicalRecoveryRetryDelayMilliseconds);
+            }
+        }
+        return false;
+    }
+
+    private static bool IsManagedVddBootstrapOperationalError(
+        Exception error) =>
+        error is IOException or
+            UnauthorizedAccessException or
+            InvalidDataException or
+            InvalidOperationException or
+            TimeoutException or
+            System.ComponentModel.Win32Exception;
 
     internal static UninstallPreparationResult
         RecoverPhysicalAndDiscardPendingTransactionLocked(

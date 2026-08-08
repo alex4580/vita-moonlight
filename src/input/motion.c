@@ -20,6 +20,7 @@ static SceUID motion_event = -1;
 static SceUID motion_thread = -1;
 static bool motion_resources_ready = false;
 static bool motion_sampling_owned = false;
+static bool motion_sampling_active = false;
 static bool active_motion_threads = false;
 static motion_data_state motion_state = {
     .motion_type_gyro_enabled = false,
@@ -132,35 +133,6 @@ bool vita_motion_begin_stream(bool allow_motion) {
     return false;
   }
 
-  int ret = sceMotionStartSampling();
-  if (ret < 0 && ret != SCE_MOTION_ERROR_ALREADY_SAMPLING) {
-    lock_motion_state();
-    last_sensor_error = ret;
-    unlock_motion_state();
-    vita_debug_event(
-        VITA_DEBUG_LEVEL_WARNING, "motion.state",
-        "state=unavailable phase=start_sampling code=0x%08x",
-        (unsigned int)ret);
-    return false;
-  }
-  motion_sampling_owned = ret == 0;
-
-  ret = sceMotionReset();
-  if (ret < 0) {
-    lock_motion_state();
-    last_sensor_error = ret;
-    unlock_motion_state();
-    vita_debug_event(
-        VITA_DEBUG_LEVEL_WARNING, "motion.state",
-        "state=unavailable phase=reset code=0x%08x",
-        (unsigned int)ret);
-    if (motion_sampling_owned) {
-      sceMotionStopSampling();
-      motion_sampling_owned = false;
-    }
-    return false;
-  }
-
   SceUID thid = sceKernelCreateThread(
       "vitainput_motion_thread", vitainput_motion_thread, 0,
       MOTION_WORKER_STACK_SIZE, 0, 0, NULL);
@@ -172,10 +144,6 @@ bool vita_motion_begin_stream(bool allow_motion) {
         VITA_DEBUG_LEVEL_WARNING, "motion.state",
         "state=unavailable phase=create_worker code=0x%08x",
         (unsigned int)thid);
-    if (motion_sampling_owned) {
-      sceMotionStopSampling();
-      motion_sampling_owned = false;
-    }
     return false;
   }
 
@@ -184,7 +152,7 @@ bool vita_motion_begin_stream(bool allow_motion) {
   active_motion_threads = true;
   unlock_motion_state();
 
-  ret = sceKernelStartThread(thid, 0, NULL);
+  int ret = sceKernelStartThread(thid, 0, NULL);
   if (ret < 0) {
     lock_motion_state();
     active_motion_threads = false;
@@ -192,10 +160,6 @@ bool vita_motion_begin_stream(bool allow_motion) {
     last_sensor_error = ret;
     unlock_motion_state();
     sceKernelDeleteThread(thid);
-    if (motion_sampling_owned) {
-      sceMotionStopSampling();
-      motion_sampling_owned = false;
-    }
     vita_debug_event(
         VITA_DEBUG_LEVEL_WARNING, "motion.state",
         "state=unavailable phase=start_worker code=0x%08x",
@@ -205,9 +169,8 @@ bool vita_motion_begin_stream(bool allow_motion) {
 
   vita_debug_event(
       VITA_DEBUG_LEVEL_INFO, "motion.state",
-      "state=ready worker_count=1 stack_bytes=%u sampling_owner=%d",
-      (unsigned int)MOTION_WORKER_STACK_SIZE,
-      motion_sampling_owned ? 1 : 0);
+      "state=armed worker_count=1 stack_bytes=%u sampling=deferred",
+      (unsigned int)MOTION_WORKER_STACK_SIZE);
   return true;
 }
 
@@ -254,9 +217,12 @@ bool vita_motion_end_stream(void) {
     unlock_motion_state();
   }
 
-  if (motion_sampling_owned) {
+  lock_motion_state();
+  bool sampling_active = motion_sampling_active;
+  bool sampling_owned = motion_sampling_owned;
+  unlock_motion_state();
+  if (sampling_active && sampling_owned) {
     int ret = sceMotionStopSampling();
-    motion_sampling_owned = false;
     if (ret < 0 && ret != SCE_MOTION_ERROR_NOT_SAMPLING) {
       lock_motion_state();
       last_sensor_error = ret;
@@ -265,8 +231,14 @@ bool vita_motion_end_stream(void) {
           VITA_DEBUG_LEVEL_WARNING, "motion.state",
           "state=cleanup_warning phase=stop_sampling code=0x%08x",
           (unsigned int)ret);
+      /* Retain active ownership so shutdown or the next reconnect can retry. */
+      return false;
     }
   }
+  lock_motion_state();
+  motion_sampling_owned = false;
+  motion_sampling_active = false;
+  unlock_motion_state();
   return true;
 }
 
@@ -286,25 +258,101 @@ bool vita_motion_shutdown(void) {
   return true;
 }
 
-void vita_motion_set_state(uint8_t motion_type, uint16_t report_rate) {
+bool vita_motion_set_state(uint8_t motion_type, uint16_t report_rate) {
   lock_motion_state();
   bool enabled = active_motion_threads && report_rate != 0;
   uint16_t clamped_rate = report_rate == 0
       ? VITA_MOTION_MIN_REPORT_RATE
       : vita_motion_clamp_report_rate(report_rate);
-  bool recognized = true;
+  bool recognized = motion_type == LI_MOTION_TYPE_GYRO ||
+                    motion_type == LI_MOTION_TYPE_ACCEL;
+  int sampling_error = 0;
+  int stop_error = 0;
+  if (recognized && enabled && !motion_sampling_active) {
+    int ret = sceMotionStartSampling();
+    if (ret < 0 && ret != SCE_MOTION_ERROR_ALREADY_SAMPLING) {
+      sampling_error = ret;
+    } else {
+      bool sampling_owned = ret == 0;
+      ret = sceMotionReset();
+      if (ret < 0) {
+        sampling_error = ret;
+        if (sampling_owned) {
+          int stop_result = sceMotionStopSampling();
+          if (stop_result < 0 &&
+              stop_result != SCE_MOTION_ERROR_NOT_SAMPLING) {
+            /* Preserve ownership so idle/stream teardown can retry. */
+            motion_sampling_active = true;
+            motion_sampling_owned = true;
+          }
+        }
+      } else {
+        motion_sampling_active = true;
+        motion_sampling_owned = sampling_owned;
+        last_sensor_error = 0;
+      }
+    }
+    if (sampling_error < 0) {
+      enabled = false;
+      last_sensor_error = sampling_error;
+    }
+  }
   if (motion_type == LI_MOTION_TYPE_GYRO) {
     motion_state.motion_type_gyro_enabled = enabled;
     motion_state.report_rate_gyro = clamped_rate;
   } else if (motion_type == LI_MOTION_TYPE_ACCEL) {
     motion_state.motion_type_accel_enabled = enabled;
     motion_state.report_rate_accel = clamped_rate;
-  } else {
-    recognized = false;
+  }
+
+  /* Stop sampling as soon as Sunshine disables its final sensor. An already
+   * active sampler that this process did not start is merely released rather
+   * than stopped, so another Vita component retains ownership. */
+  if (recognized &&
+      !motion_state.motion_type_gyro_enabled &&
+      !motion_state.motion_type_accel_enabled &&
+      motion_sampling_active) {
+    if (motion_sampling_owned) {
+      int ret = sceMotionStopSampling();
+      if (ret < 0 && ret != SCE_MOTION_ERROR_NOT_SAMPLING) {
+        stop_error = ret;
+        last_sensor_error = ret;
+      } else {
+        motion_sampling_active = false;
+        motion_sampling_owned = false;
+        if (sampling_error == 0) last_sensor_error = 0;
+      }
+    } else {
+      motion_sampling_active = false;
+      motion_sampling_owned = false;
+      if (sampling_error == 0) last_sensor_error = 0;
+    }
+  }
+
+  bool actually_enabled = false;
+  if (motion_sampling_active) {
+    if (motion_type == LI_MOTION_TYPE_GYRO) {
+      actually_enabled = motion_state.motion_type_gyro_enabled;
+    } else if (motion_type == LI_MOTION_TYPE_ACCEL) {
+      actually_enabled = motion_state.motion_type_accel_enabled;
+    }
   }
   unlock_motion_state();
 
+  if (sampling_error < 0) {
+    vita_debug_event(
+        VITA_DEBUG_LEVEL_WARNING, "motion.state",
+        "state=unavailable phase=host_request code=0x%08x",
+        (unsigned int)sampling_error);
+  }
+  if (stop_error < 0) {
+    vita_debug_event(
+        VITA_DEBUG_LEVEL_WARNING, "motion.state",
+        "state=cleanup_warning phase=host_disable code=0x%08x",
+        (unsigned int)stop_error);
+  }
   if (recognized) signal_motion_worker();
+  return actually_enabled;
 }
 
 void vita_motion_get_status(VitaMotionStatus *status) {
@@ -324,13 +372,21 @@ void vita_motion_get_status(VitaMotionStatus *status) {
 static void motion_process_sample(bool send_gyro, bool send_accel,
                                   float scalar_x, float scalar_y) {
   SceMotionState sample;
+  /* Serialize the hardware read with sampler shutdown. This prevents the
+   * worker from issuing sceMotionGetState() after the last host request has
+   * stopped an owned sampler. */
+  lock_motion_state();
+  if (!motion_sampling_active) {
+    unlock_motion_state();
+    return;
+  }
   int ret = sceMotionGetState(&sample);
   if (ret < 0) {
-    lock_motion_state();
     last_sensor_error = ret;
     unlock_motion_state();
     return;
   }
+  unlock_motion_state();
 
   if (send_gyro) {
     /* Vita angular velocity follows SDL axes and is radians/second;

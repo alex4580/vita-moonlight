@@ -27,6 +27,7 @@ struct device_infos {
 
 extern device_infos_t known_devices;
 
+bool device_name_equal(const char *left, const char *right);
 device_info_t* find_device(const char *name);
 device_info_t* find_device_by_address(const char *address);
 device_info_t* append_device(const device_info_t *info);

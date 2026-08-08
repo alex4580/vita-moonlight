@@ -97,10 +97,15 @@ bool gs_sps_fix(PLENTRY sps, int flags, uint8_t* out_buf,
       h264_stream->sps->vui.max_bits_per_mb_denom = 1;
       h264_stream->sps->vui.log2_max_mv_length_horizontal = 16;
       h264_stream->sps->vui.log2_max_mv_length_vertical = 16;
-      h264_stream->sps->vui.num_reorder_frames = 0;
     }
 
-    // Some devices throw errors if max_dec_frame_buffering < num_ref_frames
+    // The Vita decoder is configured for a one-frame reference window. Force
+    // zero reordered frames even when the incoming SPS already carries a
+    // bitstream restriction; otherwise max_dec_frame_buffering=1 can still
+    // retain one frame and add avoidable latency.
+    h264_stream->sps->vui.num_reorder_frames = 0;
+
+    // Some devices throw errors if max_dec_frame_buffering < num_ref_frames.
     h264_stream->sps->vui.max_dec_frame_buffering = 1;
 
     // These values are the default for the fields, but they are more aggressive

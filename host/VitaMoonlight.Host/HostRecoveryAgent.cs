@@ -1736,6 +1736,9 @@ internal static class HostRecoveryActions
         }
         var restartSunshine =
             sunshineState == WindowsServiceState.Running;
+        var sunshineStopped = false;
+        var physicalRecoverySucceeded = false;
+        var vddOnlyRecoveryBridgeUsed = false;
 
         try
         {
@@ -1750,6 +1753,68 @@ internal static class HostRecoveryActions
             {
                 completed.Add(
                     "discarded the pending display transaction");
+            }
+            physicalRecoverySucceeded = true;
+        }
+        catch (PhysicalDisplayUnavailableException initialRecoveryError)
+        {
+            // A prior broken install can leave QueryDisplayConfig with only
+            // the managed VDD and no working task. Stop Sunshine before the
+            // narrowly gated device rescan/exact-VDD restart so its display
+            // helper cannot race physical restoration. It is restarted below
+            // only if it was running on entry.
+            var bootstrapAllowed = suspendIsPending?.Invoke() != true;
+            if (!bootstrapAllowed)
+            {
+                failures.Add(
+                    "physical display recovery: Windows suspend is pending; skipped the managed-VDD recovery bridge");
+            }
+            if (restartSunshine)
+            {
+                try
+                {
+                    if (bootstrapAllowed)
+                    {
+                        WindowsServiceManager.Stop(
+                            sunshineServiceName,
+                            "Sunshine");
+                        sunshineStopped = true;
+                        completed.Add(
+                            "stopped Sunshine before VDD-only recovery");
+                    }
+                }
+                catch (Exception error)
+                {
+                    bootstrapAllowed = false;
+                    failures.Add(
+                        $"stop Sunshine before VDD-only recovery: {error.Message}");
+                }
+            }
+
+            if (bootstrapAllowed)
+            {
+                try
+                {
+                    var recovery = UninstallManager
+                        .RecoverPhysicalAndDiscardPendingTransactionForEmergencyLocked(
+                            transaction);
+                    completed.Add(
+                        $"activated physical display " +
+                        $"{string.Join(", ", recovery.PhysicalDisplays)} after managed-VDD recovery");
+                    if (recovery.ClearedSavedTransaction)
+                    {
+                        completed.Add(
+                            "discarded the pending display transaction");
+                    }
+                    physicalRecoverySucceeded = true;
+                    vddOnlyRecoveryBridgeUsed = true;
+                }
+                catch (Exception error)
+                {
+                    failures.Add(
+                        $"physical display recovery: {error.Message} " +
+                        $"Initial response: {initialRecoveryError.Message}");
+                }
             }
         }
         catch (Exception error)
@@ -1771,11 +1836,12 @@ internal static class HostRecoveryActions
                 string.Join("; ", completed.Concat(failures)));
         }
 
-        if (restartSunshine)
+        if (restartSunshine && !sunshineStopped)
         {
             try
             {
                 WindowsServiceManager.Stop(sunshineServiceName, "Sunshine");
+                sunshineStopped = true;
                 completed.Add("stopped Sunshine");
             }
             catch (Exception error)
@@ -1809,6 +1875,9 @@ internal static class HostRecoveryActions
                 "Windows suspend became pending; skipped virtual-display reload");
         }
         if (!skipDriverMaintenance &&
+            physicalRecoverySucceeded &&
+            !vddOnlyRecoveryBridgeUsed &&
+            (!restartSunshine || sunshineStopped) &&
             sunshine &&
             DisplayWizardAdapter.IsDriverInstalled())
         {
@@ -1838,7 +1907,7 @@ internal static class HostRecoveryActions
             }
         }
 
-        if (restartSunshine)
+        if (restartSunshine && sunshineStopped)
         {
             try
             {

@@ -90,9 +90,20 @@ typedef struct UiDiagnosticsSnapshot {
   uint32_t total_dropped_frames;
   uint32_t estimated_rtt_ms;
   uint32_t estimated_rtt_variance_ms;
-  uint32_t recovered_packets_in_window;
-  uint32_t failed_fec_packets_in_window;
-  uint32_t out_of_sequence_packets_in_window;
+  uint32_t fec_recovered_packets_in_window;
+  uint32_t fec_failed_blocks_in_window;
+  uint32_t rtp_oos_packets_in_window;
+  uint32_t network_lost_frames_in_window;
+  uint32_t depacketizer_corrupt_frames_in_window;
+  uint32_t decode_queue_overflows_in_window;
+  uint32_t idr_requests_sent_in_window;
+  uint32_t total_fec_recovered_packets;
+  uint32_t total_fec_failed_blocks;
+  uint32_t total_rtp_oos_packets;
+  uint32_t total_network_lost_frames;
+  uint32_t total_depacketizer_corrupt_frames;
+  uint32_t total_decode_queue_overflows;
+  uint32_t total_idr_requests_sent;
   UiDiagnosticsNetworkState network_state;
 
   bool stream_connected;
@@ -146,6 +157,8 @@ void ui_diagnostics_record_video_frame(uint32_t encoded_bytes,
                                        uint32_t decode_time_us,
                                        bool presented);
 void ui_diagnostics_record_frame_drop(void);
+/* Advance one-second and support-log windows even when video is frozen. */
+void ui_diagnostics_tick(uint64_t now_us);
 
 void ui_diagnostics_get_snapshot(UiDiagnosticsSnapshot *snapshot);
 

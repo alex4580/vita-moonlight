@@ -24,6 +24,7 @@
 #include "video.h"
 #include "config.h"
 #include "platform.h"
+#include "crypto.h"
 
 #include "input/vita.h"
 #include "input/touchabsolute.h"
@@ -38,11 +39,8 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/types.h>
-#include <openssl/rand.h>
-#include <openssl/evp.h>
 #include "curl/curl.h"
 
-#include <psp2/kernel/rng.h>
 #include <psp2/kernel/threadmgr.h>
 
 #include <psp2/net/net.h>
@@ -67,7 +65,14 @@
 #include "debug.h"
 #include "check_dir.h"
 
-#define VITA_NET_MEM_SIZE 1 * 1024 * 1024
+/*
+ * moonlight-common requests a 2,129,920-byte video receive buffer with the
+ * compatibility-first 1024-byte packet size. The Vita network library serves
+ * socket buffers from this caller-owned pool, so leave headroom for audio,
+ * ENet control/input, discovery, and HTTP sockets instead of forcing the video
+ * socket to silently step down below its requested burst capacity.
+ */
+#define VITA_NET_MEM_SIZE (4 * 1024 * 1024)
 
 SceNetInitParam net_param = {
   .memory = NULL,
@@ -80,6 +85,7 @@ typedef struct VitaRuntimeState {
   bool net_initialized;
   bool netctl_initialized;
   bool curl_initialized;
+  bool crypto_initialized;
   bool debug_initialized;
 } VitaRuntimeState;
 
@@ -93,6 +99,10 @@ static void vita_runtime_shutdown(void) {
   if (runtime_state.curl_initialized) {
     curl_global_cleanup();
     runtime_state.curl_initialized = false;
+  }
+  if (runtime_state.crypto_initialized) {
+    gs_crypto_cleanup();
+    runtime_state.crypto_initialized = false;
   }
   if (runtime_state.netctl_initialized) {
     sceNetCtlTerm();
@@ -128,17 +138,16 @@ static bool vita_workers_shutdown(void) {
 static bool vita_init() {
   sceShellUtilInitEvents(0);
 
-  // Seed OpenSSL with Sony-grade random number generator
-  char random_seed[0x40] = {0};
-  sceKernelGetRandomNumber(random_seed, sizeof(random_seed));
-  RAND_seed(random_seed, sizeof(random_seed));
-  OpenSSL_add_all_algorithms();
-
-  // This is only used for PIN codes, doesn't really matter
-  srand(time(NULL));
+  if (gs_crypto_init() != 0) {
+    printf("Pairing crypto init failed!");
+    goto fail;
+  }
+  runtime_state.crypto_initialized = true;
 
   #ifdef __vita__
-  printf("Vita Moonlight %d.%d.%d (%s)\n", VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH, COMPILE_OPTIONS);
+  printf("Vita Moonlight %d.%d.%d build %s (%s)\n",
+         VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH, VITA_BUILD_ID,
+         COMPILE_OPTIONS);
   #endif
 
   int ret;
@@ -220,9 +229,7 @@ int main(int argc, char* argv[]) {
   if (!check_and_create_moonlight_dir(out_path, out_key_dir)) {
     bool workers_stopped = vita_workers_shutdown();
     if (workers_stopped) vita_runtime_shutdown();
-    return startup_failed(
-        "No writable Vita data directory is available. Free space on ux0: "
-        "or reconnect the configured uma0: storage, then try again.");
+    return startup_failed(moonlight_storage_error());
   }
   config_path = out_path;
   strcpy(config.key_dir, out_key_dir);

@@ -7,5 +7,6 @@
 
 /* Select an app-owned writable data directory. Outputs stay empty on error. */
 bool check_and_create_moonlight_dir(char* out_path, char* out_key_dir);
+const char* moonlight_storage_error(void);
 
 #endif // CHECK_DIR_H

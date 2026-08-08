@@ -466,14 +466,17 @@ jobs:
       - name: Build portable archive
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Path artifacts/portable/tools,artifacts/portable/host,artifacts/portable/docs -Force | Out-Null
+          New-Item -ItemType Directory -Path artifacts/portable/tools,artifacts/portable/host,artifacts/portable/docs,artifacts/portable/licenses/vita -Force | Out-Null
           Copy-Item artifacts/host/* artifacts/portable -Recurse -Force
           Copy-Item artifacts/displaywizard artifacts/portable/tools/DisplayWizard -Recurse -Force
           Copy-Item artifacts/vigembus artifacts/portable/tools/ViGEmBus -Recurse -Force
           Copy-Item artifacts/sunshine artifacts/portable/tools/Sunshine -Recurse -Force
           New-Item -ItemType Directory -Path artifacts/portable/tools/SupportLog -Force | Out-Null
           Copy-Item tools/summarize-vita-log.py artifacts/portable/tools/SupportLog -Force
-          Copy-Item README.md,PRIVACY.md,LICENSE artifacts/portable -Force
+          Copy-Item README.md,PRIVACY.md,LICENSE,THIRD_PARTY_NOTICES.txt artifacts/portable -Force
+          Copy-Item licenses/vita/* artifacts/portable/licenses/vita -Force
+          Copy-Item third_party/h264bitstream/LICENSE artifacts/portable/licenses/vita/LGPL-2.1-h264bitstream.txt -Force
+          Copy-Item assets/LICENSE-Mononoki.txt artifacts/portable/licenses/vita/OFL-Mononoki.txt -Force
           Copy-Item artifacts/installer/windows-signing-status.json artifacts/portable -Force
           Copy-Item host/README.md,host/BETA_SMOKE_TEST.md,host/END_TO_END_TEST.md,host/FINAL_RELEASE_CHECKLIST.md,host/COMPATIBILITY.md,host/THIRD_PARTY_NOTICES.md artifacts/portable/host -Force
           Copy-Item docs/BUILDING.md,docs/COMMUNITY_TESTING.md,docs/LOGGING_AND_SUPPORT.md,docs/RELEASING.md,docs/CODE_SIGNING_POLICY.md,docs/VITA_SETTINGS_GUIDE.md artifacts/portable/docs -Force

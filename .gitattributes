@@ -2,3 +2,18 @@
 # context prefix on otherwise blank source lines, so whitespace checking the
 # patch artifact itself would report false positives.
 patches/moonlight-common-c/*.patch text eol=lf -whitespace
+
+# These hashes are release inputs. Never apply text or line-ending conversion.
+vendor/vita-source/*.tar.bz2 binary
+vendor/vita-source/*.patch text eol=lf -whitespace
+tools/build-vita-mbedtls.sh text eol=lf
+tools/build-vita-dependencies.sh text eol=lf
+tools/stage-vita-dependency-sources.py text eol=lf
+tools/vita-mbedtls-source.lock.json text eol=lf
+tools/vita-corresponding-source.lock.json text eol=lf
+patches/vita-dependencies/*.patch text eol=lf -whitespace
+
+# Preserve upstream legal texts verbatim, including historically significant
+# spacing and blank lines. They are packaged as evidence, not edited source.
+licenses/vita/*.txt text eol=lf -whitespace
+assets/LICENSE-Mononoki.txt text eol=lf -whitespace

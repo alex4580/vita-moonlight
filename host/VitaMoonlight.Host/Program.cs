@@ -74,6 +74,9 @@ internal static class Program
         catch (HostRestartRequiredException error)
         {
             Console.Error.WriteLine($"Restart required: {error.Message}");
+            TryWriteLastCommandError("Restart required: " + error.Message);
+            TryWriteMaintenanceHelperError(
+                "Restart required: " + error.Message);
             return ExitRestartRequired;
         }
         catch (Exception error)
@@ -1623,6 +1626,20 @@ internal static class Program
                 .MustBootstrapBeforeProtectedStateForTest(
                     protectionInitialized: true),
             "Legacy installer maintenance can touch protected state before its typed recovery bootstrap.");
+        Require(
+            InstallerMaintenanceFence.ManagedVddBootstrapAllowedForTest(
+                BackendPreferenceState.Enabled,
+                existingBackendWasEnabled: null) &&
+            !InstallerMaintenanceFence.ManagedVddBootstrapAllowedForTest(
+                BackendPreferenceState.Disabled,
+                existingBackendWasEnabled: null) &&
+            InstallerMaintenanceFence.ManagedVddBootstrapAllowedForTest(
+                BackendPreferenceState.Disabled,
+                existingBackendWasEnabled: true) &&
+            !InstallerMaintenanceFence.ManagedVddBootstrapAllowedForTest(
+                BackendPreferenceState.Enabled,
+                existingBackendWasEnabled: false),
+            "Installer managed-VDD recovery does not preserve the durable enabled/paused snapshot across an interrupted upgrade.");
         var olderMaintenanceState = new InstallerMaintenanceState(
             1,
             1234,
@@ -2696,6 +2713,85 @@ internal static class Program
         });
         Require(recoveryDisplays.Length == 2 && recoveryDisplays.All(display => !DisplayTopologyService.IsManagedVirtualDisplay(display)),
             "Multi-monitor physical display recovery selection failed.");
+        var managedOnlyRecoveryPath =
+            DisplayTopologyService.SelectExactManagedVddOnlyRecoveryPath(
+            [
+                new DisplayDescriptor(
+                    0,
+                    "VDD by MTT",
+                    @"\\?\DISPLAY#MTT1337#1",
+                    true,
+                    true,
+                    WindowsDisplayNative.OutputTechnologyIndirectVirtual),
+            ]);
+        Require(
+            managedOnlyRecoveryPath?.FriendlyName == "VDD by MTT" &&
+            DisplayTopologyService.SelectExactManagedVddOnlyRecoveryPath(
+            [
+                managedOnlyRecoveryPath!,
+                new DisplayDescriptor(
+                    1,
+                    "Physical Monitor",
+                    @"\\?\DISPLAY#PHYSICAL#1",
+                    true,
+                    true,
+                    5),
+            ]) is null &&
+            DisplayTopologyService.SelectExactManagedVddOnlyRecoveryPath(
+            [
+                new DisplayDescriptor(
+                    0,
+                    "Apollo Virtual Display",
+                    @"\\?\DISPLAY#APOLLO#1",
+                    true,
+                    true,
+                    WindowsDisplayNative.OutputTechnologyIndirectVirtual),
+            ]) is null &&
+            DisplayTopologyService.SelectExactManagedVddOnlyRecoveryPath(
+            [
+                managedOnlyRecoveryPath!,
+                managedOnlyRecoveryPath! with
+                {
+                    PathIndex = 1,
+                    DevicePath = @"\\?\DISPLAY#MTT1337#2",
+                },
+            ]) is null,
+            "The old-install VDD-only recovery gate would touch a physical, unrelated, or ambiguous display topology.");
+        Require(
+            DisplayWizardAdapter.HasSingleManagedVddRestartTargetForTest(
+            [
+                new ManagedVddDeviceStatus(
+                    @"ROOT\DISPLAY\0001",
+                    Present: true,
+                    Enabled: true,
+                    DeviceStatus: 8,
+                    ProblemCode: 0),
+            ]) &&
+            !DisplayWizardAdapter.HasSingleManagedVddRestartTargetForTest(
+            [
+                new ManagedVddDeviceStatus(
+                    @"ROOT\DISPLAY\0001",
+                    Present: true,
+                    Enabled: true,
+                    DeviceStatus: 8,
+                    ProblemCode: 0),
+                new ManagedVddDeviceStatus(
+                    @"ROOT\DISPLAY\0002",
+                    Present: true,
+                    Enabled: true,
+                    DeviceStatus: 8,
+                    ProblemCode: 0),
+            ]) &&
+            !DisplayWizardAdapter.HasSingleManagedVddRestartTargetForTest(
+            [
+                new ManagedVddDeviceStatus(
+                    @"ROOT\DISPLAY\0001",
+                    Present: true,
+                    Enabled: false,
+                    DeviceStatus: 0,
+                    ProblemCode: 22),
+            ]),
+            "Managed-VDD recovery target selection could restart a paused or shared/ambiguous device instance.");
         var transientSuspendDisplays =
             DisplayTopologyService.SelectPhysicalDisplaysForRecovery(new[]
             {

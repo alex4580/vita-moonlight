@@ -420,7 +420,11 @@ static void confirm_main_action(void) {
     return;
   }
   if (selected_item == MAIN_KEYBOARD) {
-    keyboardsystem_open_keyboard();
+    /* The IME owns the screen until it closes. Dismiss this menu first so
+     * closing the keyboard returns directly to the live stream. */
+    if (stream_overlay_close()) {
+      keyboardsystem_open_keyboard();
+    }
     return;
   }
   if (selected_item == MAIN_DISCONNECT) {
@@ -559,6 +563,14 @@ static const char *touch_mode_name(void) {
   }
 }
 
+static const char *confirm_button_name(void) {
+  return config.btn_confirm == SCE_CTRL_CIRCLE ? "O" : "X";
+}
+
+static const char *cancel_button_name(void) {
+  return config.btn_cancel == SCE_CTRL_CROSS ? "X" : "O";
+}
+
 static void draw_row(int index,
                      int first_y,
                      int row_height,
@@ -605,7 +617,8 @@ static void draw_row(int index,
 static void draw_main_page(void) {
   const int first_y = 137;
   const int row_height = 32;
-  draw_row(MAIN_RESUME, first_y, row_height, "Resume stream", "X");
+  const char *confirm = confirm_button_name();
+  draw_row(MAIN_RESUME, first_y, row_height, "Resume stream", confirm);
   draw_row(MAIN_STREAM, first_y, row_height, "Stream & virtual display", ">");
   draw_row(MAIN_INPUT, first_y, row_height, "Controller & input", ">");
   draw_row(
@@ -618,12 +631,16 @@ static void draw_main_page(void) {
           ? "Stop and save support log"
           : "Start support log",
       vita_debug_is_logging_enabled() ? "Capturing" : "Fresh file");
-  draw_row(MAIN_KEYBOARD, first_y, row_height, "Open on-screen keyboard", "X");
+  draw_row(MAIN_KEYBOARD, first_y, row_height,
+           "Open on-screen keyboard", confirm);
   draw_row(MAIN_TASK_MANAGER, first_y, row_height,
-           "Open Windows Task Manager", "X");
-  draw_row(MAIN_QUIT_APP, first_y, row_height, "End Sunshine app", "X");
-  draw_row(MAIN_RECOVER_HOST, first_y, row_height, "Recover host display", "X");
-  draw_row(MAIN_DISCONNECT, first_y, row_height, "Disconnect stream", "X");
+           "Open Windows Task Manager", confirm);
+  draw_row(MAIN_QUIT_APP, first_y, row_height,
+           "End Sunshine app", confirm);
+  draw_row(MAIN_RECOVER_HOST, first_y, row_height,
+           "Recover host display", confirm);
+  draw_row(MAIN_DISCONNECT, first_y, row_height,
+           "Disconnect stream", confirm);
 }
 
 static void draw_stream_page(void) {
@@ -631,7 +648,8 @@ static void draw_stream_page(void) {
   const int first_y = 137;
   const int row_height = 29;
 
-  draw_row(STREAM_BACK, first_y, row_height, "Back", "O");
+  draw_row(STREAM_BACK, first_y, row_height,
+           "Back", cancel_button_name());
   draw_row(
       STREAM_PRESET, first_y, row_height, "Streaming preset",
       config_stream_preset_name(config_detect_stream_preset()));
@@ -663,13 +681,14 @@ static void draw_stream_page(void) {
       config.enable_vita_vblank_wait ? "On" : "Off");
   draw_row(
       STREAM_APPLY_RECONNECT, first_y, row_height,
-      "Apply resolution + reconnect", "X");
+      "Apply resolution + reconnect", confirm_button_name());
 }
 
 static void draw_input_page(void) {
   const int first_y = 137;
   const int row_height = 36;
-  draw_row(INPUT_BACK, first_y, row_height, "Back", "O");
+  draw_row(INPUT_BACK, first_y, row_height,
+           "Back", cancel_button_name());
   draw_row(
       INPUT_PROFILE, first_y, row_height, "Controller preset",
       config_controller_profile_name(config_detect_controller_profile()));
@@ -690,18 +709,18 @@ static void draw_input_page(void) {
       config.enable_double_tap_sprint ? "On" : "Off");
   draw_row(
       INPUT_APPLY_RECONNECT, first_y, row_height,
-      "Apply input changes + reconnect", "X");
+      "Apply input changes + reconnect", confirm_button_name());
 }
 
 static const char *footer_text(void) {
   if (settings_save_failed) {
-    return "Save failed. X: retry after freeing storage   O: resume unsaved";
+    return "Save failed. Confirm: retry   Cancel: resume without saving";
   }
   if (confirmation_item == MAIN_QUIT_APP) {
-    return "Press X again to end Sunshine's app and disconnect. O: cancel";
+    return "Press Confirm again to end Sunshine's app. Cancel: back";
   }
   if (confirmation_item == MAIN_RECOVER_HOST) {
-    return "Press X again to reset the VDD, display, and Sunshine. O: cancel";
+    return "Press Confirm again to recover the display. Cancel: back";
   }
   if (page == OVERLAY_PAGE_STREAM) {
     return "Apply + reconnect restarts video and the VDD, not the Windows game";
@@ -717,7 +736,7 @@ static const char *footer_text(void) {
   if (settings_changed) {
     return "Changed. Settings save when this menu closes; formats need reconnect";
   }
-  return "D-pad: navigate/change   X: select   O: resume/back";
+  return "D-pad: navigate/change   Confirm: select   Cancel: resume/back";
 }
 
 void stream_overlay_draw(void) {

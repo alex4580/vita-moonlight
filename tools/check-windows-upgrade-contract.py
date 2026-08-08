@@ -37,6 +37,13 @@ TASK_ACCOUNT_PATH = (
 BACKEND_LIFECYCLE_PATH = (
     REPOSITORY_ROOT / "host/VitaMoonlight.Host/BackendLifecycleManager.cs"
 )
+DISPLAY_TOPOLOGY_PATH = (
+    REPOSITORY_ROOT / "host/VitaMoonlight.Host/DisplayTopologyService.cs"
+)
+DISPLAY_WIZARD_PATH = (
+    REPOSITORY_ROOT / "host/VitaMoonlight.Host/DisplayWizardAdapter.cs"
+)
+PROGRAM_PATH = REPOSITORY_ROOT / "host/VitaMoonlight.Host/Program.cs"
 LEGACY_HOSTS_PATH = REPOSITORY_ROOT / "host/tests/legacy-upgrade-hosts.json"
 
 
@@ -463,6 +470,163 @@ def check_helper_physical_proof(maintenance: str, uninstall: str) -> None:
     )
 
 
+def check_vdd_only_repair_bridge(
+    installer: str,
+    maintenance: str,
+    uninstall: str,
+    rescue_agent: str,
+    display_topology: str,
+    display_wizard: str,
+    program: str,
+) -> None:
+    """An old VDD-only install must be repairable without widening ownership."""
+
+    begin = section(
+        maintenance,
+        "internal static InstallerMaintenanceState Begin(",
+        "internal static bool End(",
+        "InstallerMaintenanceFence.Begin",
+    )
+    require(
+        begin.count("ResolveManagedVddBootstrapPermission(") == 2,
+        "both protected and legacy installer-maintenance branches must gate "
+        "the VDD-only bridge on the saved backend preference",
+    )
+    permission = section(
+        maintenance,
+        "private static bool ResolveManagedVddBootstrapPermission(",
+        "internal static bool ManagedVddBootstrapAllowedForTest(",
+        "managed-VDD bootstrap preference gate",
+    )
+    require_in_order(
+        permission,
+        [
+            "NormalizeSnapshotForTakeover(existing).BackendWasEnabled",
+            "BackendLifecycleManager.ReadPreference()",
+            "BackendPreferenceState.Error",
+            "throw new InvalidOperationException(",
+        ],
+        "paused/corrupt backend preference must fail before a VDD restart",
+    )
+
+    bridge = section(
+        uninstall,
+        "RecoverPhysicalAndDiscardPendingTransactionWithManagedVddBootstrapLocked(",
+        "private static void RequireExactManagedVddOnlyRecoveryTopology(",
+        "managed-VDD-only repair bridge",
+    )
+    require_in_order(
+        bridge,
+        [
+            "RecoverPhysicalAndDiscardPendingTransactionLocked(",
+            "catch (PhysicalDisplayUnavailableException",
+            "RequireExactManagedVddOnlyRecoveryTopology(operationName)",
+            "DisplayWizardAdapter.RescanDisplayDevicesForRecovery()",
+            "TryRecoverPhysicalAfterBootstrapLocked(",
+            "if (!allowManagedVddRestart)",
+            "RequireExactManagedVddOnlyRecoveryTopology(operationName)",
+            "DisplayWizardAdapter.RestartExactManagedVddForRecovery(",
+            "TryRecoverPhysicalAfterBootstrapLocked(",
+            "could not prove a physical-only display layout",
+        ],
+        "rescan, exact restart, and final physical proof ordering",
+    )
+    require(
+        "InstallDriver(" not in bridge
+        and "UninstallDriver(" not in bridge
+        and "SetManagedDriverEnabled(" not in bridge,
+        "the repair bridge must not install, remove, enable, or disable a shared VDD",
+    )
+    topology_gate = section(
+        display_topology,
+        "internal static DisplayDescriptor? SelectExactManagedVddOnlyRecoveryPath(",
+        "internal void SaveRecovery(",
+        "exact managed-VDD-only topology selector",
+    )
+    require_in_order(
+        topology_gate,
+        [
+            "display.IsActive",
+            "active.Length == 1",
+            "active[0].IsAvailable",
+            "IsManagedVirtualDisplay(active[0])",
+        ],
+        "old broken-install topology must be exact and unambiguous",
+    )
+    restart = section(
+        display_wizard,
+        "internal static string RestartExactManagedVddForRecovery(",
+        "internal static IReadOnlyList<ManagedVddDeviceStatus>",
+        "exact managed-VDD device restart",
+    )
+    require_in_order(
+        restart,
+        [
+            "SelectExactManagedVddRestartTarget(",
+            '"/restart-device"',
+            "candidates.Length != 1",
+            "No unrelated or ambiguous display device was changed",
+        ],
+        "exact managed device ownership gate",
+    )
+    require(
+        '"/disable-device"' not in restart
+        and '"/remove-device"' not in restart
+        and '"/delete-driver"' not in restart,
+        "the VDD-only bridge must not disable/remove a shared display or package",
+    )
+
+    emergency = section(
+        rescue_agent,
+        "internal static HostRescueStatus RecoverDisplayAndStreamingHostLocked(",
+        "internal static HostRescueStatus RecordUnhandledFailure(",
+        "emergency display recovery",
+    )
+    require_in_order(
+        emergency,
+        [
+            "catch (PhysicalDisplayUnavailableException",
+            "WindowsServiceManager.Stop(",
+            "sunshineStopped = true",
+            "RecoverPhysicalAndDiscardPendingTransactionForEmergencyLocked(",
+            "physicalRecoverySucceeded = true",
+            "physicalRecoverySucceeded &&",
+            "if (restartSunshine && sunshineStopped)",
+            "WindowsServiceManager.Start(",
+        ],
+        "Sunshine stop/restart and emergency bridge semantics",
+    )
+
+    restart_catch = section(
+        program,
+        "catch (HostRestartRequiredException error)",
+        "catch (Exception error)",
+        "restart-required command reporting",
+    )
+    require(
+        "TryWriteLastCommandError" in restart_catch
+        and "TryWriteMaintenanceHelperError" in restart_catch,
+        "a bootstrap restart requirement must survive hidden helper execution",
+    )
+    installer_begin = section(
+        installer,
+        "function BeginUpgradeMaintenance(",
+        "function EndUpgradeMaintenance:",
+        "installer bootstrap restart handling",
+    )
+    require_in_order(
+        installer_begin,
+        [
+            "if ResultCode = 4 then",
+            "RestartRequiredByPrerequisite := True",
+            "ReadMaintenanceHelperError",
+            "No application files or recovery safeguards were replaced",
+            "if ResultCode <> 0 then",
+        ],
+        "installer restart-required fail-closed path",
+    )
+
+
 def check_interactive_task_account_safety(
     maintenance: str,
     uninstall: str,
@@ -662,6 +826,15 @@ def main() -> int:
         check_helper_physical_proof(
             read(MAINTENANCE_PATH),
             read(UNINSTALL_PATH),
+        )
+        check_vdd_only_repair_bridge(
+            installer,
+            read(MAINTENANCE_PATH),
+            read(UNINSTALL_PATH),
+            read(RESCUE_AGENT_PATH),
+            read(DISPLAY_TOPOLOGY_PATH),
+            read(DISPLAY_WIZARD_PATH),
+            read(PROGRAM_PATH),
         )
         check_interactive_task_account_safety(
             read(MAINTENANCE_PATH),

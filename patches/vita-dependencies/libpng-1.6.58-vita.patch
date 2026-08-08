@@ -1,0 +1,19 @@
+Vita Moonlight libpng 1.6.58 compatibility patch
+Copyright (C) 2026 Vita Moonlight contributors
+SPDX-License-Identifier: GPL-3.0-or-later
+
+Treat VitaSDK's GNU static-library naming as Unix-like. This keeps the
+installed archive name compatible with -lpng and libvita2d.
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index b0e1cfe6c..a844a251b 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -644,6 +644,7 @@ set(PNG_LIBRARY_TARGETS "")
+ 
+ # Initialize the libpng library file names.
+ if(UNIX
++   OR VITA
+    OR (WIN32 AND NOT CMAKE_SHARED_LIBRARY_PREFIX STREQUAL "")
+    OR (WIN32 AND NOT CMAKE_STATIC_LIBRARY_PREFIX STREQUAL ""))
+   # We are on a Unix or Unix-like toolchain like the GNU toolchain on Windows.

@@ -28,12 +28,11 @@
 #include <unistd.h>
 #include <math.h>
 #include <sys/types.h>
-#include <openssl/rand.h>
-#include <openssl/evp.h>
 #include <pthread.h>
 
 #include "../connection.h"
 #include "../config.h"
+#include "../debug.h"
 #include "psp2/kernel/threadmgr/thread.h"
 #include "psp2common/types.h"
 #include "vita.h"
@@ -788,8 +787,6 @@ void process_triggers() {
   }
 }
 
-extern bool keyboardsystem_is_open(void);
-
 void process_touch() {
   static int processed_touchscreen_mode = -1;
 
@@ -890,7 +887,6 @@ inline void vitainput_process(void) {
   memset(&pad, 0, sizeof(pad));
   memset(&touch, 0, sizeof(TouchData));
   memset(&curr, 0, sizeof(input_data));
-  sceCtrlSetSamplingModeExt(SCE_CTRL_MODE_ANALOG_WIDE);
   sceCtrlPeekBufferPositiveExt2(controller_port, &pad, 1);
   SceCtrlData raw_pad;
   memcpy(&raw_pad, &pad, sizeof(SceCtrlData));
@@ -941,39 +937,12 @@ inline void vitainput_process(void) {
   }
   process_triggers();
 
-  // --- GESTIÓN DE LIMPIEZA DE INPUT AL ABRIR/CERRAR TECLADO VIRTUAL Y PAUSA ---
-  static bool keyboard_overlay_active = false;
-  static SceCtrlData pad_snapshot = {0};
-  static input_data curr_snapshot = {0};
-
-  // Hook para saber si el teclado virtual está abierto
-
-  bool keyboard_now = keyboardsystem_is_open();
-
-  // --- BLOQUEO Y LIMPIEZA DE INPUT AL ABRIR TECLADO VIRTUAL ---
-  if (keyboard_now && !keyboard_overlay_active) {
-    memcpy(&pad_snapshot, &pad, sizeof(SceCtrlData));
-    memcpy(&curr_snapshot, &curr, sizeof(input_data));
-    memset(&pad, 0, sizeof(SceCtrlData));
-    memset(&curr, 0, sizeof(input_data));
-    // Centrar sticks al bloquear input
-    pad.lx = 128; pad.ly = 128; pad.rx = 128; pad.ry = 128;
-    curr.lx = 128; curr.ly = 128; curr.rx = 128; curr.ry = 128;
-    curr.lt = 0;
-    curr.rt = 0;
-    keyboard_overlay_active = true;
-  } else if (!keyboard_now && keyboard_overlay_active) {
-    memcpy(&pad, &pad_snapshot, sizeof(SceCtrlData));
-    memcpy(&curr, &curr_snapshot, sizeof(input_data));
-    keyboard_overlay_active = false;
-  } else if (keyboard_overlay_active) {
-    memset(&pad, 0, sizeof(SceCtrlData));
-    memset(&curr, 0, sizeof(input_data));
-    pad.lx = 128; pad.ly = 128; pad.rx = 128; pad.ry = 128;
-    curr.lx = 128; curr.ly = 128; curr.rx = 128; curr.ry = 128;
-    curr.lt = 0;
-    curr.rt = 0;
-  }
+  /* The Vita IME is deliberately synchronous: callers clear host input
+   * before opening it and this input tick resumes only after it closes.
+   * Never snapshot and replay controller state here. Replaying a pre-IME
+   * snapshot can synthesize a stale button press if the IME implementation
+   * ever changes its scheduling. The shortcut and menu paths each keep their
+   * own release latch after this function resumes. */
 
   curr.lx = read_analog(map.abs_x);
   curr.ly = read_analog(map.abs_y);
@@ -982,18 +951,13 @@ inline void vitainput_process(void) {
 
   process_touch();
 
-  // --- ENVÍO DE EVENTOS DE GAMEPAD SOLO SI NO hay overlay de teclado activo ---
-  // O si el overlay está activo pero NO están ambos botones del shortcut presionados
-  bool shortcut_both_pressed = (pad.buttons & SCE_CTRL_START) && (pad.buttons & SCE_CTRL_LEFT);
-  if (!keyboard_overlay_active || (keyboard_overlay_active && !shortcut_both_pressed)) {
-    if (memcmp(&curr, &old, sizeof(input_data)) != 0) {
-      LiSendMultiControllerEvent(0, 1, curr.button, curr.lt, curr.rt, curr.lx, -1 * curr.ly, curr.rx, -1 * curr.ry);
-      memcpy(&old, &curr, sizeof(input_data));
-      memcpy(&pad_old, &pad, sizeof(SceCtrlData));
-    }
-    if (memcmp(&touch, &touch_old, sizeof(TouchData)) != 0) {
-      memcpy(&touch_old, &touch, sizeof(TouchData));
-    }
+  if (memcmp(&curr, &old, sizeof(input_data)) != 0) {
+    LiSendMultiControllerEvent(0, 1, curr.button, curr.lt, curr.rt, curr.lx, -1 * curr.ly, curr.rx, -1 * curr.ry);
+    memcpy(&old, &curr, sizeof(input_data));
+    memcpy(&pad_old, &pad, sizeof(SceCtrlData));
+  }
+  if (memcmp(&touch, &touch_old, sizeof(TouchData)) != 0) {
+    memcpy(&touch_old, &touch, sizeof(TouchData));
   }
 }
 

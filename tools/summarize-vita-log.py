@@ -209,6 +209,13 @@ EVENT_FIELDS: Mapping[str, Tuple[str, ...]] = {
         "fec_recovered",
         "fec_failed",
         "out_of_sequence",
+        "fec_recovered_packets",
+        "fec_failed_blocks",
+        "rtp_oos_packets",
+        "network_lost_frames",
+        "depacketizer_corrupt_frames",
+        "decode_queue_overflows",
+        "idr_requests_sent",
         "total_frames",
         "total_dropped",
     ),
@@ -297,6 +304,13 @@ INTEGER_FIELDS = frozenset(
         "fec_recovered",
         "fec_failed",
         "out_of_sequence",
+        "fec_recovered_packets",
+        "fec_failed_blocks",
+        "rtp_oos_packets",
+        "network_lost_frames",
+        "depacketizer_corrupt_frames",
+        "decode_queue_overflows",
+        "idr_requests_sent",
         "total_frames",
         "total_dropped",
         "previous_state_id",
@@ -1126,6 +1140,13 @@ class SessionBuilder:
             ("fec_recovered", "fec_recovered"),
             ("fec_failed", "fec_failed"),
             ("out_of_sequence", "out_of_sequence"),
+            ("fec_recovered_packets", "fec_recovered_packets"),
+            ("fec_failed_blocks", "fec_failed_blocks"),
+            ("rtp_oos_packets", "rtp_oos_packets"),
+            ("network_lost_frames", "network_lost_frames"),
+            ("depacketizer_corrupt_frames", "depacketizer_corrupt_frames"),
+            ("decode_queue_overflows", "decode_queue_overflows"),
+            ("idr_requests_sent", "idr_requests_sent"),
         ):
             observed = values(key)
             if observed:
@@ -1632,6 +1653,13 @@ def render_human(report: Mapping[str, object]) -> str:
                     "fec_recovered",
                     "fec_failed",
                     "out_of_sequence",
+                    "fec_recovered_packets",
+                    "fec_failed_blocks",
+                    "rtp_oos_packets",
+                    "network_lost_frames",
+                    "depacketizer_corrupt_frames",
+                    "decode_queue_overflows",
+                    "idr_requests_sent",
                 ),
             )
             network_parts.extend(part for part in (fps_text, quality_text) if part)
@@ -1780,8 +1808,10 @@ def _representative_log() -> str:
                 "video_kbps=7600 configured_kbps=8000 decoded_frames=600 "
                 "dropped_frames=0 dropped_fps=0 "
                 "decode_avg_us=3200 decode_max_us=5000 "
-                "rtt_ms=4 rtt_variance_ms=1 fec_recovered=1 fec_failed=0 "
-                "out_of_sequence=0 total_frames=600 total_dropped=0"
+                "rtt_ms=4 rtt_variance_ms=1 fec_recovered_packets=1 "
+                "fec_failed_blocks=0 rtp_oos_packets=0 network_lost_frames=0 "
+                "depacketizer_corrupt_frames=0 decode_queue_overflows=0 "
+                "idr_requests_sent=0 total_frames=600 total_dropped=0"
             ),
             (
                 "ts=2026-07-26T12:00:22.000000Z schema=vita-support-v1 "
@@ -1790,8 +1820,10 @@ def _representative_log() -> str:
                 "video_kbps=7500 configured_kbps=8000 decoded_frames=550 "
                 "dropped_frames=50 dropped_fps=5 "
                 "decode_avg_us=3500 decode_max_us=7000 "
-                "rtt_ms=12 rtt_variance_ms=3 fec_recovered=4 fec_failed=1 "
-                "out_of_sequence=2 total_frames=1150 total_dropped=5"
+                "rtt_ms=12 rtt_variance_ms=3 fec_recovered_packets=4 "
+                "fec_failed_blocks=1 rtp_oos_packets=2 network_lost_frames=3 "
+                "depacketizer_corrupt_frames=1 decode_queue_overflows=0 "
+                "idr_requests_sent=2 total_frames=1150 total_dropped=5"
             ),
             (
                 "ts=2026-07-26T12:00:23.000000Z schema=vita-support-v1 "
@@ -1920,6 +1952,13 @@ def run_self_test() -> None:
     assert network["dropped_frames"] == 50
     assert network["dropped_fps_average"] == 2.5
     assert network["worst_state"] == "degraded"
+    assert network["fec_recovered_packets"] == 5
+    assert network["fec_failed_blocks"] == 1
+    assert network["rtp_oos_packets"] == 2
+    assert network["network_lost_frames"] == 3
+    assert network["depacketizer_corrupt_frames"] == 1
+    assert network["decode_queue_overflows"] == 0
+    assert network["idr_requests_sent"] == 2
     # Both the deliberately injected host field and legacy message are
     # discarded rather than copied into the summary.
     assert first["unknown_field_count"] == 2

@@ -1,0 +1,68 @@
+Vita Moonlight third-party notices
+==================================
+
+This notice covers the PlayStation Vita client. The Windows companion's
+separately bundled drivers, Sunshine installer, and DisplayWizard-derived tools
+are documented in host/THIRD_PARTY_NOTICES.md.
+
+Vita Moonlight is distributed under GPL-3.0. The complete license is packaged
+as licenses/GPL-3.0.txt. The release-tagged project source, build scripts,
+dependency pins, and all safely redistributable dependency source are provided
+in the Vita source archive beside the VPK. SOURCE_BUNDLE_STATUS.txt and
+SOURCE_MANIFEST.json in that archive are authoritative: a binary release must
+not be published while completion_status is not "complete".
+
+Included client components
+--------------------------
+
+Component                         Version / revision                     License file
+Moonlight Vita client + mDNS      release source                         GPL-3.0.txt
+moonlight-common-c                07c32c80f98bb0d7214c577bd080eea3ce64a856 GPL-3.0.txt
+Reed-Solomon implementation       moonlight-common-c pinned tree         Reed-Solomon.txt
+ENet                              dea6fb5414b180908b58c0293c831105b5d124dd ENet.txt
+inih                              8e06f6b77b5d4471bdc6d85ada81b67d37354a5c inih.txt
+h264bitstream                     release source                         LGPL-2.1-h264bitstream.txt
+libuuid                           release source                         libuuid.txt
+PSPSDK debug font                 8a3bef901248232063fe82ec1bbe6d46108d4961 PSPSDK-Debug-Font.txt
+Mononoki Regular                  1.6 / 089d2a4c07fe805432bbe54dc097dc715f90071a OFL-Mononoki.txt
+zlib                              1.3.2                                  Zlib.txt
+bzip2                             1.0.8                                  Bzip2.txt
+Zstandard                         1.5.7                                  Zstd-BSD.txt
+libpng                            1.6.58 / 3061454d980de7d53608f594194cfac722721d2a Libpng.txt
+libjpeg-turbo                     3.2.0                                  Libjpeg-turbo.txt; Libjpeg-IJG.txt
+FreeType                          2.14.3                                 FreeType-FTL.txt
+libvita2d                         a8f15ab09d5233f0a4e4ad0e8f6ade0da888cbed Libvita2d.txt
+curl                              8.21.0                                 Curl.txt
+Expat                             2.8.2                                  Expat.txt
+Opus                              1.6.1                                  Opus.txt
+Mbed TLS                          3.6.7                                  MbedTLS.txt
+newlib (libc and libm)            fbb8375870d799758e0b4358d2f1708781aa26a6 Newlib.txt
+pthread-embedded                  63e1cd9152082d9ccb1b38d67a4caf975562fbeb Pthread.txt; Pthread-LGPL-2.1.txt; Pthread-Vita-MIT.txt
+GCC runtime libraries             15.2.0                                 GPL-3.0.txt; GCC-Runtime-Exception.txt
+Vita import definitions/headers   e37621bf80f5140b567c96782f8dc369e1108e0f Vita-Headers.txt
+Vita toolchain/startup support    71f3789342f610a4eb3ba50fc33292c4900c6666 Vita-Toolchain.txt
+
+Portions of this software are copyright © 2026 The FreeType Project
+(https://freetype.org). All rights reserved.
+
+Modification and build disclosures
+----------------------------------
+
+The release source contains every project modification. In particular:
+
+* moonlight-common-c's pinned RTSP source receives the exact checked patch in
+  patches/moonlight-common-c before compilation.
+* Mbed TLS 3.6.7 is built from the locked official archive with the
+  project-maintained GPL-3.0-or-later Vita socket, entropy, and platform patch
+  in vendor/vita-source. Modified files are identified by that patch and by
+  its inserted change notices.
+* The Vita package build disables unnecessary position-independent output in
+  zstd and makes libpng recognize the Vita Unix-like library naming convention.
+* curl is configured for static Mbed TLS, zlib, and Zstandard support; FreeType,
+  libjpeg-turbo, libvita2d, Expat, Opus, and bzip2 are statically built for Vita.
+* The clean-room mDNS implementation in third_party/mdnsniff replaces the
+  former ambiguously licensed submodule and is GPL-3.0-only project code.
+
+Exact source identities, archive byte counts, SHA-256 values, SDK runtime
+revisions, and any unresolved redistribution blocker are machine-readable in
+tools/vita-corresponding-source.lock.json and the release source manifest.

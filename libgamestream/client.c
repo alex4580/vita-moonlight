@@ -20,6 +20,7 @@
 #include "http.h"
 #include "xml.h"
 #include "mkcert.h"
+#include "crypto.h"
 #include "client.h"
 #include "errors.h"
 #include "limits.h"
@@ -35,21 +36,15 @@
 #include <string.h>
 #include <arpa/inet.h>
 #include <uuid.h>
-#include <openssl/sha.h>
-#include <openssl/aes.h>
-#include <openssl/rand.h>
-#include <openssl/evp.h>
-#include <openssl/x509.h>
-#include <openssl/pem.h>
-#include <openssl/err.h>
 #include <psp2/kernel/threadmgr.h>
 
 #include "../src/debug.h"
 
 #define UNIQUE_FILE_NAME "uniqueid.dat"
 #define PAIRING_PENDING_FILE_NAME "pairing-pending.dat"
-#define P12_FILE_NAME "client.p12"
 #define LEGACY_SHARED_UNIQUE_ID "0123456789ABCDEF"
+#define PAIRING_JOURNAL_VERSION 1u
+#define PAIRING_JOURNAL_CAPACITY 768u
 
 //
 #define printf vita_debug_log
@@ -59,9 +54,9 @@
 #define UNIQUEID_CHARS (UNIQUEID_BYTES*2)
 
 static char unique_id[UNIQUEID_CHARS+1];
-static X509 *cert;
+static GS_CRYPTO_IDENTITY *identity;
 static char cert_hex[8192];
-static EVP_PKEY *privateKey;
+static char client_identity_pin[GS_CRYPTO_SPKI_PIN_LENGTH + 1];
 
 const char* gs_error;
 
@@ -75,6 +70,44 @@ const char* gs_error;
 
 static char unique_id_path[PATH_MAX];
 static char pairing_pending_path[PATH_MAX];
+static char active_certificate_path[PATH_MAX];
+static char active_key_path[PATH_MAX];
+
+typedef enum _ARTIFACT_STATE {
+  ARTIFACT_ABSENT,
+  ARTIFACT_VALID,
+  ARTIFACT_INVALID,
+  ARTIFACT_IO_ERROR
+} ARTIFACT_STATE;
+
+typedef enum _PAIRING_STAGE {
+  PAIRING_STAGE_NONE = 0,
+  PAIRING_STAGE_OPENED = 1,
+  PAIRING_STAGE_AUTHENTICATED = 2,
+  PAIRING_STAGE_AUTHORIZING = 3,
+  PAIRING_STAGE_AUTHORIZED = 4,
+  PAIRING_STAGE_LOCAL_COMMITTED = 5,
+  PAIRING_STAGE_COMPLETE = 6
+} PAIRING_STAGE;
+
+typedef struct _PAIRING_JOURNAL {
+  unsigned long generation;
+  PAIRING_STAGE stage;
+  char pairId[UNIQUEID_CHARS + 1];
+  char serverPin[GS_CRYPTO_SPKI_PIN_LENGTH + 1];
+  char clientPin[GS_CRYPTO_SPKI_PIN_LENGTH + 1];
+  unsigned short httpsPort;
+  bool legacy;
+} PAIRING_JOURNAL;
+
+typedef enum _PAIRING_JOURNAL_STATE {
+  PAIRING_JOURNAL_ABSENT,
+  PAIRING_JOURNAL_VALID,
+  PAIRING_JOURNAL_INVALID
+} PAIRING_JOURNAL_STATE;
+
+static PAIRING_JOURNAL pairing_journal;
+static PAIRING_JOURNAL_STATE pairing_journal_state = PAIRING_JOURNAL_ABSENT;
 
 static void bytes_to_hex(unsigned char *in, char *out, size_t len);
 
@@ -93,63 +126,22 @@ static bool hash_pairing_challenge_binding(
     size_t serverCertificateSignatureLength,
     const unsigned char serverSecret[16],
     int hashLength,
-    unsigned char digest[SHA256_DIGEST_LENGTH]) {
+    unsigned char digest[GS_CRYPTO_SHA256_LENGTH]) {
   if (challenge == NULL || serverCertificateSignature == NULL ||
       serverCertificateSignatureLength == 0 || serverSecret == NULL ||
       digest == NULL) {
     return false;
   }
 
-  memset(digest, 0, SHA256_DIGEST_LENGTH);
-  if (hashLength == SHA256_DIGEST_LENGTH) {
-    SHA256_CTX context;
-    return SHA256_Init(&context) == 1 &&
-        SHA256_Update(&context, challenge, 16) == 1 &&
-        SHA256_Update(&context, serverCertificateSignature,
-                      serverCertificateSignatureLength) == 1 &&
-        SHA256_Update(&context, serverSecret, 16) == 1 &&
-        SHA256_Final(digest, &context) == 1;
-  }
-  if (hashLength == SHA_DIGEST_LENGTH) {
-    SHA_CTX context;
-    return SHA1_Init(&context) == 1 &&
-        SHA1_Update(&context, challenge, 16) == 1 &&
-        SHA1_Update(&context, serverCertificateSignature,
-                    serverCertificateSignatureLength) == 1 &&
-        SHA1_Update(&context, serverSecret, 16) == 1 &&
-        SHA1_Final(digest, &context) == 1;
-  }
-  return false;
-}
-
-static bool certificate_signature_view(
-    X509 *certificate, const unsigned char **signature, size_t *signatureLength) {
-  if (certificate == NULL || signature == NULL || signatureLength == NULL) {
-    return false;
-  }
-
-#if OPENSSL_VERSION_NUMBER < 0x10002000L
-  ASN1_BIT_STRING *asnSignature = certificate->signature;
-#elif OPENSSL_VERSION_NUMBER < 0x10100000L
-  ASN1_BIT_STRING *asnSignature = NULL;
-  X509_get0_signature(&asnSignature, NULL, certificate);
-#else
-  const ASN1_BIT_STRING *asnSignature = NULL;
-  X509_get0_signature(&asnSignature, NULL, certificate);
-#endif
-
-  if (asnSignature == NULL || ASN1_STRING_length(asnSignature) <= 0 ||
-      ASN1_STRING_length(asnSignature) > 1024) {
-    return false;
-  }
-
-#if OPENSSL_VERSION_NUMBER < 0x10100000L
-  *signature = ASN1_STRING_data(asnSignature);
-#else
-  *signature = ASN1_STRING_get0_data(asnSignature);
-#endif
-  *signatureLength = (size_t)ASN1_STRING_length(asnSignature);
-  return *signature != NULL;
+  const GS_CRYPTO_BUFFER transcript[] = {
+      {.data = challenge, .length = 16},
+      {.data = serverCertificateSignature,
+       .length = serverCertificateSignatureLength},
+      {.data = serverSecret, .length = 16},
+  };
+  return gs_crypto_hash_segments(
+      hashLength, transcript, sizeof(transcript) / sizeof(transcript[0]),
+      digest);
 }
 
 static int copy_pem_certificate_signature(
@@ -159,38 +151,16 @@ static int copy_pem_certificate_signature(
     return GS_INVALID;
   }
 
-  *signature = NULL;
-  *signatureLength = 0;
-  BIO *bio = BIO_new_mem_buf((void *)certificatePem, -1);
-  X509 *certificate = NULL;
-  const unsigned char *signatureView = NULL;
-  size_t viewLength = 0;
-  if (bio == NULL ||
-      (certificate = PEM_read_bio_X509(bio, NULL, NULL, NULL)) == NULL ||
-      !certificate_signature_view(certificate, &signatureView, &viewLength)) {
-    if (certificate != NULL) X509_free(certificate);
-    if (bio != NULL) BIO_free(bio);
+  if (!gs_crypto_pem_certificate_signature(
+          certificatePem, signature, signatureLength)) {
     gs_error = "Sunshine returned an invalid pairing certificate signature";
     return GS_INVALID;
   }
-
-  unsigned char *copy = malloc(viewLength);
-  if (copy == NULL) {
-    X509_free(certificate);
-    BIO_free(bio);
-    return GS_OUT_OF_MEMORY;
-  }
-  memcpy(copy, signatureView, viewLength);
-  *signature = copy;
-  *signatureLength = viewLength;
-
-  X509_free(certificate);
-  BIO_free(bio);
   return GS_OK;
 }
 
 static int secure_random(void *buffer, size_t size, const char *purpose) {
-  if (size > INT_MAX || RAND_bytes(buffer, (int)size) != 1) {
+  if (!gs_crypto_random(buffer, size)) {
     (void)purpose;
     gs_error = "The Vita could not generate secure pairing data";
     return GS_FAILED;
@@ -268,15 +238,12 @@ static bool parse_version_major_field(const char *text, int *majorVersion) {
 }
 
 static void cleanup_client_credentials(void) {
-  if (cert != NULL) {
-    X509_free(cert);
-    cert = NULL;
-  }
-  if (privateKey != NULL) {
-    EVP_PKEY_free(privateKey);
-    privateKey = NULL;
-  }
+  gs_crypto_identity_free(identity);
+  identity = NULL;
   cert_hex[0] = '\0';
+  client_identity_pin[0] = '\0';
+  active_certificate_path[0] = '\0';
+  active_key_path[0] = '\0';
 }
 
 static int mkdirtree(const char* directory) {
@@ -330,19 +297,53 @@ static bool build_pairing_pending_path(
   return written > 0 && (size_t)written < pathSize;
 }
 
-static bool read_unique_id_file(
-    const char *path, char value[UNIQUEID_CHARS + 1]) {
-  FILE *file = fopen(path, "rb");
-  if (file == NULL) return false;
-
-  size_t bytesRead = fread(value, 1, UNIQUEID_CHARS, file);
-  bool valid = bytesRead == UNIQUEID_CHARS && fgetc(file) == EOF;
-  fclose(file);
-  for (size_t i = 0; valid && i < UNIQUEID_CHARS; ++i) {
-    valid = isxdigit((unsigned char)value[i]) != 0;
+static ARTIFACT_STATE artifact_file_state(const char *path) {
+  struct stat status;
+  if (path == NULL) return ARTIFACT_INVALID;
+  if (stat(path, &status) != 0) {
+    return errno == ENOENT ? ARTIFACT_ABSENT : ARTIFACT_IO_ERROR;
   }
-  value[UNIQUEID_CHARS] = '\0';
-  return valid;
+  return S_ISREG(status.st_mode) ? ARTIFACT_VALID : ARTIFACT_INVALID;
+}
+
+static bool is_lower_hex_text(const char *value, size_t length) {
+  if (value == NULL || strlen(value) != length) return false;
+  for (size_t i = 0; i < length; ++i) {
+    if (!((value[i] >= '0' && value[i] <= '9') ||
+          (value[i] >= 'a' && value[i] <= 'f'))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static bool is_hex_text(const char *value, size_t length) {
+  if (value == NULL || strlen(value) != length) return false;
+  for (size_t i = 0; i < length; ++i) {
+    if (!isxdigit((unsigned char)value[i])) return false;
+  }
+  return true;
+}
+
+static ARTIFACT_STATE read_unique_id_file(
+    const char *path, char value[UNIQUEID_CHARS + 1]) {
+  ARTIFACT_STATE state = artifact_file_state(path);
+  if (state != ARTIFACT_VALID) return state;
+
+  FILE *file = fopen(path, "rb");
+  if (file == NULL) return ARTIFACT_IO_ERROR;
+  size_t bytesRead = fread(value, 1, UNIQUEID_CHARS, file);
+  int trailing = fgetc(file);
+  bool readOk = !ferror(file);
+  bool ioOk = fclose(file) == 0;
+  ioOk = ioOk && readOk;
+  value[bytesRead < UNIQUEID_CHARS ? bytesRead : UNIQUEID_CHARS] = '\0';
+  if (!ioOk) return ARTIFACT_IO_ERROR;
+  if (bytesRead != UNIQUEID_CHARS || trailing != EOF ||
+      !is_hex_text(value, UNIQUEID_CHARS)) {
+    return ARTIFACT_INVALID;
+  }
+  return ARTIFACT_VALID;
 }
 
 static int persist_unique_id_atomic(
@@ -360,42 +361,114 @@ static int persist_unique_id_atomic(
     return GS_FAILED;
   }
 
+  char primaryId[UNIQUEID_CHARS + 1] = {0};
+  char temporaryId[UNIQUEID_CHARS + 1] = {0};
+  char backupId[UNIQUEID_CHARS + 1] = {0};
+  ARTIFACT_STATE primaryState =
+      read_unique_id_file(uniqueFilePath, primaryId);
+  ARTIFACT_STATE temporaryState =
+      read_unique_id_file(temporaryPath, temporaryId);
+  ARTIFACT_STATE backupState = read_unique_id_file(backupPath, backupId);
+  if (!is_hex_text(value, UNIQUEID_CHARS)) {
+    gs_error = "The Vita pairing ID to save is invalid";
+    return GS_INVALID;
+  }
+
+  /* A valid primary is authoritative. If it is missing or torn, normalize the
+   * next valid transaction artifact before replacing any sibling. This keeps
+   * an interrupted atomic write recoverable without accepting an all-corrupt
+   * identity set as a new installation. */
+  const char *recoveryPath = temporaryState == ARTIFACT_VALID ? temporaryPath :
+      backupState == ARTIFACT_VALID ? backupPath : NULL;
+  bool hasValidIdentity = primaryState == ARTIFACT_VALID || recoveryPath != NULL;
+  bool hasAnyArtifact = primaryState != ARTIFACT_ABSENT ||
+      temporaryState != ARTIFACT_ABSENT || backupState != ARTIFACT_ABSENT;
+  if (!hasValidIdentity && hasAnyArtifact) {
+    gs_error = "The saved Vita pairing ID files are damaged; no files were replaced";
+    return GS_IO_ERROR;
+  }
+  if (primaryState != ARTIFACT_VALID && recoveryPath != NULL) {
+    bool recoveredTemporary = recoveryPath == temporaryPath;
+    if ((primaryState != ARTIFACT_ABSENT &&
+         remove(uniqueFilePath) != 0) ||
+        rename(recoveryPath, uniqueFilePath) != 0) {
+      gs_error = "Could not normalize the current Vita pairing identity";
+      return GS_IO_ERROR;
+    }
+    primaryState = ARTIFACT_VALID;
+    if (recoveredTemporary) {
+      memcpy(primaryId, temporaryId, sizeof(primaryId));
+      temporaryState = ARTIFACT_ABSENT;
+    } else {
+      memcpy(primaryId, backupId, sizeof(primaryId));
+      backupState = ARTIFACT_ABSENT;
+    }
+  }
+  if (temporaryState != ARTIFACT_ABSENT && remove(temporaryPath) != 0) {
+    gs_error = "Could not replace the staged Vita pairing ID";
+    return GS_IO_ERROR;
+  }
+  temporaryState = ARTIFACT_ABSENT;
+
   FILE *file = fopen(temporaryPath, "wb");
   if (file == NULL) {
     gs_error = "Could not save the Vita pairing identity";
     return GS_IO_ERROR;
   }
-  bool writeOk = fwrite(value, 1, UNIQUEID_CHARS, file) == UNIQUEID_CHARS;
+  bool writeOk = fwrite(value, 1, UNIQUEID_CHARS, file) == UNIQUEID_CHARS &&
+      fflush(file) == 0;
   bool closeOk = fclose(file) == 0;
   if (!writeOk || !closeOk) {
-    remove(temporaryPath);
+    (void)remove(temporaryPath);
     gs_error = "Could not finish saving the Vita pairing identity";
     return GS_IO_ERROR;
   }
 
-  remove(backupPath);
-  errno = 0;
-  bool hadPreviousIdentity = rename(uniqueFilePath, backupPath) == 0;
-  if (!hadPreviousIdentity && errno != ENOENT) {
+  char stagedId[UNIQUEID_CHARS + 1];
+  if (read_unique_id_file(temporaryPath, stagedId) != ARTIFACT_VALID ||
+      strcmp(stagedId, value) != 0) {
+    (void)remove(temporaryPath);
+    gs_error = "The staged Vita pairing ID did not verify";
+    return GS_IO_ERROR;
+  }
+
+  bool hadPreviousIdentity = primaryState == ARTIFACT_VALID;
+  if (hadPreviousIdentity && backupState != ARTIFACT_ABSENT &&
+      remove(backupPath) != 0) {
+    remove(temporaryPath);
+    gs_error = "Could not rotate the previous Vita pairing ID backup";
+    return GS_IO_ERROR;
+  }
+  if (hadPreviousIdentity && rename(uniqueFilePath, backupPath) != 0) {
     remove(temporaryPath);
     gs_error = "Could not preserve the previous Vita pairing identity";
     return GS_IO_ERROR;
   }
   if (rename(temporaryPath, uniqueFilePath) != 0) {
-    remove(temporaryPath);
     if (hadPreviousIdentity) rename(backupPath, uniqueFilePath);
     gs_error = "Could not install the Vita pairing identity";
+    return GS_IO_ERROR;
+  }
+  char committedId[UNIQUEID_CHARS + 1];
+  if (read_unique_id_file(uniqueFilePath, committedId) != ARTIFACT_VALID ||
+      strcmp(committedId, value) != 0) {
+    /* A successful rename is not a successful transaction until the new
+     * primary reads back exactly. Remove the unverifiable primary and restore
+     * the last verified identity. If either operation fails, keep the backup
+     * intact so startup recovery still has a known-good candidate. */
+    bool invalidPrimaryRemoved = remove(uniqueFilePath) == 0;
+    bool previousIdentityRestored = !hadPreviousIdentity;
+    if (invalidPrimaryRemoved && hadPreviousIdentity) {
+      previousIdentityRestored = rename(backupPath, uniqueFilePath) == 0;
+    }
+    gs_error = invalidPrimaryRemoved && previousIdentityRestored
+        ? "The committed Vita pairing ID did not verify; the previous identity was restored"
+        : "The committed Vita pairing ID did not verify and automatic recovery failed";
     return GS_IO_ERROR;
   }
   if (hadPreviousIdentity) remove(backupPath);
   return GS_OK;
 }
-
-typedef enum PairingPendingState {
-  PAIRING_PENDING_NONE,
-  PAIRING_PENDING_VALID,
-  PAIRING_PENDING_INVALID
-} PairingPendingState;
 
 static bool pairing_pending_sibling_path(
     char *path, size_t pathSize, const char *suffix) {
@@ -406,43 +479,366 @@ static bool pairing_pending_sibling_path(
   return written > 0 && (size_t)written < pathSize;
 }
 
-static bool pairing_pending_artifact_exists(const char *path) {
-  struct stat status;
-  return path != NULL && stat(path, &status) == 0;
+static bool pairing_journals_equal(
+    const PAIRING_JOURNAL *left, const PAIRING_JOURNAL *right) {
+  return left->generation == right->generation && left->stage == right->stage &&
+      left->httpsPort == right->httpsPort && left->legacy == right->legacy &&
+      strcmp(left->pairId, right->pairId) == 0 &&
+      strcmp(left->serverPin, right->serverPin) == 0 &&
+      strcmp(left->clientPin, right->clientPin) == 0;
 }
 
-static void clear_pairing_pending_files(void) {
-  static const char *suffixes[] = {NULL, ".bak", ".tmp"};
-  char path[PATH_MAX];
-  for (size_t i = 0; i < sizeof(suffixes) / sizeof(suffixes[0]); ++i) {
-    if (pairing_pending_sibling_path(
-            path, sizeof(path), suffixes[i])) {
-      remove(path);
-    }
+static int format_pairing_journal(
+    const PAIRING_JOURNAL *journal, char *output, size_t outputSize) {
+  if (journal == NULL || output == NULL || outputSize == 0 ||
+      journal->generation == 0 ||
+      journal->stage < PAIRING_STAGE_OPENED ||
+      journal->stage > PAIRING_STAGE_COMPLETE ||
+      !is_lower_hex_text(journal->pairId, UNIQUEID_CHARS) ||
+      !http_server_pin_is_valid(journal->clientPin) ||
+      (journal->serverPin[0] != '\0' &&
+       !http_server_pin_is_valid(journal->serverPin)) ||
+      (journal->stage == PAIRING_STAGE_OPENED &&
+       journal->serverPin[0] != '\0') ||
+      (journal->stage >= PAIRING_STAGE_AUTHENTICATED &&
+       journal->stage <= PAIRING_STAGE_LOCAL_COMMITTED &&
+       (journal->serverPin[0] == '\0' || journal->httpsPort == 0))) {
+    return GS_INVALID;
   }
+
+  char canonical[PAIRING_JOURNAL_CAPACITY];
+  int canonicalLength = snprintf(
+      canonical, sizeof(canonical),
+      "version=%u\n"
+      "generation=%lu\n"
+      "stage=%u\n"
+      "pair_id=%s\n"
+      "server_pin=%s\n"
+      "client_pin=%s\n"
+      "https_port=%u\n",
+      PAIRING_JOURNAL_VERSION, journal->generation,
+      (unsigned int)journal->stage, journal->pairId,
+      journal->serverPin[0] == '\0' ? "-" : journal->serverPin,
+      journal->clientPin, (unsigned int)journal->httpsPort);
+  if (canonicalLength <= 0 ||
+      (size_t)canonicalLength >= sizeof(canonical)) {
+    return GS_INVALID;
+  }
+
+  unsigned char digest[GS_CRYPTO_SHA256_LENGTH];
+  char checksum[GS_CRYPTO_SHA256_LENGTH * 2 + 1];
+  if (!gs_crypto_hash(
+          GS_CRYPTO_SHA256_LENGTH, canonical, (size_t)canonicalLength,
+          digest)) {
+    return GS_FAILED;
+  }
+  bytes_to_hex(digest, checksum, sizeof(digest));
+  int written = snprintf(
+      output, outputSize, "%schecksum=%s\n", canonical, checksum);
+  return written > 0 && (size_t)written < outputSize ? GS_OK : GS_INVALID;
 }
 
-static PairingPendingState load_pairing_pending_id(
-    char value[UNIQUEID_CHARS + 1]) {
-  static const char *suffixes[] = {NULL, ".bak", ".tmp"};
-  char path[PATH_MAX];
-  bool foundArtifact = false;
+static ARTIFACT_STATE read_pairing_journal_file(
+    const char *path, PAIRING_JOURNAL *journal) {
+  ARTIFACT_STATE state = artifact_file_state(path);
+  if (state != ARTIFACT_VALID) return state;
+
+  FILE *file = fopen(path, "rb");
+  if (file == NULL) return ARTIFACT_IO_ERROR;
+  char contents[PAIRING_JOURNAL_CAPACITY];
+  size_t length = fread(contents, 1, sizeof(contents) - 1, file);
+  int trailing = fgetc(file);
+  bool readOk = !ferror(file);
+  bool ioOk = fclose(file) == 0;
+  ioOk = ioOk && readOk;
+  if (!ioOk) return ARTIFACT_IO_ERROR;
+  if (length == 0 || trailing != EOF) return ARTIFACT_INVALID;
+  contents[length] = '\0';
+
+  memset(journal, 0, sizeof(*journal));
+  if (length == UNIQUEID_CHARS &&
+      is_lower_hex_text(contents, UNIQUEID_CHARS)) {
+    journal->stage = PAIRING_STAGE_OPENED;
+    memcpy(journal->pairId, contents, UNIQUEID_CHARS + 1);
+    journal->legacy = true;
+    return ARTIFACT_VALID;
+  }
+
+  unsigned int version = 0;
+  unsigned int stageValue = 0;
+  unsigned int portValue = 0;
+  char serverPin[GS_CRYPTO_SPKI_PIN_LENGTH + 1] = {0};
+  char clientPin[GS_CRYPTO_SPKI_PIN_LENGTH + 1] = {0};
+  char checksum[GS_CRYPTO_SHA256_LENGTH * 2 + 1] = {0};
+  int consumed = 0;
+  int fields = sscanf(
+      contents,
+      "version=%u\n"
+      "generation=%lu\n"
+      "stage=%u\n"
+      "pair_id=%16[0-9a-f]\n"
+      "server_pin=%52[^\n]\n"
+      "client_pin=%52[^\n]\n"
+      "https_port=%u\n"
+      "checksum=%64[0-9a-f]\n%n",
+      &version, &journal->generation, &stageValue, journal->pairId,
+      serverPin, clientPin, &portValue, checksum, &consumed);
+  if (fields != 8 || consumed != (int)length ||
+      version != PAIRING_JOURNAL_VERSION ||
+      journal->generation == 0 ||
+      stageValue < PAIRING_STAGE_OPENED ||
+      stageValue > PAIRING_STAGE_COMPLETE || portValue > 65535u ||
+      !is_lower_hex_text(journal->pairId, UNIQUEID_CHARS) ||
+      !is_lower_hex_text(checksum, GS_CRYPTO_SHA256_LENGTH * 2) ||
+      !http_server_pin_is_valid(clientPin) ||
+      (strcmp(serverPin, "-") != 0 &&
+       !http_server_pin_is_valid(serverPin))) {
+    return ARTIFACT_INVALID;
+  }
+
+  journal->stage = (PAIRING_STAGE)stageValue;
+  journal->httpsPort = (unsigned short)portValue;
+  snprintf(journal->clientPin, sizeof(journal->clientPin), "%s", clientPin);
+  if (strcmp(serverPin, "-") != 0) {
+    snprintf(journal->serverPin, sizeof(journal->serverPin), "%s", serverPin);
+  }
+  if (journal->stage >= PAIRING_STAGE_AUTHENTICATED &&
+      journal->stage <= PAIRING_STAGE_LOCAL_COMMITTED &&
+      (journal->serverPin[0] == '\0' || journal->httpsPort == 0)) {
+    return ARTIFACT_INVALID;
+  }
+  if (journal->stage == PAIRING_STAGE_OPENED &&
+      journal->serverPin[0] != '\0') {
+    return ARTIFACT_INVALID;
+  }
+
+  char expected[PAIRING_JOURNAL_CAPACITY];
+  if (format_pairing_journal(journal, expected, sizeof(expected)) != GS_OK ||
+      strcmp(contents, expected) != 0) {
+    return ARTIFACT_INVALID;
+  }
+  return ARTIFACT_VALID;
+}
+
+static PAIRING_JOURNAL_STATE load_pairing_journal(void) {
+  static const char *suffixes[] = {NULL, ".tmp", ".bak"};
+  PAIRING_JOURNAL selected;
+  bool foundValid = false;
+  bool foundCorrupt = false;
+  bool generationConflict = false;
+  memset(&selected, 0, sizeof(selected));
+
   for (size_t i = 0; i < sizeof(suffixes) / sizeof(suffixes[0]); ++i) {
-    if (!pairing_pending_sibling_path(
-            path, sizeof(path), suffixes[i])) {
+    char path[PATH_MAX];
+    if (!pairing_pending_sibling_path(path, sizeof(path), suffixes[i])) {
+      foundCorrupt = true;
       continue;
     }
-    if (pairing_pending_artifact_exists(path)) foundArtifact = true;
-    if (read_unique_id_file(path, value)) return PAIRING_PENDING_VALID;
+    PAIRING_JOURNAL candidate;
+    ARTIFACT_STATE state = read_pairing_journal_file(path, &candidate);
+    if (state == ARTIFACT_INVALID || state == ARTIFACT_IO_ERROR) {
+      foundCorrupt = true;
+      continue;
+    }
+    if (state != ARTIFACT_VALID) continue;
+    if (!foundValid || candidate.generation > selected.generation) {
+      selected = candidate;
+      foundValid = true;
+      generationConflict = false;
+    } else if (candidate.generation == selected.generation &&
+               !pairing_journals_equal(&candidate, &selected)) {
+      generationConflict = true;
+    }
   }
-  return foundArtifact ? PAIRING_PENDING_INVALID : PAIRING_PENDING_NONE;
+
+  memset(&pairing_journal, 0, sizeof(pairing_journal));
+  if (generationConflict || (!foundValid && foundCorrupt)) {
+    pairing_journal_state = PAIRING_JOURNAL_INVALID;
+  } else if (foundValid) {
+    pairing_journal = selected;
+    pairing_journal_state = PAIRING_JOURNAL_VALID;
+  } else {
+    pairing_journal_state = PAIRING_JOURNAL_ABSENT;
+  }
+  return pairing_journal_state;
+}
+
+static int persist_pairing_journal(const PAIRING_JOURNAL *journal) {
+  char primaryPath[PATH_MAX];
+  char temporaryPath[PATH_MAX];
+  char backupPath[PATH_MAX];
+  if (!pairing_pending_sibling_path(primaryPath, sizeof(primaryPath), NULL) ||
+      !pairing_pending_sibling_path(
+          temporaryPath, sizeof(temporaryPath), ".tmp") ||
+      !pairing_pending_sibling_path(backupPath, sizeof(backupPath), ".bak")) {
+    gs_error = "The Sunshine pairing recovery path is unavailable";
+    return GS_IO_ERROR;
+  }
+
+  PAIRING_JOURNAL primaryJournal;
+  PAIRING_JOURNAL temporaryJournal;
+  PAIRING_JOURNAL backupJournal;
+  ARTIFACT_STATE primaryState =
+      read_pairing_journal_file(primaryPath, &primaryJournal);
+  ARTIFACT_STATE temporaryState =
+      read_pairing_journal_file(temporaryPath, &temporaryJournal);
+  ARTIFACT_STATE backupState =
+      read_pairing_journal_file(backupPath, &backupJournal);
+  /* Normalize the selected generation to primary before staging its successor.
+   * This matters after a crash between primary->.bak and .tmp->primary: the
+   * selected .tmp must never be deleted before an equally valid primary exists.
+   * A torn, lower-authority sibling does not invalidate a verified generation. */
+  if (pairing_journal_state == PAIRING_JOURNAL_VALID) {
+    bool primaryIsCurrent = primaryState == ARTIFACT_VALID &&
+        pairing_journals_equal(&primaryJournal, &pairing_journal);
+    bool temporaryIsCurrent = temporaryState == ARTIFACT_VALID &&
+        pairing_journals_equal(&temporaryJournal, &pairing_journal);
+    bool backupIsCurrent = backupState == ARTIFACT_VALID &&
+        pairing_journals_equal(&backupJournal, &pairing_journal);
+    if (!primaryIsCurrent) {
+      const char *sourcePath = temporaryIsCurrent ? temporaryPath :
+          backupIsCurrent ? backupPath : NULL;
+      if (sourcePath == NULL ||
+          (primaryState != ARTIFACT_ABSENT && remove(primaryPath) != 0) ||
+          rename(sourcePath, primaryPath) != 0) {
+        gs_error = "Could not normalize the current pairing recovery generation";
+        return GS_IO_ERROR;
+      }
+      primaryState = ARTIFACT_VALID;
+      primaryJournal = pairing_journal;
+      if (temporaryIsCurrent) temporaryState = ARTIFACT_ABSENT;
+      if (backupIsCurrent) backupState = ARTIFACT_ABSENT;
+    }
+  } else if (primaryState != ARTIFACT_ABSENT ||
+             temporaryState != ARTIFACT_ABSENT ||
+             backupState != ARTIFACT_ABSENT) {
+    gs_error = "Pairing recovery artifacts appeared without a loaded transaction";
+    return GS_IO_ERROR;
+  }
+
+  char serialized[PAIRING_JOURNAL_CAPACITY];
+  int ret = format_pairing_journal(journal, serialized, sizeof(serialized));
+  if (ret != GS_OK) {
+    gs_error = "The pairing recovery transaction is invalid";
+    return ret;
+  }
+  if (temporaryState != ARTIFACT_ABSENT && remove(temporaryPath) != 0) {
+    gs_error = "Could not rotate the pairing recovery staging file";
+    return GS_IO_ERROR;
+  }
+  FILE *file = fopen(temporaryPath, "wb");
+  if (file == NULL) {
+    gs_error = "Could not stage pairing recovery data";
+    return GS_IO_ERROR;
+  }
+  size_t serializedLength = strlen(serialized);
+  bool writeOk = fwrite(serialized, 1, serializedLength, file) ==
+          serializedLength &&
+      fflush(file) == 0;
+  bool closeOk = fclose(file) == 0;
+  if (!writeOk || !closeOk) {
+    gs_error = "Could not finish staging pairing recovery data";
+    return GS_IO_ERROR;
+  }
+
+  PAIRING_JOURNAL staged;
+  if (read_pairing_journal_file(temporaryPath, &staged) != ARTIFACT_VALID ||
+      !pairing_journals_equal(&staged, journal)) {
+    gs_error = "The staged pairing recovery transaction did not verify";
+    return GS_IO_ERROR;
+  }
+
+  bool hadPrimary = primaryState == ARTIFACT_VALID;
+  if (hadPrimary && backupState != ARTIFACT_ABSENT &&
+      remove(backupPath) != 0) {
+    gs_error = "Could not rotate the previous pairing recovery backup";
+    return GS_IO_ERROR;
+  }
+  if (hadPrimary && rename(primaryPath, backupPath) != 0) {
+    gs_error = "Could not preserve the previous pairing recovery state";
+    return GS_IO_ERROR;
+  }
+  if (rename(temporaryPath, primaryPath) != 0) {
+    if (hadPrimary) (void)rename(backupPath, primaryPath);
+    gs_error = "Could not commit the pairing recovery transaction";
+    return GS_IO_ERROR;
+  }
+  PAIRING_JOURNAL committed;
+  if (read_pairing_journal_file(primaryPath, &committed) != ARTIFACT_VALID ||
+      !pairing_journals_equal(&committed, journal)) {
+    gs_error = "The committed pairing recovery transaction did not verify";
+    return GS_IO_ERROR;
+  }
+  if (hadPrimary) (void)remove(backupPath);
+  return GS_OK;
+}
+
+static int transition_pairing_journal(
+    PAIRING_STAGE stage, const char *pairId, const char *serverPin,
+    unsigned short httpsPort) {
+  if (stage < PAIRING_STAGE_OPENED || stage > PAIRING_STAGE_COMPLETE ||
+      !is_lower_hex_text(pairId, UNIQUEID_CHARS)) {
+    gs_error = "The requested pairing recovery transition is invalid";
+    return GS_INVALID;
+  }
+  if (pairing_journal_state == PAIRING_JOURNAL_INVALID ||
+      client_identity_pin[0] == '\0') {
+    gs_error = "Pairing recovery data is unavailable or damaged";
+    return GS_IO_ERROR;
+  }
+  if (pairing_journal_state == PAIRING_JOURNAL_VALID &&
+      pairing_journal.generation == ULONG_MAX) {
+    gs_error = "The pairing recovery generation cannot advance";
+    return GS_IO_ERROR;
+  }
+  if (pairing_journal_state == PAIRING_JOURNAL_VALID &&
+      pairing_journal.stage != PAIRING_STAGE_COMPLETE) {
+    if (strcmp(pairing_journal.pairId, pairId) != 0 ||
+        (stage != PAIRING_STAGE_COMPLETE && stage < pairing_journal.stage) ||
+        (pairing_journal.stage >= PAIRING_STAGE_AUTHENTICATED &&
+         pairing_journal.serverPin[0] != '\0' &&
+         (serverPin == NULL ||
+          strcmp(pairing_journal.serverPin, serverPin) != 0))) {
+      gs_error = "The pairing recovery transition would change authenticated transaction identity";
+      return GS_INVALID;
+    }
+  } else if (pairing_journal_state == PAIRING_JOURNAL_VALID &&
+             pairing_journal.stage == PAIRING_STAGE_COMPLETE &&
+             stage != PAIRING_STAGE_OPENED &&
+             stage != PAIRING_STAGE_COMPLETE) {
+    gs_error = "A completed pairing transaction can only start a new attempt";
+    return GS_WRONG_STATE;
+  }
+
+  PAIRING_JOURNAL next;
+  memset(&next, 0, sizeof(next));
+  next.generation = pairing_journal_state == PAIRING_JOURNAL_VALID
+      ? pairing_journal.generation + 1 : 1;
+  next.stage = stage;
+  snprintf(next.pairId, sizeof(next.pairId), "%s", pairId);
+  if (serverPin != NULL) {
+    snprintf(next.serverPin, sizeof(next.serverPin), "%s", serverPin);
+  }
+  snprintf(
+      next.clientPin, sizeof(next.clientPin), "%s", client_identity_pin);
+  next.httpsPort = httpsPort;
+  int ret = persist_pairing_journal(&next);
+  if (ret == GS_OK) {
+    pairing_journal = next;
+    pairing_journal_state = PAIRING_JOURNAL_VALID;
+  }
+  return ret;
 }
 
 static int load_unique_id(
-    const char* keyDirectory, bool hasAuthenticatedServerPin) {
+    const char* keyDirectory, bool hasAuthenticatedServerPin,
+    const char *recoveryId) {
+  char temporaryPath[PATH_MAX];
   char backupPath[PATH_MAX];
   if (!build_unique_id_path(
           unique_id_path, sizeof(unique_id_path), keyDirectory, NULL) ||
+      !build_unique_id_path(
+          temporaryPath, sizeof(temporaryPath), keyDirectory, ".tmp") ||
       !build_unique_id_path(
           backupPath, sizeof(backupPath), keyDirectory, ".bak") ||
       !build_pairing_pending_path(
@@ -452,15 +848,34 @@ static int load_unique_id(
     return GS_FAILED;
   }
 
-  bool valid = read_unique_id_file(unique_id_path, unique_id);
-  if (!valid && read_unique_id_file(backupPath, unique_id)) {
-    /* Recover the last complete identity before considering any migration. */
-    remove(unique_id_path);
-    if (rename(backupPath, unique_id_path) != 0) {
-      gs_error = "Could not recover the Vita pairing identity";
-      return GS_IO_ERROR;
+  char primaryId[UNIQUEID_CHARS + 1] = {0};
+  char temporaryId[UNIQUEID_CHARS + 1] = {0};
+  char backupId[UNIQUEID_CHARS + 1] = {0};
+  ARTIFACT_STATE primaryState =
+      read_unique_id_file(unique_id_path, primaryId);
+  ARTIFACT_STATE temporaryState =
+      read_unique_id_file(temporaryPath, temporaryId);
+  ARTIFACT_STATE backupState = read_unique_id_file(backupPath, backupId);
+
+  if (recoveryId != NULL) {
+    if (!is_lower_hex_text(recoveryId, UNIQUEID_CHARS)) {
+      gs_error = "The pairing recovery ID is invalid";
+      return GS_INVALID;
     }
-    valid = true;
+    snprintf(unique_id, sizeof(unique_id), "%s", recoveryId);
+    return GS_OK;
+  }
+
+  const char *selectedId = primaryState == ARTIFACT_VALID ? primaryId :
+      temporaryState == ARTIFACT_VALID ? temporaryId :
+      backupState == ARTIFACT_VALID ? backupId : NULL;
+  bool valid = selectedId != NULL;
+  if (valid) snprintf(unique_id, sizeof(unique_id), "%s", selectedId);
+  bool allAbsent = primaryState == ARTIFACT_ABSENT &&
+      temporaryState == ARTIFACT_ABSENT && backupState == ARTIFACT_ABSENT;
+  if (!valid && !allAbsent) {
+    gs_error = "The saved Vita pairing ID files are damaged; no files were replaced";
+    return GS_IO_ERROR;
   }
 
   bool legacySharedIdentity =
@@ -474,6 +889,10 @@ static int load_unique_id(
   bool rotateLegacyIdentity =
       legacySharedIdentity && !hasAuthenticatedServerPin;
   if (valid && !rotateLegacyIdentity) return GS_OK;
+  if (!valid && hasAuthenticatedServerPin) {
+    gs_error = "The Vita pairing ID is missing for this authenticated Sunshine host; no replacement was generated";
+    return GS_IO_ERROR;
+  }
 
   unsigned char randomId[UNIQUEID_BYTES];
   if (secure_random(randomId, sizeof(randomId), "client identity") != GS_OK) {
@@ -488,95 +907,281 @@ static int load_unique_id(
   return GS_OK;
 }
 
-static int load_cert(const char* keyDirectory) {
-  cleanup_client_credentials();
+static bool credential_sibling_path(
+    char *path, size_t pathSize, const char *basePath, const char *suffix) {
+  int written = snprintf(
+      path, pathSize, "%s%s", basePath, suffix == NULL ? "" : suffix);
+  return written > 0 && (size_t)written < pathSize;
+}
 
-  char certificateFilePath[PATH_MAX];
-  char keyFilePath[PATH_MAX];
-  char p12FilePath[PATH_MAX];
-  int certificatePathLength = snprintf(
-      certificateFilePath, sizeof(certificateFilePath), "%s/%s",
-      keyDirectory, CERTIFICATE_FILE_NAME);
-  int keyPathLength = snprintf(
-      keyFilePath, sizeof(keyFilePath), "%s/%s",
-      keyDirectory, KEY_FILE_NAME);
-  int p12PathLength = snprintf(
-      p12FilePath, sizeof(p12FilePath), "%s/%s",
-      keyDirectory, P12_FILE_NAME);
-  if (certificatePathLength < 0 ||
-      (size_t)certificatePathLength >= sizeof(certificateFilePath) ||
-      keyPathLength < 0 || (size_t)keyPathLength >= sizeof(keyFilePath) ||
-      p12PathLength < 0 || (size_t)p12PathLength >= sizeof(p12FilePath)) {
+static bool read_bounded_credential(
+    const char *path, char *contents, size_t capacity, size_t *length) {
+  if (path == NULL || contents == NULL || capacity < 2 || length == NULL) {
+    return false;
+  }
+  contents[0] = '\0';
+  *length = 0;
+  FILE *file = fopen(path, "rb");
+  if (file == NULL) return false;
+
+  size_t bytesRead = fread(contents, 1, capacity - 1, file);
+  bool complete = bytesRead != 0 && fgetc(file) == EOF && !ferror(file);
+  bool closed = fclose(file) == 0;
+  if (!complete || !closed) {
+    memset(contents, 0, capacity);
+    return false;
+  }
+  contents[bytesRead] = '\0';
+  *length = bytesRead;
+  return true;
+}
+
+static bool write_credential_file(
+    const char *path, const char *contents, size_t length) {
+  FILE *file = fopen(path, "wb");
+  if (file == NULL) return false;
+  bool valid = fwrite(contents, 1, length, file) == length &&
+      fflush(file) == 0;
+  bool closed = fclose(file) == 0;
+  return valid && closed;
+}
+
+static GS_CRYPTO_IDENTITY *load_identity_files(
+    const char *certificatePath, const char *keyPath,
+    char certificateContents[MKCERT_CERTIFICATE_PEM_CAPACITY],
+    size_t *certificateLength,
+    char keyContents[MKCERT_PRIVATE_KEY_PEM_CAPACITY], size_t *keyLength) {
+  if (!read_bounded_credential(
+          certificatePath, certificateContents,
+          MKCERT_CERTIFICATE_PEM_CAPACITY, certificateLength) ||
+      !read_bounded_credential(
+          keyPath, keyContents, MKCERT_PRIVATE_KEY_PEM_CAPACITY,
+          keyLength)) {
+    return NULL;
+  }
+  return gs_crypto_identity_load_pem(
+      certificateContents, *certificateLength + 1,
+      keyContents, *keyLength + 1);
+}
+
+static bool identity_files_match(
+    const char *certificatePath, const char *keyPath) {
+  char certificateContents[MKCERT_CERTIFICATE_PEM_CAPACITY];
+  char keyContents[MKCERT_PRIVATE_KEY_PEM_CAPACITY];
+  size_t certificateLength = 0;
+  size_t keyLength = 0;
+  GS_CRYPTO_IDENTITY *candidate = load_identity_files(
+      certificatePath, keyPath, certificateContents, &certificateLength,
+      keyContents, &keyLength);
+  gs_crypto_identity_free(candidate);
+  memset(keyContents, 0, sizeof(keyContents));
+  return candidate != NULL;
+}
+
+static int persist_identity_atomic(
+    const char *certificatePath, const char *keyPath,
+    const char *certificateContents, size_t certificateLength,
+    const char *keyContents, size_t keyLength) {
+  char certificateTemporaryPath[PATH_MAX];
+  char certificateBackupPath[PATH_MAX];
+  char keyTemporaryPath[PATH_MAX];
+  char keyBackupPath[PATH_MAX];
+  if (!credential_sibling_path(
+          certificateTemporaryPath, sizeof(certificateTemporaryPath),
+          certificatePath, ".tmp") ||
+      !credential_sibling_path(
+          certificateBackupPath, sizeof(certificateBackupPath),
+          certificatePath, ".bak") ||
+      !credential_sibling_path(
+          keyTemporaryPath, sizeof(keyTemporaryPath), keyPath, ".tmp") ||
+      !credential_sibling_path(
+          keyBackupPath, sizeof(keyBackupPath), keyPath, ".bak")) {
     gs_error = "The Vita pairing credential path is too long";
     return GS_INVALID;
   }
 
-  FILE *fd = fopen(certificateFilePath, "r");
-  if (fd == NULL) {
-    printf("Generating certificate...");
-    CERT_KEY_PAIR generated = mkcert_generate();
-    printf("done\n");
-
-    if (generated.x509 == NULL || generated.pkey == NULL || generated.p12 == NULL) {
-      mkcert_free(generated);
-      gs_error = "Could not generate the Vita pairing certificate";
-      return GS_FAILED;
-    }
-
-    if (mkcert_save(certificateFilePath, p12FilePath, keyFilePath, generated) != 0) {
-      mkcert_free(generated);
-      gs_error = "Could not save the Vita pairing certificate";
+  const char *artifacts[] = {
+      certificatePath, certificateTemporaryPath, certificateBackupPath,
+      keyPath, keyTemporaryPath, keyBackupPath,
+  };
+  for (size_t i = 0; i < sizeof(artifacts) / sizeof(artifacts[0]); ++i) {
+    ARTIFACT_STATE state = artifact_file_state(artifacts[i]);
+    if (state != ARTIFACT_ABSENT) {
+      gs_error = state == ARTIFACT_IO_ERROR
+          ? "The Vita pairing identity files could not be inspected"
+          : "Existing Vita pairing identity evidence was preserved instead of being replaced";
       return GS_IO_ERROR;
     }
-    mkcert_free(generated);
-    fd = fopen(certificateFilePath, "r");
   }
 
-  if (fd == NULL) {
-    gs_error = "Can't open certificate file";
-    return GS_FAILED;
+  if (!write_credential_file(
+          certificateTemporaryPath, certificateContents,
+          certificateLength) ||
+      !write_credential_file(keyTemporaryPath, keyContents, keyLength) ||
+      !identity_files_match(certificateTemporaryPath, keyTemporaryPath)) {
+    gs_error = "Could not safely stage the Vita pairing identity";
+    return GS_IO_ERROR;
   }
 
-  if (!(cert = PEM_read_X509(fd, NULL, NULL, NULL))) {
-    fclose(fd);
-    gs_error = "Error loading cert into memory";
-    return GS_FAILED;
+  if (rename(keyTemporaryPath, keyPath) != 0) {
+    gs_error = "Could not install the Vita pairing private key";
+    return GS_IO_ERROR;
+  }
+  if (rename(certificateTemporaryPath, certificatePath) != 0) {
+    /* On a first install, key.pem + client.pem.tmp remains a valid recovery
+     * candidate on the next launch. */
+    gs_error = "Could not install the Vita pairing certificate";
+    return GS_IO_ERROR;
+  }
+  if (!identity_files_match(certificatePath, keyPath)) {
+    gs_error = "The saved Vita pairing identity did not verify";
+    return GS_IO_ERROR;
   }
 
-  rewind(fd);
+  return GS_OK;
+}
 
-  int c;
-  int length = 0;
-  while ((c = fgetc(fd)) != EOF) {
-    if ((size_t)length + 2 >= sizeof(cert_hex)) {
-      fclose(fd);
-      cleanup_client_credentials();
-      gs_error = "The Vita pairing certificate is unexpectedly large";
-      return GS_INVALID;
-    }
-    snprintf(cert_hex + length, sizeof(cert_hex) - (size_t)length, "%02x", c);
-    length += 2;
-  }
-  cert_hex[length] = 0;
+static int load_cert(const char* keyDirectory) {
+  cleanup_client_credentials();
+  client_identity_pin[0] = '\0';
+  active_certificate_path[0] = '\0';
+  active_key_path[0] = '\0';
 
-  fclose(fd);
-
-  fd = fopen(keyFilePath, "r");
-  if (fd == NULL) {
-    cleanup_client_credentials();
-    gs_error = "Error loading key into memory";
-    return GS_FAILED;
-  }
-
-  privateKey = PEM_read_PrivateKey(fd, NULL, NULL, NULL);
-  fclose(fd);
-
-  if (privateKey == NULL || X509_check_private_key(cert, privateKey) != 1) {
-    cleanup_client_credentials();
-    gs_error = "The Vita pairing key does not match its certificate";
+  char certificatePath[PATH_MAX];
+  char keyPath[PATH_MAX];
+  int certificatePathLength = snprintf(
+      certificatePath, sizeof(certificatePath), "%s/%s",
+      keyDirectory, CERTIFICATE_FILE_NAME);
+  int keyPathLength = snprintf(
+      keyPath, sizeof(keyPath), "%s/%s", keyDirectory, KEY_FILE_NAME);
+  if (certificatePathLength < 0 ||
+      (size_t)certificatePathLength >= sizeof(certificatePath) ||
+      keyPathLength < 0 || (size_t)keyPathLength >= sizeof(keyPath)) {
+    gs_error = "The Vita pairing credential path is too long";
     return GS_INVALID;
   }
 
+  char certificatePaths[3][PATH_MAX];
+  char keyPaths[3][PATH_MAX];
+  static const char *suffixes[] = {NULL, ".bak", ".tmp"};
+  for (size_t i = 0; i < 3; ++i) {
+    if (!credential_sibling_path(
+            certificatePaths[i], sizeof(certificatePaths[i]),
+            certificatePath, suffixes[i]) ||
+        !credential_sibling_path(
+            keyPaths[i], sizeof(keyPaths[i]), keyPath, suffixes[i])) {
+      gs_error = "The Vita pairing credential path is too long";
+      return GS_INVALID;
+    }
+  }
+
+  bool foundArtifact = false;
+  for (size_t i = 0; i < 3; ++i) {
+    ARTIFACT_STATE certificateState =
+        artifact_file_state(certificatePaths[i]);
+    ARTIFACT_STATE keyState = artifact_file_state(keyPaths[i]);
+    if (certificateState == ARTIFACT_IO_ERROR ||
+        keyState == ARTIFACT_IO_ERROR) {
+      gs_error = "The Vita pairing identity files could not be inspected; no files were replaced";
+      return GS_IO_ERROR;
+    }
+    foundArtifact = foundArtifact || certificateState != ARTIFACT_ABSENT ||
+        keyState != ARTIFACT_ABSENT;
+  }
+
+  /* Exact pairs are preferred. Cross pairs cover a power loss between the
+   * two filesystem renames in an otherwise atomic credential transaction. */
+  static const unsigned char candidatePairs[][2] = {
+      {0, 0}, {1, 1}, {2, 2},
+      {2, 0}, {0, 2}, {1, 0}, {0, 1}, {2, 1}, {1, 2},
+  };
+  char recoveredCertificate[MKCERT_CERTIFICATE_PEM_CAPACITY];
+  char recoveredKey[MKCERT_PRIVATE_KEY_PEM_CAPACITY];
+  size_t recoveredCertificateLength = 0;
+  size_t recoveredKeyLength = 0;
+  size_t selectedCandidate = sizeof(candidatePairs) / sizeof(candidatePairs[0]);
+  for (size_t i = 0; i < sizeof(candidatePairs) / sizeof(candidatePairs[0]);
+       ++i) {
+    identity = load_identity_files(
+        certificatePaths[candidatePairs[i][0]],
+        keyPaths[candidatePairs[i][1]], recoveredCertificate,
+        &recoveredCertificateLength, recoveredKey, &recoveredKeyLength);
+    if (identity != NULL) {
+      selectedCandidate = i;
+      break;
+    }
+  }
+
+  if (identity == NULL && foundArtifact) {
+    memset(recoveredKey, 0, sizeof(recoveredKey));
+    gs_error = "The saved Vita pairing certificate/key artifacts are incomplete or damaged; no files were replaced";
+    return GS_IO_ERROR;
+  }
+
+  if (identity == NULL) {
+    printf("Generating Vita pairing identity...");
+    if (mkcert_generate(
+            recoveredCertificate, sizeof(recoveredCertificate),
+            &recoveredCertificateLength, recoveredKey,
+            sizeof(recoveredKey), &recoveredKeyLength) != 0) {
+      memset(recoveredKey, 0, sizeof(recoveredKey));
+      gs_error = "Could not generate the Vita pairing identity";
+      return GS_FAILED;
+    }
+    identity = gs_crypto_identity_load_pem(
+        recoveredCertificate, recoveredCertificateLength + 1,
+        recoveredKey, recoveredKeyLength + 1);
+    printf(identity == NULL ? "failed\n" : "done\n");
+    if (identity == NULL) {
+      memset(recoveredKey, 0, sizeof(recoveredKey));
+      gs_error = "The generated Vita pairing identity did not verify";
+      return GS_FAILED;
+    }
+    if (persist_identity_atomic(
+            certificatePath, keyPath, recoveredCertificate,
+            recoveredCertificateLength, recoveredKey,
+            recoveredKeyLength) != GS_OK) {
+      gs_crypto_identity_free(identity);
+      identity = NULL;
+      memset(recoveredKey, 0, sizeof(recoveredKey));
+      return GS_IO_ERROR;
+    }
+    selectedCandidate = 0;
+  }
+
+  if (recoveredCertificateLength * 2 + 1 > sizeof(cert_hex)) {
+    gs_crypto_identity_free(identity);
+    identity = NULL;
+    memset(recoveredKey, 0, sizeof(recoveredKey));
+    gs_error = "The Vita pairing certificate is unexpectedly large";
+    return GS_INVALID;
+  }
+  bytes_to_hex(
+      (unsigned char *)recoveredCertificate, cert_hex,
+      recoveredCertificateLength);
+  if (!gs_crypto_spki_pin_from_pem(
+          recoveredCertificate, client_identity_pin)) {
+    gs_crypto_identity_free(identity);
+    identity = NULL;
+    memset(recoveredKey, 0, sizeof(recoveredKey));
+    gs_error = "The Vita pairing certificate identity could not be derived";
+    return GS_INVALID;
+  }
+  if (selectedCandidate >=
+      sizeof(candidatePairs) / sizeof(candidatePairs[0])) {
+    gs_crypto_identity_free(identity);
+    identity = NULL;
+    memset(recoveredKey, 0, sizeof(recoveredKey));
+    gs_error = "The Vita pairing identity recovery source is unavailable";
+    return GS_IO_ERROR;
+  }
+  const unsigned char certificateIndex = candidatePairs[selectedCandidate][0];
+  const unsigned char keyIndex = candidatePairs[selectedCandidate][1];
+  snprintf(
+      active_certificate_path, sizeof(active_certificate_path), "%s",
+      certificatePaths[certificateIndex]);
+  snprintf(active_key_path, sizeof(active_key_path), "%s", keyPaths[keyIndex]);
+  memset(recoveredKey, 0, sizeof(recoveredKey));
   return GS_OK;
 }
 
@@ -603,10 +1208,10 @@ static int load_serverinfo(PSERVER_DATA server, bool https) {
     ret = GS_OUT_OF_MEMORY;
     goto cleanup;
   }
-  if (http_request(url, data) != GS_OK) {
-    ret = GS_IO_ERROR;
-    goto cleanup;
-  }
+  /* Preserve typed transport failures such as GS_IDENTITY_CHANGED. The
+   * saved-host UI needs that distinction to warn about a replaced Sunshine
+   * certificate instead of misreporting the computer as merely offline. */
+  if ((ret = http_request(url, data)) != GS_OK) goto cleanup;
 
   if ((ret = xml_status(data->memory, data->size)) != GS_OK) {
     goto cleanup;
@@ -655,10 +1260,16 @@ static int load_serverinfo(PSERVER_DATA server, bool https) {
     goto cleanup;
 
   unsigned long currentGame = 0;
+  unsigned long pairStatus = 0;
   unsigned long codecModeSupport = SCM_H264;
   unsigned long httpsPort = 0;
   if (!parse_unsigned_decimal_field(currentGameText, INT_MAX, &currentGame)) {
     gs_error = "Sunshine returned an invalid currentgame field";
+    ret = GS_INVALID;
+    goto cleanup;
+  }
+  if (!parse_unsigned_decimal_field(pairedText, 1u, &pairStatus)) {
+    gs_error = "Sunshine returned an invalid PairStatus field";
     ret = GS_INVALID;
     goto cleanup;
   }
@@ -683,7 +1294,7 @@ static int load_serverinfo(PSERVER_DATA server, bool https) {
     goto cleanup;
   }
 
-  server->paired = strcmp(pairedText, "1") == 0;
+  server->paired = pairStatus == 1u;
   server->currentGame = (int)currentGame;
   server->serverInfo.serverCodecModeSupport = (int)codecModeSupport;
   server->isNvidiaSoftware = strstr(stateText, "MJOLNIR") != NULL;
@@ -754,10 +1365,25 @@ static int load_server_status(PSERVER_DATA server) {
     server->securePairingRequired = true;
     ret = GS_OK;
   } else {
-    // Never fall back to unauthenticated HTTP after a pinned HTTPS failure.
+    /* A pinned TLS connection can still be rejected because Sunshine no
+     * longer authorizes this Vita certificate (for example after the PC's
+     * paired-client list is cleared). The verified server identity makes that
+     * different from a certificate change or an offline host. Refresh only
+     * public metadata over HTTP and require a new PIN before any privileged
+     * request. All other pinned HTTPS failures remain fail-closed. */
     free_server_status_data(server);
     ret = load_serverinfo(server, true);
-    server->securePairingRequired = false;
+    if (ret == GS_CLIENT_UNAUTHORIZED) {
+      free_server_status_data(server);
+      ret = load_serverinfo(server, false);
+      if (ret == GS_OK) {
+        server->paired = false;
+        server->securePairingRequired = true;
+        gs_error = NULL;
+      }
+    } else {
+      server->securePairingRequired = false;
+    }
   }
 
   if (ret == GS_OK && !server->allowUnsupportedVersion) {
@@ -830,117 +1456,45 @@ static bool hex_to_bytes(const char *in, unsigned char *out,
   return true;
 }
 
-static int sign_it(const char *msg, size_t mlen, unsigned char **sig, size_t *slen, EVP_PKEY *pkey) {
-  int result = GS_FAILED;
-
+static int sign_it(
+    const char *msg, size_t mlen, unsigned char **sig, size_t *slen,
+    GS_CRYPTO_IDENTITY *signingIdentity) {
+  if (msg == NULL || sig == NULL || slen == NULL || signingIdentity == NULL) {
+    return GS_INVALID;
+  }
   *sig = NULL;
   *slen = 0;
-
-  EVP_MD_CTX *ctx = EVP_MD_CTX_create();
-  if (ctx == NULL)
-    return GS_FAILED;
-
-  int rc = EVP_DigestSignInit(ctx, NULL, EVP_sha256(), NULL, pkey);
-  if (rc != 1)
-    goto cleanup;
-
-  rc = EVP_DigestSignUpdate(ctx, msg, mlen);
-  if (rc != 1)
-    goto cleanup;
-
-  size_t req = 0;
-  rc = EVP_DigestSignFinal(ctx, NULL, &req);
-  if (rc != 1 || !(req > 0))
-    goto cleanup;
-
-  *sig = OPENSSL_malloc(req);
-  if (*sig == NULL)
-    goto cleanup;
-
-  *slen = req;
-  rc = EVP_DigestSignFinal(ctx, *sig, slen);
-  if (rc != 1 || req != *slen)
-    goto cleanup;
-
-  result = GS_OK;
-
-  cleanup:
-  if (result != GS_OK && *sig != NULL) {
-    OPENSSL_free(*sig);
+  *sig = malloc(GS_CRYPTO_MAX_SIGNATURE_LENGTH);
+  if (*sig == NULL) return GS_OUT_OF_MEMORY;
+  if (!gs_crypto_identity_sign_sha256(
+          signingIdentity, msg, mlen, *sig,
+          GS_CRYPTO_MAX_SIGNATURE_LENGTH, slen) ||
+      *slen == 0 || *slen > GS_CRYPTO_MAX_SIGNATURE_LENGTH) {
+    free(*sig);
     *sig = NULL;
     *slen = 0;
+    return GS_FAILED;
   }
-  EVP_MD_CTX_destroy(ctx);
-  ctx = NULL;
-
-  return result;
+  return GS_OK;
 }
 
-static bool verifySignature(const char *data, int dataLength, char *signature, int signatureLength, const char *cert) {
-    X509* x509 = NULL;
-    BIO* bio = BIO_new(BIO_s_mem());
-    if (bio == NULL || BIO_puts(bio, cert) <= 0) {
-        BIO_free(bio);
-        return false;
-    }
-    x509 = PEM_read_bio_X509(bio, NULL, NULL, NULL);
-
-    BIO_free(bio);
-
-    if (!x509) {
-        return false;
-    }
-
-    EVP_PKEY* pubKey = X509_get_pubkey(x509);
-    EVP_MD_CTX *mdctx = EVP_MD_CTX_create();
-    int result = pubKey != NULL && mdctx != NULL &&
-        EVP_DigestVerifyInit(mdctx, NULL, EVP_sha256(), NULL, pubKey) == 1 &&
-        EVP_DigestVerifyUpdate(mdctx, data, dataLength) == 1 &&
-        EVP_DigestVerifyFinal(mdctx, signature, signatureLength) == 1;
-
-    X509_free(x509);
-    EVP_PKEY_free(pubKey);
-    if (mdctx != NULL) EVP_MD_CTX_destroy(mdctx);
-
-    return result;
+static bool verifySignature(
+    const char *data, int dataLength, const char *signature,
+    int signatureLength, const char *certificatePem) {
+  return dataLength >= 0 && signatureLength > 0 &&
+      gs_crypto_verify_sha256_pem(
+          certificatePem, data, (size_t)dataLength,
+          (const unsigned char *)signature, (size_t)signatureLength);
 }
 
 static bool encrypt(const unsigned char *plaintext, int plaintextLen, const unsigned char *key, unsigned char *ciphertext) {
-  EVP_CIPHER_CTX* cipher = EVP_CIPHER_CTX_new();
-  if (cipher == NULL) return false;
-
-  if (EVP_EncryptInit(cipher, EVP_aes_128_ecb(), key, NULL) != 1 ||
-      EVP_CIPHER_CTX_set_padding(cipher, 0) != 1) {
-    EVP_CIPHER_CTX_free(cipher);
-    return false;
-  }
-
-  int ciphertextLen = 0;
-  bool ok = EVP_EncryptUpdate(
-      cipher, ciphertext, &ciphertextLen, plaintext, plaintextLen) == 1 &&
-      ciphertextLen == plaintextLen;
-
-  EVP_CIPHER_CTX_free(cipher);
-  return ok;
+  return plaintextLen > 0 && gs_crypto_aes_128_ecb(
+      true, key, plaintext, (size_t)plaintextLen, ciphertext);
 }
 
 static bool decrypt(const unsigned char *ciphertext, int ciphertextLen, const unsigned char *key, unsigned char *plaintext) {
-  EVP_CIPHER_CTX* cipher = EVP_CIPHER_CTX_new();
-  if (cipher == NULL) return false;
-
-  if (EVP_DecryptInit(cipher, EVP_aes_128_ecb(), key, NULL) != 1 ||
-      EVP_CIPHER_CTX_set_padding(cipher, 0) != 1) {
-    EVP_CIPHER_CTX_free(cipher);
-    return false;
-  }
-
-  int plaintextLen = 0;
-  bool ok = EVP_DecryptUpdate(
-      cipher, plaintext, &plaintextLen, ciphertext, ciphertextLen) == 1 &&
-      plaintextLen == ciphertextLen;
-
-  EVP_CIPHER_CTX_free(cipher);
-  return ok;
+  return ciphertextLen > 0 && gs_crypto_aes_128_ecb(
+      false, key, ciphertext, (size_t)ciphertextLen, plaintext);
 }
 
 int gs_unpair(PSERVER_DATA server) {
@@ -985,7 +1539,136 @@ static int abort_pairing_session(
    * already-removed ID is equally safe and cannot remove an authorized cert. */
   int ret = http_request_with_timeout(
       url, data, HTTP_TIMEOUT_PAIRING_ABORT_SECONDS);
-  if (ret == GS_OK) clear_pairing_pending_files();
+  return ret;
+}
+
+static int finish_pairing_challenge(
+    PSERVER_DATA server, const char pairId[UNIQUEID_CHARS + 1]) {
+  if (server == NULL || server->serverInfo.address == NULL ||
+      server->httpsPort == 0 ||
+      !is_lower_hex_text(pairId, UNIQUEID_CHARS)) {
+    gs_error = "The final Sunshine pairing proof is unavailable";
+    return GS_INVALID;
+  }
+
+  char url[4096];
+  uuid_t uuid;
+  char uuidString[UUID_STRLEN];
+  uuid_generate_random(uuid);
+  uuid_unparse(uuid, uuidString);
+  int written = snprintf(
+      url, sizeof(url),
+      "https://%s:%u/pair?uniqueid=%s&uuid=%s&devicename=VitaMoonlight"
+      "&updateState=1&phrase=pairchallenge",
+      server->serverInfo.address, server->httpsPort, pairId, uuidString);
+  if (written <= 0 || (size_t)written >= sizeof(url)) {
+    gs_error = "The final Sunshine pairing request is too long";
+    return GS_INVALID;
+  }
+
+  int ret = GS_OK;
+  char *paired = NULL;
+  PHTTP_DATA data = http_create_data();
+  if (data == NULL) return GS_OUT_OF_MEMORY;
+  if ((ret = http_request(url, data)) != GS_OK ||
+      (ret = xml_status(data->memory, data->size)) != GS_OK ||
+      (ret = xml_search(data->memory, data->size, "paired", &paired)) !=
+          GS_OK) {
+    goto cleanup;
+  }
+  if (paired == NULL || strcmp(paired, "1") != 0) {
+    gs_error = "Sunshine did not complete secure pairing";
+    ret = GS_FAILED;
+  }
+
+cleanup:
+  free(paired);
+  http_free_data(data);
+  return ret;
+}
+
+static int reconcile_pairing_journal(
+    PSERVER_DATA server, bool *handled, bool *resolvedUnpaired) {
+  if (handled == NULL || resolvedUnpaired == NULL) return GS_INVALID;
+  *handled = false;
+  *resolvedUnpaired = false;
+  if (pairing_journal_state != PAIRING_JOURNAL_VALID ||
+      pairing_journal.stage < PAIRING_STAGE_AUTHORIZING ||
+      pairing_journal.stage > PAIRING_STAGE_LOCAL_COMMITTED) {
+    return GS_OK;
+  }
+  *handled = true;
+
+  /* The journal pin is already active in curl and unique_id already names the
+   * exact attempted identity. This HTTPS query is therefore the authoritative
+   * answer to the ambiguous clientpairingsecret crash boundary. */
+  server->httpsPort = pairing_journal.httpsPort;
+  int ret = load_serverinfo(server, true);
+  if (ret == GS_CLIENT_UNAUTHORIZED) {
+    /* Sunshine's current HTTPS verifier emits XML status 401 when the exact
+     * pinned server did not authorize (or no longer authorizes) this client
+     * certificate. PairStatus=0 is therefore unreachable over HTTPS. Resolve
+     * the ambiguous transaction and let normal discovery offer a fresh PIN. */
+    ret = transition_pairing_journal(
+        PAIRING_STAGE_COMPLETE, pairing_journal.pairId,
+        pairing_journal.serverPin, pairing_journal.httpsPort);
+    if (ret == GS_OK) {
+      *resolvedUnpaired = true;
+      gs_error = NULL;
+    }
+    return ret;
+  }
+  if (ret != GS_OK) {
+    if (ret == GS_IDENTITY_CHANGED) {
+      gs_error = "Sunshine changed identity while an interrupted pairing transaction was pending";
+    } else if (gs_error == NULL) {
+      gs_error = "Could not verify Sunshine's interrupted pairing transaction over pinned HTTPS";
+    }
+    return ret;
+  }
+
+  if (!server->paired) {
+    ret = transition_pairing_journal(
+        PAIRING_STAGE_COMPLETE, pairing_journal.pairId,
+        pairing_journal.serverPin, pairing_journal.httpsPort);
+    if (ret == GS_OK) *resolvedUnpaired = true;
+    return ret;
+  }
+
+  if (pairing_journal.stage < PAIRING_STAGE_AUTHORIZED &&
+      (ret = transition_pairing_journal(
+           PAIRING_STAGE_AUTHORIZED, pairing_journal.pairId,
+           pairing_journal.serverPin, pairing_journal.httpsPort)) != GS_OK) {
+    return ret;
+  }
+
+  /* Commit is intentionally idempotent. If power failed after one local file
+   * was installed, the validated journal and pinned HTTPS result still bind
+   * both values to this exact host/client pair. */
+  if ((ret = http_set_server_pin(pairing_journal.serverPin, true)) != GS_OK ||
+      (ret = persist_unique_id_atomic(
+           unique_id_path, pairing_journal.pairId)) != GS_OK) {
+    return ret;
+  }
+  snprintf(unique_id, sizeof(unique_id), "%s", pairing_journal.pairId);
+
+  if (pairing_journal.stage < PAIRING_STAGE_LOCAL_COMMITTED &&
+      (ret = transition_pairing_journal(
+           PAIRING_STAGE_LOCAL_COMMITTED, pairing_journal.pairId,
+           pairing_journal.serverPin, pairing_journal.httpsPort)) != GS_OK) {
+    return ret;
+  }
+  if ((ret = finish_pairing_challenge(
+           server, pairing_journal.pairId)) != GS_OK) {
+    return ret;
+  }
+  ret = transition_pairing_journal(
+      PAIRING_STAGE_COMPLETE, pairing_journal.pairId,
+      pairing_journal.serverPin, pairing_journal.httpsPort);
+  if (ret == GS_OK) {
+    server->paired = true;
+    server->securePairingRequired = false;
+  }
   return ret;
 }
 
@@ -1006,6 +1689,7 @@ int gs_pair(PSERVER_DATA server, char* pin) {
   char uuid_str[UUID_STRLEN];
   bool ephemeralPinInstalled = false;
   bool pairingSessionOpen = false;
+  bool pairingWasRequired = false;
   unsigned char pairingIdBytes[UNIQUEID_BYTES];
   char pairingUniqueId[UNIQUEID_CHARS + 1];
 
@@ -1013,6 +1697,7 @@ int gs_pair(PSERVER_DATA server, char* pin) {
     gs_error = "Pairing requires a four-digit PIN";
     return GS_INVALID;
   }
+  pairingWasRequired = server->securePairingRequired;
   for (int i = 0; i < 4; ++i) {
     if (!isdigit((unsigned char)pin[i])) {
       gs_error = "Pairing requires a four-digit PIN";
@@ -1021,6 +1706,10 @@ int gs_pair(PSERVER_DATA server, char* pin) {
   }
   if (server->paired) {
     gs_error = "Already paired";
+    return GS_WRONG_STATE;
+  }
+  if (server->currentGame != 0) {
+    gs_error = "Stop the running Sunshine application before pairing this Vita";
     return GS_WRONG_STATE;
   }
   url = malloc(urlSize);
@@ -1034,10 +1723,8 @@ int gs_pair(PSERVER_DATA server, char* pin) {
    * Journal each attempt before opening it, and clear an exact abandoned
    * session before creating another. This covers wrong PINs, timeouts, and an
    * application kill during the held getservercert request. */
-  char abandonedPairingId[UNIQUEID_CHARS + 1];
-  PairingPendingState pendingState =
-      load_pairing_pending_id(abandonedPairingId);
-  if (pendingState == PAIRING_PENDING_INVALID) {
+  PAIRING_JOURNAL_STATE pendingState = load_pairing_journal();
+  if (pendingState == PAIRING_JOURNAL_INVALID) {
     /* The unknown ID may still name a live Sunshine session. Keep the damaged
      * evidence fail-closed so an immediate retry cannot create another
      * session and let the stale one consume its PIN. Forgetting the saved PC
@@ -1046,12 +1733,32 @@ int gs_pair(PSERVER_DATA server, char* pin) {
     ret = GS_IO_ERROR;
     goto cleanup;
   }
-  if (pendingState == PAIRING_PENDING_VALID &&
-      abort_pairing_session(
-          server, abandonedPairingId, url, urlSize, data) != GS_OK) {
-    gs_error = "Could not clear the previous Sunshine pairing attempt. Restart Sunshine, then try again";
-    ret = GS_FAILED;
-    goto cleanup;
+  if (pendingState == PAIRING_JOURNAL_VALID &&
+      pairing_journal.stage != PAIRING_STAGE_COMPLETE) {
+    if (!pairing_journal.legacy &&
+        strcmp(pairing_journal.clientPin, client_identity_pin) != 0) {
+      gs_error = "Pairing recovery data belongs to a different Vita identity; no files were replaced";
+      ret = GS_IO_ERROR;
+      goto cleanup;
+    }
+    if (pairing_journal.stage >= PAIRING_STAGE_AUTHORIZING) {
+      gs_error = "An authorized Sunshine pairing transaction still needs pinned recovery; reopen this PC before pairing again";
+      ret = GS_WRONG_STATE;
+      goto cleanup;
+    }
+    if (abort_pairing_session(
+            server, pairing_journal.pairId, url, urlSize, data) != GS_OK) {
+      gs_error = "Could not clear the previous Sunshine pairing attempt. Restart Sunshine, then try again";
+      ret = GS_FAILED;
+      goto cleanup;
+    }
+    if ((ret = transition_pairing_journal(
+             PAIRING_STAGE_COMPLETE, pairing_journal.pairId,
+             pairing_journal.serverPin[0] == '\0'
+                 ? NULL : pairing_journal.serverPin,
+             pairing_journal.httpsPort)) != GS_OK) {
+      goto cleanup;
+    }
   }
 
   if (secure_random(
@@ -1063,8 +1770,9 @@ int gs_pair(PSERVER_DATA server, char* pin) {
   bytes_to_hex(
       pairingIdBytes, pairingUniqueId, sizeof(pairingIdBytes));
   if (pairing_pending_path[0] == '\0' ||
-      (ret = persist_unique_id_atomic(
-           pairing_pending_path, pairingUniqueId)) != GS_OK) {
+      (ret = transition_pairing_journal(
+           PAIRING_STAGE_OPENED, pairingUniqueId, NULL,
+           server->httpsPort)) != GS_OK) {
     if (pairing_pending_path[0] == '\0') {
       gs_error = "The Sunshine pairing recovery path is unavailable";
       ret = GS_IO_ERROR;
@@ -1123,11 +1831,14 @@ int gs_pair(PSERVER_DATA server, char* pin) {
   unsigned char aes_key[32] = {0};
   memcpy(salt_pin, salt_data, sizeof(salt_data));
   memcpy(salt_pin + sizeof(salt_data), pin, 4);
-  int hash_length = server->serverMajorVersion >= 7 ? 32 : 20;
-  if (server->serverMajorVersion >= 7)
-    SHA256(salt_pin, sizeof(salt_pin), aes_key);
-  else
-    SHA1(salt_pin, sizeof(salt_pin), aes_key);
+  int hash_length = server->serverMajorVersion >= 7
+      ? GS_CRYPTO_SHA256_LENGTH : GS_CRYPTO_SHA1_LENGTH;
+  if (!gs_crypto_hash(
+          hash_length, salt_pin, sizeof(salt_pin), aes_key)) {
+    gs_error = "Could not derive the Sunshine pairing key";
+    ret = GS_FAILED;
+    goto cleanup;
+  }
 
   unsigned char challenge_data[16];
   unsigned char challenge_enc[sizeof(challenge_data)];
@@ -1161,7 +1872,7 @@ int gs_pair(PSERVER_DATA server, char* pin) {
   size_t responseLength = responseHexLength / 2;
   unsigned char challengeResponseEncrypted[64] = {0};
   unsigned char challengeResponse[64] = {0};
-  unsigned char serverResponse[SHA256_DIGEST_LENGTH] = {0};
+  unsigned char serverResponse[GS_CRYPTO_SHA256_LENGTH] = {0};
   if ((responseHexLength & 1) != 0 || responseLength > sizeof(challengeResponse) ||
       responseLength < (size_t)hash_length + 16 || (responseLength & 15) != 0 ||
       !hex_to_bytes(result, challengeResponseEncrypted, responseLength) ||
@@ -1180,8 +1891,8 @@ int gs_pair(PSERVER_DATA server, char* pin) {
 
   const unsigned char *clientCertificateSignature = NULL;
   size_t clientCertificateSignatureLength = 0;
-  if (!certificate_signature_view(
-          cert, &clientCertificateSignature,
+  if (!gs_crypto_identity_certificate_signature(
+          identity, &clientCertificateSignature,
           &clientCertificateSignatureLength)) {
     gs_error = "The Vita pairing certificate has an invalid signature";
     ret = GS_INVALID;
@@ -1204,12 +1915,12 @@ int gs_pair(PSERVER_DATA server, char* pin) {
   unsigned char challengeHash[32] = {0};
   unsigned char challengeHashEncrypted[sizeof(challengeHash)];
   char challengeResponseHex[SIZEOF_AS_HEX_STR(challengeHashEncrypted)];
-  if (server->serverMajorVersion >= 7)
-    SHA256(challengeMaterial, challengeMaterialLength, challengeHash);
-  else
-    SHA1(challengeMaterial, challengeMaterialLength, challengeHash);
+  bool challengeHashValid = gs_crypto_hash(
+      hash_length, challengeMaterial, challengeMaterialLength, challengeHash);
   free(challengeMaterial);
-  if (!encrypt(challengeHash, sizeof(challengeHash), aes_key, challengeHashEncrypted)) {
+  if (!challengeHashValid ||
+      !encrypt(challengeHash, sizeof(challengeHash), aes_key,
+               challengeHashEncrypted)) {
     gs_error = "Could not encrypt the Sunshine challenge response";
     ret = GS_FAILED;
     goto cleanup;
@@ -1260,7 +1971,7 @@ int gs_pair(PSERVER_DATA server, char* pin) {
       &serverCertificateSignatureLength);
   if (ret != GS_OK) goto cleanup;
 
-  unsigned char expectedServerResponse[SHA256_DIGEST_LENGTH] = {0};
+  unsigned char expectedServerResponse[GS_CRYPTO_SHA256_LENGTH] = {0};
   if (!hash_pairing_challenge_binding(
           challenge_data, serverCertificateSignature,
           serverCertificateSignatureLength, pairingSecret, hash_length,
@@ -1280,10 +1991,19 @@ int gs_pair(PSERVER_DATA server, char* pin) {
   // Only the verified PIN binding authorizes this Sunshine identity for TLS.
   if ((ret = http_set_server_pin_from_pem(plaincert, false)) != GS_OK) goto cleanup;
   ephemeralPinInstalled = true;
+  char authenticatedServerPin[GS_CRYPTO_SPKI_PIN_LENGTH + 1];
+  if (http_copy_server_pin(
+          authenticatedServerPin, sizeof(authenticatedServerPin)) != GS_OK ||
+      (ret = transition_pairing_journal(
+           PAIRING_STAGE_AUTHENTICATED, pairingUniqueId,
+           authenticatedServerPin, server->httpsPort)) != GS_OK) {
+    if (ret == GS_OK) ret = GS_IO_ERROR;
+    goto cleanup;
+  }
 
   size_t signatureLength = 0;
   if (sign_it((char *)clientSecret, sizeof(clientSecret), &signature,
-              &signatureLength, privateKey) != GS_OK || signatureLength > 2048) {
+              &signatureLength, identity) != GS_OK || signatureLength > 2048) {
     gs_error = "The Vita could not sign the pairing response";
     ret = GS_FAILED;
     goto cleanup;
@@ -1302,36 +2022,43 @@ int gs_pair(PSERVER_DATA server, char* pin) {
   uuid_generate_random(uuid);
   uuid_unparse(uuid, uuid_str);
   snprintf(url, urlSize, "http://%s:%u/pair?uniqueid=%s&uuid=%s&devicename=VitaMoonlight&updateState=1&clientpairingsecret=%s", server->serverInfo.address, server->httpPort, pairingUniqueId, uuid_str, clientPairingSecretHex);
+  if ((ret = transition_pairing_journal(
+           PAIRING_STAGE_AUTHORIZING, pairingUniqueId,
+           authenticatedServerPin, server->httpsPort)) != GS_OK) {
+    goto cleanup;
+  }
+  /* From this boundary onward, transport failure is ambiguous: Sunshine may
+   * have accepted the proof even if the response never reached the Vita.
+   * Never send the pre-authorization abort after this point. */
+  pairingSessionOpen = false;
   if ((ret = http_request(url, data)) != GS_OK) goto cleanup;
   /* Sunshine removes the pending phase after processing clientpairingsecret,
    * whether it accepts the proof or rejects it. */
-  pairingSessionOpen = false;
-  clear_pairing_pending_files();
   free(result);
   result = NULL;
   if ((ret = xml_status(data->memory, data->size)) != GS_OK) goto cleanup;
   if ((ret = xml_search(data->memory, data->size, "paired", &result)) != GS_OK) goto cleanup;
   if (strcmp(result, "1") != 0) {
+    (void)transition_pairing_journal(
+        PAIRING_STAGE_COMPLETE, pairingUniqueId, authenticatedServerPin,
+        server->httpsPort);
     gs_error = "Sunshine rejected the Vita pairing proof";
     ret = GS_FAILED;
     goto cleanup;
   }
-
-  uuid_generate_random(uuid);
-  uuid_unparse(uuid, uuid_str);
-  snprintf(url, urlSize, "https://%s:%u/pair?uniqueid=%s&uuid=%s&devicename=VitaMoonlight&updateState=1&phrase=pairchallenge", server->serverInfo.address, server->httpsPort, pairingUniqueId, uuid_str);
-  if ((ret = http_request(url, data)) != GS_OK) goto cleanup;
-  free(result);
-  result = NULL;
-  if ((ret = xml_status(data->memory, data->size)) != GS_OK) goto cleanup;
-  if ((ret = xml_search(data->memory, data->size, "paired", &result)) != GS_OK) goto cleanup;
-  if (strcmp(result, "1") != 0) {
-    gs_error = "Sunshine did not complete secure pairing";
-    ret = GS_FAILED;
+  if ((ret = transition_pairing_journal(
+           PAIRING_STAGE_AUTHORIZED, pairingUniqueId,
+           authenticatedServerPin, server->httpsPort)) != GS_OK) {
     goto cleanup;
   }
 
-  if ((ret = http_set_server_pin_from_pem(plaincert, true)) != GS_OK) goto cleanup;
+  /* Sunshine has now authorized this exact unique ID and certificate. Commit
+   * the already PIN-authenticated TLS pin and ID before the final HTTPS probe.
+   * If that probe is interrupted, the saved unpaired entry can reconnect and
+   * reconcile the host-authorized state instead of creating an orphan pair. */
+  if ((ret = http_set_server_pin(authenticatedServerPin, true)) != GS_OK) {
+    goto cleanup;
+  }
   if (unique_id_path[0] == '\0') {
     gs_error = "The Vita pairing identity path is unavailable";
     ret = GS_IO_ERROR;
@@ -1342,6 +2069,16 @@ int gs_pair(PSERVER_DATA server, char* pin) {
     goto cleanup;
   }
   memcpy(unique_id, pairingUniqueId, sizeof(unique_id));
+  if ((ret = transition_pairing_journal(
+           PAIRING_STAGE_LOCAL_COMMITTED, pairingUniqueId,
+           authenticatedServerPin, server->httpsPort)) != GS_OK ||
+      (ret = finish_pairing_challenge(server, pairingUniqueId)) != GS_OK ||
+      (ret = transition_pairing_journal(
+           PAIRING_STAGE_COMPLETE, pairingUniqueId,
+           authenticatedServerPin, server->httpsPort)) != GS_OK) {
+    goto cleanup;
+  }
+
   server->paired = true;
   server->securePairingRequired = false;
 
@@ -1356,20 +2093,27 @@ cleanup:
   if (ret != GS_OK) {
     const char *pairingError = gs_error;
     if (pairingSessionOpen) {
-      (void)abort_pairing_session(
-          server, pairingUniqueId, url, urlSize, data);
+      if (abort_pairing_session(
+              server, pairingUniqueId, url, urlSize, data) == GS_OK) {
+        (void)transition_pairing_journal(
+            PAIRING_STAGE_COMPLETE, pairingUniqueId,
+            pairing_journal.serverPin[0] == '\0'
+                ? NULL : pairing_journal.serverPin,
+            pairing_journal.httpsPort);
+      }
     }
     if (ephemeralPinInstalled) http_reload_server_pin();
     gs_error = pairingError;
     server->paired = false;
-    server->securePairingRequired = !http_has_server_pin();
+    server->securePairingRequired =
+        pairingWasRequired || !http_has_server_pin();
   }
   free(result);
   free(url);
   free(plaincert);
   free(pairingSecret);
   free(serverCertificateSignature);
-  if (signature != NULL) OPENSSL_free(signature);
+  free(signature);
   free(clientPairingSecret);
   free(clientPairingSecretHex);
   http_free_data(data);
@@ -1563,6 +2307,14 @@ int gs_init(PSERVER_DATA server, char *address, unsigned short httpPort, const c
   if (server == NULL || address == NULL || keyDirectory == NULL) {
     return GS_INVALID;
   }
+  gs_error = NULL;
+  /* The Vita executable initializes this at process startup. Keep the
+   * standalone gamestream library safe for callers that do not own that
+   * lifecycle; initialization is idempotent. */
+  if (gs_crypto_init() != 0) {
+    gs_error = "The secure pairing runtime could not be initialized";
+    return GS_FAILED;
+  }
 
   free_server_status_data(server);
   if (mkdirtree(keyDirectory) != 0) {
@@ -1573,13 +2325,43 @@ int gs_init(PSERVER_DATA server, char *address, unsigned short httpPort, const c
   if (ret != GS_OK)
     return ret;
 
-  ret = http_init(keyDirectory, log_level);
+  if (!build_unique_id_path(
+          unique_id_path, sizeof(unique_id_path), keyDirectory, NULL) ||
+      !build_pairing_pending_path(
+          pairing_pending_path, sizeof(pairing_pending_path), keyDirectory,
+          NULL)) {
+    cleanup_client_credentials();
+    gs_error = "The Vita pairing recovery path is too long";
+    return GS_INVALID;
+  }
+  PAIRING_JOURNAL_STATE journalState = load_pairing_journal();
+  if (journalState == PAIRING_JOURNAL_INVALID) {
+    cleanup_client_credentials();
+    gs_error = "Pairing recovery data is damaged; no identity files were replaced";
+    return GS_IO_ERROR;
+  }
+  if (journalState == PAIRING_JOURNAL_VALID &&
+      !pairing_journal.legacy &&
+      strcmp(pairing_journal.clientPin, client_identity_pin) != 0) {
+    cleanup_client_credentials();
+    gs_error = "Pairing recovery data belongs to a different Vita identity; no files were replaced";
+    return GS_IO_ERROR;
+  }
+
+  bool recoveryActive = journalState == PAIRING_JOURNAL_VALID &&
+      pairing_journal.stage >= PAIRING_STAGE_AUTHORIZING &&
+      pairing_journal.stage <= PAIRING_STAGE_LOCAL_COMMITTED;
+  ret = http_init_with_recovery(
+      keyDirectory, log_level, active_certificate_path, active_key_path,
+      recoveryActive ? pairing_journal.serverPin : NULL);
   if (ret != GS_OK) {
     cleanup_client_credentials();
     return ret;
   }
 
-  ret = load_unique_id(keyDirectory, http_has_server_pin());
+  ret = load_unique_id(
+      keyDirectory, http_has_server_pin(),
+      recoveryActive ? pairing_journal.pairId : NULL);
   if (ret != GS_OK) {
     http_cleanup();
     cleanup_client_credentials();
@@ -1592,6 +2374,42 @@ int gs_init(PSERVER_DATA server, char *address, unsigned short httpPort, const c
   server->securePairingRequired = false;
   server->httpPort = httpPort ? httpPort : 47989;
   server->httpsPort = 0; /* Populated by load_server_status() */
+
+  bool recoveryHandled = false;
+  bool recoveryResolvedUnpaired = false;
+  if (recoveryActive) {
+    ret = reconcile_pairing_journal(
+        server, &recoveryHandled, &recoveryResolvedUnpaired);
+    if (ret != GS_OK) {
+      free_server_status_data(server);
+      http_cleanup();
+      cleanup_client_credentials();
+      return ret;
+    }
+  }
+
+  if (recoveryHandled && recoveryResolvedUnpaired) {
+    /* The pinned host proved that authorization never completed. Drop the
+     * journal-only pin and return to the ordinary committed-state loader. */
+    free_server_status_data(server);
+    http_cleanup();
+    ret = http_init_with_recovery(
+        keyDirectory, log_level, active_certificate_path, active_key_path,
+        NULL);
+    if (ret != GS_OK ||
+        (ret = load_unique_id(
+             keyDirectory, http_has_server_pin(), NULL)) != GS_OK) {
+      http_cleanup();
+      cleanup_client_credentials();
+      return ret;
+    }
+    LiInitializeServerInformation(&server->serverInfo);
+    server->serverInfo.address = address;
+    server->allowUnsupportedVersion = allowUnsupportedVersion;
+    server->securePairingRequired = false;
+    server->httpPort = httpPort ? httpPort : 47989;
+    server->httpsPort = 0;
+  }
   ret = load_server_status(server);
   if (ret != GS_OK) {
     free_server_status_data(server);
@@ -1611,6 +2429,8 @@ void gs_cleanup(PSERVER_DATA server) {
   cleanup_client_credentials();
   unique_id_path[0] = '\0';
   pairing_pending_path[0] = '\0';
+  memset(&pairing_journal, 0, sizeof(pairing_journal));
+  pairing_journal_state = PAIRING_JOURNAL_ABSENT;
 }
 
 int gs_refresh(PSERVER_DATA server) {

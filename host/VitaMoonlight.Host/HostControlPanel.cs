@@ -230,7 +230,7 @@ internal sealed class HostControlPanel : Form
             "This profile matches the Vita screen and is selected for dependable Wi-Fi performance. Tune quality later from the Vita settings menu."));
         AddPageControl(page, CreateInfoCard(
             "If a game or display gets stuck",
-            "On the Vita, hold START and then press L + R within one second to open the stream menu without sending the shortcut to the PC. Close the Windows game first; if video does not recover, choose Recover display + Sunshine. Double-press PS remains the forced return to Vita LiveArea."));
+            "On the Vita, hold START and then press L + R within one second to open the stream menu without sending the shortcut to the PC. Choose Open Windows Task Manager to close a stuck game. Use Recover host display only when the captured display itself is unusable. Double-press PS remains the forced return to Vita LiveArea."));
         return page;
     }
 
@@ -377,7 +377,7 @@ internal sealed class HostControlPanel : Form
         AddPageControl(page, CreateActivityPanel());
         AddPageControl(page, CreateInfoCard(
             "Black-screen recovery",
-            "From the Vita overlay, open Windows Task Manager to close a stuck game, or choose End Sunshine app to end the current host session safely. If the captured display remains unusable, choose Recover display + Sunshine; the stream will disconnect while Windows activates the physical monitor, reloads VDD, and restarts Sunshine. Sign out and back in only if the rescue agent cannot run."));
+            "From the Vita overlay, choose Open Windows Task Manager to close a stuck game, or choose End Sunshine app to end the current host session safely. If the captured display remains unusable, choose Recover host display; the stream will disconnect while Windows activates the physical monitor, reloads VDD, and restarts Sunshine. Sign out and back in only if the rescue agent cannot run."));
         return page;
     }
 

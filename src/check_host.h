@@ -26,14 +26,18 @@ struct host_status check_host_status(const device_info_t *info);
 #include <psp2/kernel/threadmgr.h>
 #define MAX_HOSTS 16
 
-// Array global de resultados de estado de hosts
-extern struct host_status g_host_status[MAX_HOSTS];
-extern volatile int g_host_scan_thread_status;
-extern volatile int g_host_status_changed;
-
 void start_host_scan_thread(void);
 void stop_host_scan_thread(void);
 bool find_host_ip_mdns(const char *hostname, char *out_ip, size_t out_len);
+
+/* The scanner runs concurrently with the UI. Always consume one locked,
+ * immutable snapshot instead of reading its status and IP buffers directly. */
+bool host_scan_get_snapshot(
+    int index, struct host_status *status, char *pending_ip,
+    size_t pending_ip_size, bool *has_pending_ip);
+void host_scan_clear_pending_ip_update(int index);
+bool host_scan_take_status_changed(void);
+int host_scan_state(void);
 
 #ifdef __cplusplus
 }

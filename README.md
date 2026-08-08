@@ -103,6 +103,13 @@ Sunshine credentials and unrelated Sunshine applications should be preserved.
 If Windows requests a restart, restart and run **Set up or repair this PC**
 again.
 
+If an older build left Windows showing only an 800x600 Vita virtual display,
+leave the physical monitor connected and run the current installer directly.
+Before replacing files, setup rescans displays and may restart only the exact
+managed Vita display device. It continues only after Windows proves that a
+physical-only desktop is visible; otherwise it stops with a recoverable error
+and leaves the old files and safeguards in place.
+
 An upgrade or same-version reinstall preserves an intentional paused state;
 it does not silently turn Vita host features back on. Open the updated control
 panel and choose **Enable Vita host features** when you are ready to use them.
@@ -175,5 +182,6 @@ not open, create, or write a support-log file.
 Developers can use [Building and forking](docs/BUILDING.md) and
 [Releasing a fork](docs/RELEASING.md). Supported Windows versions and known
 hardware limits are listed in the [compatibility guide](host/COMPATIBILITY.md).
-Third-party licenses and versions are listed in
-[third-party notices](host/THIRD_PARTY_NOTICES.md).
+Third-party licenses and versions are listed in the
+[Vita client notices](THIRD_PARTY_NOTICES.txt) and the
+[Windows host notices](host/THIRD_PARTY_NOTICES.md).

@@ -700,7 +700,7 @@ static int action_picker_loop(int id,
     unsigned long value;
 
     if (ime_dialog_number(
-            text, "Enter keyboard key code:", "") != 0) {
+            text, sizeof(text), "Enter keyboard key code:", "") != 0) {
       return 0;
     }
     value = strtoul(text, &end, 10);

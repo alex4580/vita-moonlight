@@ -35,12 +35,23 @@ an Authenticode-signed release. It has these independent trust layers:
 2. The bundled display driver and third-party installers retain their vendor
    signatures and are downloaded at pinned SHA-256 hashes.
 3. GitHub generates a signed build-provenance attestation for the VPK, setup
-   EXE, portable ZIP, dependency/signing manifests, and checksum manifest.
-   This covers artifacts that do not carry Windows Authenticode signatures.
-4. The VPK dependency manifest records the SHA-256 of the committed
-   `tools/vitasdk-packages.lock.json`. Release staging compares every VitaSDK
-   asset ID, byte count, update timestamp, URL, and content digest in that
-   manifest with the lock before publishing anything.
+   EXE, portable ZIP, complete Vita source archive, dependency/signing
+   manifests, and checksum manifest. This covers artifacts that do not carry
+   Windows Authenticode signatures.
+4. The VPK workflow starts from a pinned, hash-checked VitaSDK and rebuilds
+   every linked client dependency from official source archives or exact Git
+   commits with the GPL-3.0-or-later project recipe and patches. The single
+   `vitasdk-dependencies.json` manifest is bound to the SHA-256 and schema of
+   `tools/vita-corresponding-source.lock.json`. Release staging compares its
+   complete dependency recipe with that lock and requires a nonempty source
+   record plus valid hashes and sizes for every required installed output.
+5. The tag workflow must build and attest a `*-Vita-Source.tar.gz` asset. It
+   exports the exact tag and every submodule, verifies all upstream archives,
+   and includes the pinned newlib, pthread, GCC runtime, Vita headers, and Vita
+   toolchain sources recorded by the SDK. `--require-complete` fails before a
+   draft is created if any source input, project recipe, patch, runtime source,
+   submodule, or redistribution status is incomplete. Do not publish the VPK
+   without this matching archive or substitute GitHub's generic source ZIP.
 
 The Vita VPK is a homebrew package, not a Windows PE file, so Authenticode does
 not apply to it. Its release identity is established by the release tag,
@@ -118,10 +129,10 @@ certificate, password, token, or generated signing wrapper.
    **Verified** by GitHub.
 
 7. The tag workflow rebuilds both products, verifies the selected signing
-   state, creates `SHA256SUMS`, attests every release asset, and publishes the
-   release. Preflight rejects lightweight tags, every other unsigned tag,
-   incomplete signing configuration, and any existing draft or release for
-   the same tag.
+   state, builds the complete Vita source archive, creates `SHA256SUMS`, attests
+   every release asset, and creates a draft release. Preflight rejects
+   lightweight tags, every other unsigned tag, incomplete signing or source
+   configuration, and any existing draft or release for the same tag.
 
 If final draft verification fails, inspect the retained draft and workflow
 logs. After correcting the cause, delete only that draft with

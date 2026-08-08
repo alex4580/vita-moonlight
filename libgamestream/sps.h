@@ -32,5 +32,6 @@
 #define GS_SPS_MAX_REWRITTEN_SIZE (4U + 128U)
 
 void gs_sps_init(int width, int height);
+void gs_sps_stop(void);
 bool gs_sps_fix(PLENTRY sps, int flags, uint8_t* out_buf,
                 size_t out_capacity, uint32_t* out_offset);

@@ -431,6 +431,78 @@ internal sealed class DisplayWizardAdapter
         }
     }
 
+    /// <summary>
+    /// Requests a normal Windows device rescan without disabling any display.
+    /// This is the first recovery step for an older installation which left
+    /// only the managed VDD in QueryDisplayConfig.
+    /// </summary>
+    internal static void RescanDisplayDevicesForRecovery()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            throw new PlatformNotSupportedException(
+                "Display-device recovery is available only on Windows.");
+        }
+        var systemDirectory = Environment.GetFolderPath(
+            Environment.SpecialFolder.System);
+        EnsureProcessSucceeded(RunProcess(
+            Path.Combine(systemDirectory, "pnputil.exe"),
+            systemDirectory,
+            45000,
+            "/scan-devices"));
+    }
+
+    /// <summary>
+    /// Restarts one and only one present, enabled MTT VDD instance. The caller
+    /// must separately prove that the active topology is the exact managed
+    /// VDD-only recovery case and must retain the display transaction through
+    /// the final physical-only proof.
+    /// </summary>
+    internal static string RestartExactManagedVddForRecovery(
+        DisplayTransactionLease transaction)
+    {
+        transaction.RequireActive();
+        var instanceId = SelectExactManagedVddRestartTarget(
+            InspectManagedDriverDevices());
+        var systemDirectory = Environment.GetFolderPath(
+            Environment.SpecialFolder.System);
+        EnsurePnPUtilSucceeded(RunProcess(
+            Path.Combine(systemDirectory, "pnputil.exe"),
+            systemDirectory,
+            45000,
+            "/restart-device",
+            instanceId));
+        return instanceId;
+    }
+
+    internal static string SelectExactManagedVddRestartTarget(
+        IEnumerable<ManagedVddDeviceStatus> devices)
+    {
+        var candidates = devices
+            .Where(device => device.Present && device.Enabled)
+            .Select(device => device.InstanceId)
+            .Where(instanceId => !string.IsNullOrWhiteSpace(instanceId))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (candidates.Length != 1)
+        {
+            throw new InvalidOperationException(
+                "Vita Moonlight will not restart a virtual display during recovery because Windows did not expose exactly one present, enabled managed MTT device. " +
+                $"Observed managed candidates: {candidates.Length}. No unrelated or ambiguous display device was changed.");
+        }
+        return candidates[0];
+    }
+
+    internal static bool HasSingleManagedVddRestartTargetForTest(
+        IEnumerable<ManagedVddDeviceStatus> devices) =>
+        devices
+            .Where(device => device.Present && device.Enabled)
+            .Select(device => device.InstanceId)
+            .Where(instanceId => !string.IsNullOrWhiteSpace(instanceId))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Take(2)
+            .Count() == 1;
+
     internal static IReadOnlyList<ManagedVddDeviceStatus>
         InspectManagedDriverDevices()
     {

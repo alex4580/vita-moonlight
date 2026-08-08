@@ -116,7 +116,17 @@ jobs:
       - name: Checkout release metadata
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
+          submodules: recursive
           persist-credentials: false
+
+      - name: Build complete Vita Corresponding Source archive
+        run: >-
+          python3 tools/build-vita-source-bundle.py
+          --lock tools/vita-corresponding-source.lock.json
+          --output-dir release-source
+          --cache-dir "$RUNNER_TEMP/vita-source-cache"
+          --require-complete
 
       - name: Download Vita release artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -137,6 +147,7 @@ jobs:
           mkdir release-dist
           mapfile -d '' vpk_assets < <(find release-assets -type f -name '*.vpk' -print0)
           mapfile -d '' vita_manifest_assets < <(find release-assets -type f -name 'vitasdk-dependencies.json' -print0)
+          mapfile -d '' vita_source_assets < <(find release-source -maxdepth 1 -type f -name '*-Vita-Source.tar.gz' -print0)
           mapfile -d '' windows_signing_manifest_assets < <(find release-assets -type f -name 'windows-signing-status.json' -print0)
           mapfile -d '' installer_assets < <(find release-assets -type f -name '*.exe' -print0)
           mapfile -d '' portable_assets < <(find release-assets -type f -name '*.zip' -print0)
@@ -145,7 +156,11 @@ jobs:
             exit 1
           fi
           if (( ${#vita_manifest_assets[@]} != 1 )); then
-            echo "Expected exactly one VitaSDK dependency manifest; found ${#vita_manifest_assets[@]}." >&2
+            echo "Expected exactly one Vita source-dependency manifest; found ${#vita_manifest_assets[@]}." >&2
+            exit 1
+          fi
+          if (( ${#vita_source_assets[@]} != 1 )); then
+            echo "Expected exactly one complete Vita source archive; found ${#vita_source_assets[@]}." >&2
             exit 1
           fi
           if (( ${#windows_signing_manifest_assets[@]} != 1 )); then
@@ -162,35 +177,53 @@ jobs:
           fi
 
           vita_manifest="${vita_manifest_assets[0]}"
-          vita_lock="tools/vitasdk-packages.lock.json"
+          vita_lock="tools/vita-corresponding-source.lock.json"
           vita_lock_sha256="$(sha256sum "$vita_lock" | cut -d ' ' -f 1)"
           manifest_schema="$(jq --raw-output '.schema // empty' "$vita_manifest")"
           manifest_lock_schema="$(jq --raw-output '.source_lock.schema // empty' "$vita_manifest")"
           manifest_lock_sha256="$(jq --raw-output '.source_lock.sha256 // empty' "$vita_manifest")"
+          manifest_lock_path="$(jq --raw-output '.source_lock.path // empty' "$vita_manifest")"
           manifest_locked_at="$(jq --raw-output '.source_lock.locked_at_utc // empty' "$vita_manifest")"
           locked_schema="$(jq --raw-output '.schema // empty' "$vita_lock")"
           locked_at="$(jq --raw-output '.locked_at_utc // empty' "$vita_lock")"
-          if [[ "$manifest_schema" != "vita-moonlight/vitasdk-dependency-manifest/v2" ||
-                "$manifest_lock_schema" != "vita-moonlight/vitasdk-package-lock/v1" ||
+          if [[ "$manifest_schema" != "vita-moonlight/vita-source-dependency-manifest/v1" ||
+                "$manifest_lock_schema" != "vita-moonlight/vita-corresponding-source-lock/v1" ||
                 "$locked_schema" != "$manifest_lock_schema" ||
                 "$manifest_lock_sha256" != "$vita_lock_sha256" ||
+                "$manifest_lock_path" != "$vita_lock" ||
                 "$manifest_locked_at" != "$locked_at" ]]; then
-            echo "VitaSDK dependency manifest is not bound to the committed package lock." >&2
+            echo "Vita dependency manifest is not bound to the committed source lock." >&2
             exit 1
           fi
-          jq --sort-keys '{repository, release, assets}' "$vita_manifest" \
-            > "$RUNNER_TEMP/vitasdk-manifest-core.json"
-          jq --sort-keys '{repository, release, assets}' "$vita_lock" \
-            > "$RUNNER_TEMP/vitasdk-lock-core.json"
+          jq --sort-keys '.dependency_source_build' "$vita_manifest" \
+            > "$RUNNER_TEMP/vita-dependency-manifest-recipe.json"
+          jq --sort-keys '.dependency_source_build' "$vita_lock" \
+            > "$RUNNER_TEMP/vita-dependency-lock-recipe.json"
           if ! cmp --silent \
-            "$RUNNER_TEMP/vitasdk-manifest-core.json" \
-            "$RUNNER_TEMP/vitasdk-lock-core.json"; then
-            echo "VitaSDK dependency manifest content differs from the committed package lock." >&2
+            "$RUNNER_TEMP/vita-dependency-manifest-recipe.json" \
+            "$RUNNER_TEMP/vita-dependency-lock-recipe.json"; then
+            echo "Vita dependency manifest recipe differs from the committed source lock." >&2
+            exit 1
+          fi
+          if ! jq --exit-status \
+            --argjson required_paths "$(jq '.dependency_source_build.required_outputs' "$vita_lock")" '
+              (.sources | type == "array" and length > 0) and
+              (.build_verification.status == "complete") and
+              (.build_verification.completed_at_utc | type == "string" and length > 0) and
+              (.build_verification.outputs | type == "array" and length > 0) and
+              ([.build_verification.outputs[].path] == $required_paths) and
+              (all(.build_verification.outputs[];
+                (.path | type == "string" and length > 0) and
+                (.sha256 | type == "string" and test("^[0-9a-f]{64}$")) and
+                (.size | type == "number" and . > 0 and floor == .)))
+            ' "$vita_manifest" > /dev/null; then
+            echo "Vita dependency manifest does not prove a complete source build." >&2
             exit 1
           fi
 
           cp -- "${vpk_assets[0]}" release-dist/
           cp -- "$vita_manifest" release-dist/
+          cp -- "${vita_source_assets[0]}" release-dist/
           cp -- "${windows_signing_manifest_assets[0]}" release-dist/
           cp -- "${installer_assets[0]}" release-dist/
           cp -- "${portable_assets[0]}" release-dist/
@@ -309,12 +342,13 @@ jobs:
               *.vpk \
               *.exe \
               *.zip \
+              *-Vita-Source.tar.gz \
               vitasdk-dependencies.json \
               windows-signing-status.json > SHA256SUMS
             sha256sum --check SHA256SUMS
           )
-          if [[ "$(find release-dist -maxdepth 1 -type f | wc -l)" != "6" ]]; then
-            echo "Release staging must contain exactly six assets." >&2
+          if [[ "$(find release-dist -maxdepth 1 -type f | wc -l)" != "7" ]]; then
+            echo "Release staging must contain exactly seven assets." >&2
             find release-dist -maxdepth 1 -type f -printf '%f\n' >&2
             exit 1
           fi
@@ -417,12 +451,12 @@ jobs:
             jq --raw-output '.assets[].name' "$release_json" |
               LC_ALL=C sort
           )
-          if (( ${#expected_assets[@]} != 6 ||
-                ${#published_assets[@]} != 6 )) ||
+          if (( ${#expected_assets[@]} != 7 ||
+                ${#published_assets[@]} != 7 )) ||
              ! diff --unified \
                <(printf '%s\n' "${expected_assets[@]}") \
                <(printf '%s\n' "${published_assets[@]}"); then
-            echo "Draft release does not contain the exact six staged assets." >&2
+            echo "Draft release does not contain the exact seven staged assets." >&2
             exit 1
           fi
 

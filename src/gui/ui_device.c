@@ -12,7 +12,6 @@
 #include "debug.h"
 #include "udp_sniffer_vita.h"
 
-#include <assert.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -75,26 +74,6 @@ void ipv4_address_to_string(const struct sockaddr_in *addr, char *ip, const size
   inet_ntop(AF_INET, &addr->sin_addr.s_addr, ip, len);
 }
 
-// part of publib. BSD license
-// https://github.com/ajkaijanaho/publib/blob/master/strutil/strrstr.c
-char* strrstr(const char *str, const char *pat) {
-  size_t len, patlen;
-  const char *p;
-
-  assert(str != NULL);
-  assert(pat != NULL);
-
-  len = strlen(str);
-  patlen = strlen(pat);
-
-  if (patlen > len)
-    return NULL;
-  for (p = str + (len - patlen); p > str; --p)
-    if (*p == *pat && strncmp(p, pat, patlen) == 0)
-      return (char *) p;
-  return NULL;
-}
-
 static void moonlight_found_callback(int idx, const char* host, const char* pcname, const char* ip, int port) {
     (void)idx;
     (void)host;
@@ -107,7 +86,7 @@ static void moonlight_found_callback(int idx, const char* host, const char* pcna
     int count = discovered_device_count();
     // Verificar si ya existe un dispositivo con el mismo nombre y misma IP
     for (int i = 0; i < count; i++) {
-        if (strncmp(devices[i].name, pcname, sizeof(devices[i].name)) == 0 &&
+        if (device_name_equal(devices[i].name, pcname) &&
             strncmp(devices[i].internal, ip, sizeof(devices[i].internal)) == 0) {
             vita_debug_log("[mDNS] Dispositivo duplicado ignorado: %s (%s)\n", pcname, ip);
             return;

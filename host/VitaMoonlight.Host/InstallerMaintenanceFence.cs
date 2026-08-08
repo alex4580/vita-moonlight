@@ -96,7 +96,8 @@ internal static class InstallerMaintenanceFence
             // then inspect any records in the newly protected container.
             UninstallManager
                 .RecoverPhysicalAndDiscardPendingTransactionForInstallerMaintenanceBootstrap(
-                    ownerProcessId);
+                    ownerProcessId,
+                    ResolveManagedVddBootstrapPermission(existing: null));
             MachineStateSecurity.Secure();
             existing = LoadForBegin();
             if (CanReuseLiveOwner(
@@ -117,7 +118,8 @@ internal static class InstallerMaintenanceFence
             // uninstall transition between the proof and fence publication.
             UninstallManager
                 .RecoverPhysicalAndDiscardPendingTransactionForInstallerMaintenanceBootstrap(
-                    ownerProcessId);
+                    ownerProcessId,
+                    ResolveManagedVddBootstrapPermission(existing));
             MachineStateSecurity.Secure();
         }
 
@@ -527,6 +529,32 @@ internal static class InstallerMaintenanceFence
             backendWasEnabled,
             backendWasEnabled);
     }
+
+    private static bool ResolveManagedVddBootstrapPermission(
+        InstallerMaintenanceState? existing)
+    {
+        if (existing is not null)
+        {
+            return NormalizeSnapshotForTakeover(existing).BackendWasEnabled;
+        }
+
+        var preference = BackendLifecycleManager.ReadPreference();
+        if (preference.State == BackendPreferenceState.Error)
+        {
+            throw new InvalidOperationException(
+                "Installer maintenance cannot decide whether restarting the exact managed Vita VDD is permitted because the protected backend preference is unavailable. " +
+                (preference.Error ?? "Unknown backend preference error."));
+        }
+        return ManagedVddBootstrapAllowedForTest(
+            preference.State,
+            existingBackendWasEnabled: null);
+    }
+
+    internal static bool ManagedVddBootstrapAllowedForTest(
+        BackendPreferenceState preference,
+        bool? existingBackendWasEnabled) =>
+        existingBackendWasEnabled ??
+        preference == BackendPreferenceState.Enabled;
 
     private static void VerifySafeToEnd(InstallerMaintenanceState state)
     {
