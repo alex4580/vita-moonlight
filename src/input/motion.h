@@ -10,8 +10,6 @@ typedef struct VitaMotionStatus {
   bool accel_requested;
   uint16_t gyro_report_rate;
   uint16_t accel_report_rate;
-  uint32_t gyro_events_sent;
-  uint32_t accel_events_sent;
   int last_sensor_error;
 } VitaMotionStatus;
 

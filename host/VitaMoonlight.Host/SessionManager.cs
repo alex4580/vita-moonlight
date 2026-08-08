@@ -689,7 +689,7 @@ internal sealed class SessionManager
     /// </summary>
     internal SessionStartResult PrimeNativeModeForDriverMaintenanceOnly(
         bool installDriver = false,
-        bool allowExistingDeviceAdoption = false)
+        string? expectedExistingDeviceInstanceId = null)
     {
         InstallationTrust.RequireInstalledPayload(
             "Verifying virtual-display mode advertisement");
@@ -703,13 +703,13 @@ internal sealed class SessionManager
         return PrimeNativeModeForDriverMaintenanceOnlyLocked(
             transaction,
             installDriver,
-            allowExistingDeviceAdoption);
+            expectedExistingDeviceInstanceId);
     }
 
     internal SessionStartResult PrimeNativeModeForDriverMaintenanceOnlyLocked(
         DisplayTransactionLease transaction,
         bool installDriver = false,
-        bool allowExistingDeviceAdoption = false)
+        string? expectedExistingDeviceInstanceId = null)
     {
         transaction.RequireActive();
         InstallationTrust.RequireInstalledPayload(
@@ -744,7 +744,7 @@ internal sealed class SessionManager
         {
             installPlan = ManagedVddOwnershipJournal.PrepareInstallLocked(
                 transaction,
-                allowExistingDeviceAdoption);
+                expectedExistingDeviceInstanceId);
         }
         if (!installDriver ||
             installPlan?.Action ==
@@ -765,7 +765,7 @@ internal sealed class SessionManager
             {
                 wizard.InstallDriver(
                     transaction,
-                    allowExistingDeviceAdoption);
+                    expectedExistingDeviceInstanceId);
             }
             else
             {

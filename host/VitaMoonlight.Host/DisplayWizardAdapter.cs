@@ -108,7 +108,7 @@ internal sealed class DisplayWizardAdapter
 
     internal void InstallDriver(
         DisplayTransactionLease transaction,
-        bool allowExistingDeviceAdoption = false)
+        string? expectedExistingDeviceInstanceId = null)
     {
         transaction.RequireActive();
         RequireProtectedBundle();
@@ -120,7 +120,7 @@ internal sealed class DisplayWizardAdapter
         // or publishes a durable creation intent before invoking nefconw.
         var ownership = ManagedVddOwnershipJournal.PrepareInstallLocked(
             transaction,
-            allowExistingDeviceAdoption);
+            expectedExistingDeviceInstanceId);
         PrepareDriverConfigurationDirectoryForInstall(transaction);
         EnsureDriverConfiguration();
         DriverNativeModeVerification.Invalidate();
@@ -167,6 +167,20 @@ internal sealed class DisplayWizardAdapter
     internal bool UninstallDriver(DisplayTransactionLease transaction)
     {
         transaction.RequireActive();
+        if (!File.Exists(ManagedVddOwnershipJournal.JournalFile))
+        {
+            var unownedTopology = new DisplayTopologyService();
+            if (!unownedTopology.TryCaptureExactPhysicalOnlySnapshot(
+                    out var physicalOnly) ||
+                physicalOnly is null)
+            {
+                throw new InvalidOperationException(
+                    "Vita Moonlight has no exact ownership journal for the existing virtual display, and Windows is not already in a complete physical-only layout. No unowned device or shared driver package was changed.");
+            }
+            Console.WriteLine(
+                "No exact Vita-managed virtual-display ownership exists. The unproven device and shared driver package were left unchanged.");
+            return false;
+        }
         RequireProtectedBundle();
         // Resolve exact authority before changing either PnP or topology.
         // Uninstall never deletes the shared MttVDD package or its fixed

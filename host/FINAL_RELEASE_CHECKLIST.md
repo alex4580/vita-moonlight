@@ -195,6 +195,13 @@ release notes.
       is accepted only for enable-device, native 960x544 is still verified, and
       any genuine failure is shown with the host error rather than only an exit
       code.
+- [ ] With exactly one unjournaled `ROOT\MttVDD` present, run clean install,
+      same-version repair, and older-version upgrade. Protected maintenance
+      must leave the device unchanged, setup must ask a separate adoption
+      question before copying files, **No** must preserve it, and **Yes** must
+      record its exact enabled baseline. Silent setup must fail closed unless
+      `/ADOPTEXISTINGVDD` is supplied. More than one present candidate must
+      always fail without adopting or changing any device.
 - [ ] Upgrade over 0.14.2 or 0.14.3 with the existing `ROOT\MttVDD` device and
       an unpinned `C:\VirtualDisplayDriver` containing a marker. Setup renames
       that entry by no-follow handle, never imports its contents, creates a
@@ -272,9 +279,10 @@ release notes.
       the authenticated GameStream quit-app operation.
 - [ ] Uninstall removes both scheduled tasks and the background agent and does
       not leave the physical display disabled. It also removes the authenticated
-      boundary listener/firewall ownership and leaves a retained managed VDD
-      PnP-disabled. Default and silent uninstall keep shared Sunshine,
-      ViGEmBus, and VDD installations.
+      boundary listener/firewall ownership. It removes an exact app-created VDD
+      node, restores an exact adopted node's recorded enabled baseline, and
+      leaves an unproven node untouched. Default and silent uninstall keep
+      shared Sunshine, ViGEmBus, and the VDD package.
 
 - [ ] With a captured HDMI/DP audio endpoint deliberately unplugged, Pause
       still removes every background task while retaining only inert retry
@@ -282,7 +290,8 @@ release notes.
       current Windows default, and completes without guessing another output.
 - [ ] Run uninstall once from an enabled backend and once from an intentionally
       paused backend. Cover default shared-dependency retention and explicit
-      display release / Sunshine / ViGEmBus removal in disposable snapshots. A forced late finalization failure must
+      Sunshine / ViGEmBus removal in disposable snapshots; exact display
+      release is mandatory and ownership-scoped in both paths. A forced late finalization failure must
       restore the exact pre-uninstall paused device state and any
       safeguard removed earlier; a retry must complete idempotently. Unknown
       files placed in the state directory must be retained and reported, never
@@ -326,7 +335,7 @@ release notes.
       first setup after maintenance begins but before product copy. Setup must
       not adopt, disable, or journal that device before copy. Complete a later
       install with the disclosed Sunshine/display task selected, then prove
-      explicit display release restores the exact pre-install enabled state.
+      normal uninstall restores the exact pre-install enabled state.
       Repeat once for initially enabled and once for initially disabled.
 - [ ] Interrupt upgrade once after each pre-existing recovery task is removed,
       then retry with host configuration deselected. The durable pre-mutation
@@ -340,7 +349,8 @@ release notes.
       missing host resumes file-only cleanup. Missing host plus torn/InProgress
       must fail closed. Unknown fixture files must be retained.
 - [ ] In a disposable VM, explicitly selected Sunshine and ViGEmBus removals
-      plus exact Vita display release succeed or accurately request a reboot. A pending reboot keeps
+      plus the mandatory exact Vita display release succeed or accurately
+      request a reboot. A pending reboot keeps
       the host and safeguards until uninstall is rerun and verifies cleanup.
       Default `/VERYSILENT` uninstall does not remove dependencies; the
       explicit dependency switches do.

@@ -85,8 +85,11 @@ internal static class UninstallManager
                 // operation lock through the complete physical-safety probe.
                 BackendLifecycleStateStore.RequireNoUninstallInProgress();
             }
-            return RecoverPhysicalAndDiscardPendingTransaction(
-                allowLegacyVddOwnershipMigration: true);
+            // Exact legacy acquisition is restricted to the pre-copy
+            // maintenance bootstrap below. During uninstall the installed
+            // executable is not historical proof that Vita created an
+            // otherwise unowned device, especially after a partial upgrade.
+            return RecoverPhysicalAndDiscardPendingTransaction();
         }
         finally
         {
@@ -124,8 +127,7 @@ internal static class UninstallManager
     }
 
     internal static UninstallPreparationResult
-        RecoverPhysicalAndDiscardPendingTransaction(
-            bool allowLegacyVddOwnershipMigration = false)
+        RecoverPhysicalAndDiscardPendingTransaction()
     {
         return WithSunshineStopped(
             () =>
@@ -133,12 +135,6 @@ internal static class UninstallManager
                 UninstallPreparationResult result;
                 using (var transaction = DisplayTransactionLock.Acquire())
                 {
-                    if (allowLegacyVddOwnershipMigration)
-                    {
-                        ManagedVddOwnershipJournal
-                            .MigrateLegacyOwnershipIfProvenLocked(
-                                transaction);
-                    }
                     result = RecoverPhysicalAndDiscardPendingTransactionLocked(
                         transaction);
                 }
@@ -158,9 +154,11 @@ internal static class UninstallManager
                 using (var transaction = DisplayTransactionLock
                            .AcquireForRecoveryUpgradeOnly())
                 {
-                    ManagedVddOwnershipJournal
-                        .MigrateLegacyOwnershipIfProvenLocked(
-                            transaction);
+                    // Installer post-copy recovery must not manufacture
+                    // ownership from the newly copied executable. An exact
+                    // candidate approved before copy is acquired later by the
+                    // bound driver transaction; controller-only repair leaves
+                    // an unowned node untouched.
                     result = RecoverPhysicalAndDiscardPendingTransactionLocked(
                         transaction);
                 }
@@ -183,6 +181,12 @@ internal static class UninstallManager
                            .AcquireForInstallerMaintenanceBootstrap(
                                ownerProcessId))
                 {
+                    // Only the complete protected pre-journal Vita footprint
+                    // may migrate before copy. That exact app-created
+                    // authority is needed to recover/disable its old node and
+                    // to preserve a Paused upgrade. An unproven node produces
+                    // no journal and remains untouched for the later staged,
+                    // exact consent decision.
                     ManagedVddOwnershipJournal
                         .MigrateLegacyOwnershipIfProvenLocked(
                             transaction,
@@ -378,10 +382,18 @@ internal static class UninstallManager
         transaction.RequireActive();
         var topology = new DisplayTopologyService();
         IReadOnlyList<string> physicalDisplays;
-        if (!File.Exists(ManagedVddOwnershipJournal.JournalFile) &&
-            !File.Exists(HostStatePaths.RecoveryFile) &&
+        var ownershipJournalExists = File.Exists(
+            ManagedVddOwnershipJournal.JournalFile);
+        var pendingRecoveryExists = File.Exists(
+            HostStatePaths.RecoveryFile);
+        var exactPhysicalOnly =
             topology.TryCaptureExactPhysicalOnlySnapshot(
                 out var untouchedPhysical) &&
+            untouchedPhysical is not null;
+        if (CanUseUnownedPhysicalOnlyRecoveryFastPathForTest(
+                ownershipJournalExists,
+                pendingRecoveryExists,
+                exactPhysicalOnly) &&
             untouchedPhysical is not null)
         {
             // Controller-only installs and unrelated DisplayWizard users may
@@ -428,6 +440,26 @@ internal static class UninstallManager
             physicalDisplays,
             clearedSavedTransaction);
     }
+
+    internal static bool CanUseUnownedPhysicalOnlyRecoveryFastPathForTest(
+        bool ownershipJournalExists,
+        bool pendingRecoveryExists,
+        bool exactPhysicalOnlySnapshotAvailable)
+    {
+        // A pending record is not display authority once Windows itself proves
+        // the complete physical-only layout. The caller still parses it,
+        // persists its independent exact-audio obligation, and clears it
+        // below; it simply must not use that stale record to claim or toggle
+        // an otherwise unowned MTT node.
+        _ = pendingRecoveryExists;
+        return !ownershipJournalExists &&
+            exactPhysicalOnlySnapshotAvailable;
+    }
+
+    internal static bool ShouldAttemptManagedVddReleaseForTest(
+        bool restoreManagedVdd,
+        bool ownershipJournalExists) =>
+        restoreManagedVdd && ownershipJournalExists;
 
     internal static SunshineIntegrationCleanupResult CleanupIntegration() =>
         WithSunshineStopped(
@@ -481,7 +513,10 @@ internal static class UninstallManager
                     disabledBackendRollbackState =
                         backendHandoff.DisabledRollbackState;
 
-                    if (restoreManagedVdd)
+                    if (ShouldAttemptManagedVddReleaseForTest(
+                            restoreManagedVdd,
+                            File.Exists(
+                                ManagedVddOwnershipJournal.JournalFile)))
                     {
                         var restartRequired = DisplayWizardAdapter
                             .LocateBundledForUninstall()
@@ -491,6 +526,17 @@ internal static class UninstallManager
                             throw new HostRestartRequiredException(
                                 "Windows must restart to finish removing the exact app-created virtual-display instance. The shared MttVDD package and retry-safe ownership journal were retained.");
                         }
+                    }
+                    else if (restoreManagedVdd)
+                    {
+                        // A damaged or incomplete legacy install may not even
+                        // retain the bundled driver tools. With no journal,
+                        // locating those tools cannot grant authority and may
+                        // not block an otherwise safe uninstall. Both recovery
+                        // passes already proved a complete physical-only
+                        // desktop; leave every unproven node/package untouched.
+                        Console.WriteLine(
+                            "No exact Vita-managed virtual-display ownership exists. Uninstall did not locate or run driver tools, and left every unproven MTT device and shared package unchanged.");
                     }
 
                     VerifyPhysicalOnlyTopology(

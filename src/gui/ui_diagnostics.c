@@ -65,6 +65,7 @@ static UiDiagnosticsMetrics metrics;
 static pthread_mutex_t metrics_mutex = PTHREAD_MUTEX_INITIALIZER;
 static uint32_t metrics_consumer_mask = 0;
 static uint32_t metrics_consumer_generation = 1;
+static uint32_t fps_consumer_mask = 0;
 static uint32_t diagnostics_screen_open = 0;
 static uint32_t diagnostics_overlay_mode = UI_DIAGNOSTICS_OVERLAY_OFF;
 
@@ -78,6 +79,18 @@ static void atomic_store_u32(uint32_t *value, uint32_t next) {
 
 bool ui_diagnostics_metrics_needed(void) {
   return atomic_load_u32(&metrics_consumer_mask) != 0;
+}
+
+bool ui_diagnostics_fps_needed(void) {
+  return atomic_load_u32(&fps_consumer_mask) != 0;
+}
+
+static void set_fps_consumer(uint32_t consumer, bool enabled) {
+  if (enabled) {
+    __atomic_fetch_or(&fps_consumer_mask, consumer, __ATOMIC_RELEASE);
+  } else {
+    __atomic_fetch_and(&fps_consumer_mask, ~consumer, __ATOMIC_RELEASE);
+  }
 }
 
 static UiDiagnosticsOverlayMode sanitize_overlay_mode(int mode) {
@@ -184,6 +197,9 @@ static void set_metrics_consumer(uint32_t consumer, bool enabled) {
     bool was_active = old_mask != 0;
     bool is_active = new_mask != 0;
     if (was_active != is_active) {
+      if (is_active) {
+        LiSetVideoStreamDiagnosticsEnabled(true);
+      }
       metrics_consumer_generation++;
       if (metrics_consumer_generation == 0) {
         metrics_consumer_generation = 1;
@@ -197,6 +213,9 @@ static void set_metrics_consumer(uint32_t consumer, bool enabled) {
       }
     }
     atomic_store_u32(&metrics_consumer_mask, new_mask);
+    if (was_active && !is_active) {
+      LiSetVideoStreamDiagnosticsEnabled(false);
+    }
   }
   pthread_mutex_unlock(&metrics_mutex);
 }
@@ -389,17 +408,28 @@ void ui_diagnostics_init(void) {
   memset(&metrics, 0, sizeof(metrics));
   metrics.network_state = UI_DIAGNOSTICS_NETWORK_UNKNOWN;
   metrics_consumer_generation = 1;
+  LiSetVideoStreamDiagnosticsEnabled(initial_consumers != 0);
   atomic_store_u32(&metrics_consumer_mask, initial_consumers);
   pthread_mutex_unlock(&metrics_mutex);
   atomic_store_u32(&diagnostics_screen_open, 0);
   atomic_store_u32(&diagnostics_overlay_mode, (uint32_t)mode);
+  atomic_store_u32(
+      &fps_consumer_mask,
+      (mode != UI_DIAGNOSTICS_OVERLAY_OFF
+           ? UI_DIAGNOSTICS_CONSUMER_OVERLAY
+           : 0) |
+          (vita_debug_is_logging_enabled()
+               ? UI_DIAGNOSTICS_CONSUMER_LOGGING
+               : 0));
 }
 
 void ui_diagnostics_shutdown(void) {
   atomic_store_u32(&diagnostics_screen_open, 0);
+  atomic_store_u32(&fps_consumer_mask, 0);
   pthread_mutex_lock(&metrics_mutex);
   metrics_consumer_generation++;
   atomic_store_u32(&metrics_consumer_mask, 0);
+  LiSetVideoStreamDiagnosticsEnabled(false);
   pthread_mutex_unlock(&metrics_mutex);
 }
 
@@ -501,6 +531,9 @@ void ui_diagnostics_set_overlay_mode(UiDiagnosticsOverlayMode mode) {
   set_metrics_consumer(
       UI_DIAGNOSTICS_CONSUMER_OVERLAY,
       sanitized >= UI_DIAGNOSTICS_OVERLAY_FPS_NETWORK);
+  set_fps_consumer(
+      UI_DIAGNOSTICS_CONSUMER_OVERLAY,
+      sanitized != UI_DIAGNOSTICS_OVERLAY_OFF);
   atomic_store_u32(&diagnostics_overlay_mode, (uint32_t)sanitized);
   config.performance_overlay_mode = sanitized;
 
@@ -554,6 +587,7 @@ void ui_diagnostics_set_network_state(UiDiagnosticsNetworkState state) {
 
 void ui_diagnostics_set_logging_consumer(bool enabled) {
   set_metrics_consumer(UI_DIAGNOSTICS_CONSUMER_LOGGING, enabled);
+  set_fps_consumer(UI_DIAGNOSTICS_CONSUMER_LOGGING, enabled);
   UiDiagnosticsReconnectSettings active;
   bool active_valid = false;
   pthread_mutex_lock(&metrics_mutex);
@@ -807,7 +841,6 @@ void ui_diagnostics_get_snapshot(UiDiagnosticsSnapshot *snapshot) {
   vita_motion_get_status(&motion);
   snapshot->gyro_requested = motion.gyro_requested;
   snapshot->gyro_report_rate = motion.gyro_report_rate;
-  snapshot->gyro_events_sent = motion.gyro_events_sent;
   snapshot->motion_sensor_error = motion.last_sensor_error;
 
 }
@@ -912,12 +945,14 @@ bool ui_diagnostics_screen_is_open(void) {
 
 void ui_diagnostics_screen_open(void) {
   set_metrics_consumer(UI_DIAGNOSTICS_CONSUMER_SCREEN, true);
+  set_fps_consumer(UI_DIAGNOSTICS_CONSUMER_SCREEN, true);
   atomic_store_u32(&diagnostics_screen_open, 1);
 }
 
 void ui_diagnostics_screen_close(void) {
   atomic_store_u32(&diagnostics_screen_open, 0);
   set_metrics_consumer(UI_DIAGNOSTICS_CONSUMER_SCREEN, false);
+  set_fps_consumer(UI_DIAGNOSTICS_CONSUMER_SCREEN, false);
 }
 
 static bool pressed(const SceCtrlData *pad,
@@ -1088,9 +1123,8 @@ void ui_diagnostics_screen_draw(void) {
   } else if (!snapshot.gyro_requested) {
     snprintf(value, sizeof(value), "Awaiting host request");
   } else {
-    snprintf(value, sizeof(value), "%u Hz, %u events",
-             (unsigned int)snapshot.gyro_report_rate,
-             (unsigned int)snapshot.gyro_events_sent);
+    snprintf(value, sizeof(value), "Reporting at %u Hz",
+             (unsigned int)snapshot.gyro_report_rate);
   }
   draw_screen_row(359, "Gyroscope", value,
                    snapshot.motion_sensor_error < 0

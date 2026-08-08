@@ -23,7 +23,6 @@
 #include <psp2/sysmodule.h>
 #include <psp2/kernel/sysmem.h>
 #include <psp2/kernel/threadmgr.h>
-#include <psp2/motion.h>
 #include "../keyboardsystem.h"
 
 #include <psp2/ctrl.h>
@@ -130,6 +129,5 @@ void special(uint32_t defined, uint32_t pressed, uint32_t old_pressed);
 void vitainput_process(void);
 void move_mouse(TouchData old, TouchData cur);
 bool mouse_click(short finger_count, bool press);
-void move_motion(SceMotionState motionState);
 void move_wheel(TouchData old, TouchData cur);
 // void open_keyboard(void); // Ahora se usa keyboardsystem_open_keyboard()

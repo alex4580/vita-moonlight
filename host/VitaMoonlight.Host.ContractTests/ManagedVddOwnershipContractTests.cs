@@ -43,7 +43,8 @@ internal static class ManagedVddOwnershipContractTests
             now,
             new ManagedVddAcquisitionPolicy(
                 ExactLegacyVitaOwnershipEvidence: false,
-                AllowExistingDeviceAdoption: true));
+                ExpectedExistingDeviceInstanceId:
+                    @"ROOT\DISPLAY\0002"));
         Require(
             adopted.Device is
             {
@@ -65,7 +66,7 @@ internal static class ManagedVddOwnershipContractTests
                 null,
                 [Device(@"ROOT\DISPLAY\0003", enabled: true)],
                 now),
-            "A journal-less DisplayWizard instance was silently adopted without explicit permission or prior-product evidence.");
+            "A device which appeared after a clean pre-copy query was silently claimed from newly copied executable evidence instead of requiring a new exact adoption decision.");
         RequireThrows(
             () => ManagedVddOwnershipJournal.HasOwnedPresentDeviceForTest(
                 null,
@@ -96,7 +97,7 @@ internal static class ManagedVddOwnershipContractTests
             now,
             new ManagedVddAcquisitionPolicy(
                 ExactLegacyVitaOwnershipEvidence: true,
-                AllowExistingDeviceAdoption: false));
+                ExpectedExistingDeviceInstanceId: null));
         Require(
             migratedLegacy.Device is
             {
@@ -106,22 +107,106 @@ internal static class ManagedVddOwnershipContractTests
             },
             "A proven pre-journal Vita node learned the bug-induced enabled state as an adopted uninstall baseline.");
         Require(
+            ManagedVddOwnershipJournal.ClassifyLegacyMigration(
+                [Device(@"ROOT\DISPLAY\0044", enabled: true)],
+                now,
+                exactLegacyVitaOwnershipEvidence: false) is null,
+            "Installer maintenance treated an unproven pre-existing MTT node as a failed legacy migration instead of leaving it untouched for an explicit adoption decision.");
+        var provenMigration =
+            ManagedVddOwnershipJournal.ClassifyLegacyMigration(
+                [Device(@"ROOT\DISPLAY\0045", enabled: false)],
+                now,
+                exactLegacyVitaOwnershipEvidence: true);
+        Require(
+            provenMigration?.Device is
+            {
+                InstanceId: @"ROOT\DISPLAY\0045",
+                Ownership: ManagedVddOwnershipKind.AppCreated,
+                PriorEnabled: null,
+                LastKnownEnabled: false,
+            },
+            "Installer maintenance did not migrate an exact proven legacy Vita node as app-created ownership.");
+        Require(
             ManagedVddOwnershipJournal.EvaluateAdoptionRequirement(
+                null,
+                []) is
+                { RequiresExplicitAdoption: false } &&
+            ManagedVddOwnershipJournal.EvaluateAdoptionRequirement(
+                null,
+                [Device(@"ROOT\DISPLAY\0004", enabled: false)]) is
+                {
+                    RequiresExplicitAdoption: true,
+                    CandidateInstanceId: @"ROOT\DISPLAY\0004",
+                },
+            "Read-only setup readiness did not require exact adoption for every present journal-less node after the exclusive pre-copy migration opportunity.");
+
+        RequireThrows(
+            () => ManagedVddOwnershipJournal.ClassifyInstall(
+                null,
+                [Device(@"ROOT\DISPLAY\0099", enabled: false)],
+                now,
+                new ManagedVddAcquisitionPolicy(
+                    ExactLegacyVitaOwnershipEvidence: false,
+                    ExpectedExistingDeviceInstanceId:
+                        @"ROOT\DISPLAY\0004")),
+            "Explicit adoption followed a replacement device instead of remaining bound to the exact candidate shown for consent.");
+        RequireThrows(
+            () => ManagedVddOwnershipJournal.ClassifyInstall(
                 null,
                 [],
-                exactLegacyVitaOwnershipEvidence: false) is
-                { RequiresExplicitAdoption: false } &&
-            ManagedVddOwnershipJournal.EvaluateAdoptionRequirement(
+                now,
+                new ManagedVddAcquisitionPolicy(
+                    ExactLegacyVitaOwnershipEvidence: false,
+                    ExpectedExistingDeviceInstanceId:
+                        @"ROOT\DISPLAY\0004")),
+            "Explicit adoption silently became clean device creation after its approved candidate disappeared.");
+        RequireThrows(
+            () => ManagedVddOwnershipJournal.ClassifyInstall(
                 null,
-                [Device(@"ROOT\DISPLAY\0003", enabled: true)],
-                exactLegacyVitaOwnershipEvidence: true) is
-                { RequiresExplicitAdoption: false } &&
-            ManagedVddOwnershipJournal.EvaluateAdoptionRequirement(
-                null,
-                [Device(@"ROOT\DISPLAY\0004", enabled: false)],
-                exactLegacyVitaOwnershipEvidence: false) is
-                { RequiresExplicitAdoption: true },
-            "Read-only setup readiness could not distinguish clean, proven-legacy, and explicit-adoption states.");
+                [
+                    Device(@"ROOT\DISPLAY\0004", enabled: false),
+                    Device(@"ROOT\DISPLAY\0099", enabled: false),
+                ],
+                now,
+                new ManagedVddAcquisitionPolicy(
+                    ExactLegacyVitaOwnershipEvidence: false,
+                    ExpectedExistingDeviceInstanceId:
+                        @"ROOT\DISPLAY\0004")),
+            "Explicit adoption ignored a second present candidate that appeared after consent.");
+        var approvedExisting = ManagedVddOwnershipJournal.ClassifyInstall(
+            adopted.State,
+            [Device(@"ROOT\DISPLAY\0002", enabled: false)],
+            now,
+            new ManagedVddAcquisitionPolicy(
+                ExactLegacyVitaOwnershipEvidence: false,
+                ExpectedExistingDeviceInstanceId:
+                    @"ROOT\DISPLAY\0002"));
+        Require(
+            approvedExisting.Device?.Ownership ==
+                ManagedVddOwnershipKind.Adopted &&
+            approvedExisting.Device.InstanceId ==
+                @"ROOT\DISPLAY\0002",
+            "A deferred exact adoption retry rejected its already-adopted matching state.");
+        RequireThrows(
+            () => ManagedVddOwnershipJournal.ClassifyInstall(
+                created,
+                [Device(@"ROOT\DISPLAY\0007", enabled: true)],
+                now,
+                new ManagedVddAcquisitionPolicy(
+                    ExactLegacyVitaOwnershipEvidence: false,
+                    ExpectedExistingDeviceInstanceId:
+                        @"ROOT\DISPLAY\0007")),
+            "Exact adoption consent silently accepted an AppCreated state manufactured by another path.");
+        RequireThrows(
+            () => ManagedVddOwnershipJournal.ClassifyInstall(
+                adopted.State,
+                [Device(@"ROOT\DISPLAY\0002", enabled: false)],
+                now,
+                new ManagedVddAcquisitionPolicy(
+                    ExactLegacyVitaOwnershipEvidence: false,
+                    ExpectedExistingDeviceInstanceId:
+                        @"ROOT\DISPLAY\0099")),
+            "Exact adoption consent silently accepted an already-adopted different instance.");
 
         RequireThrows(
             () => ManagedVddOwnershipJournal.ClassifyInstall(
@@ -249,8 +334,7 @@ internal static class ManagedVddOwnershipContractTests
         Require(
             ManagedVddOwnershipJournal.EvaluateAdoptionRequirement(
                 releasedAdopted,
-                [Device(@"ROOT\DISPLAY\0002", enabled: false)],
-                exactLegacyVitaOwnershipEvidence: true) is
+                [Device(@"ROOT\DISPLAY\0002", enabled: false)]) is
                 { RequiresExplicitAdoption: true },
             "Read-only setup readiness silently reclaimed a released adopted node from stale legacy evidence.");
         Require(

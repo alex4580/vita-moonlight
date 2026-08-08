@@ -231,7 +231,7 @@ static void draw_stream_surface(bool count_video_frame) {
 
   last_render_us = sceKernelGetSystemTimeWide();
   atomic_store_u32(&rendered_redraw_generation, request_generation);
-  if (count_video_frame) {
+  if (count_video_frame && ui_diagnostics_fps_needed()) {
     atomic_add_u32(&frame_count, 1);
   }
 }
@@ -266,6 +266,7 @@ void update_scaling_settings(int width, int height) {
 static int vita_pacer_thread_main(SceSize args, void *argp) {
   int max_fps = config.stream.fps;
   uint64_t last_check_time = sceKernelGetSystemTimeWide();
+  bool fps_was_active = false;
   atomic_store_u32(&frame_count, 0);
 
   while (atomic_load_u32(&active_pacer_thread)) {
@@ -274,7 +275,13 @@ static int vita_pacer_thread_main(SceSize args, void *argp) {
      * no-op unless an overlay, the diagnostics screen, or logging is active. */
     ui_diagnostics_tick(now);
 
-    if (now - last_check_time >= PACER_SAMPLE_INTERVAL_US) {
+    bool collect_fps = ui_diagnostics_fps_needed();
+    if (collect_fps && !fps_was_active) {
+      last_check_time = now;
+      atomic_store_u32(&frame_count, 0);
+      atomic_store_fps(0, (uint32_t)max_fps);
+    }
+    if (collect_fps && now - last_check_time >= PACER_SAMPLE_INTERVAL_US) {
       uint64_t elapsed_us = now - last_check_time;
       uint32_t curr_frame_count =
           atomic_exchange_u32(&frame_count, 0);
@@ -288,7 +295,14 @@ static int vita_pacer_thread_main(SceSize args, void *argp) {
               : (uint32_t)normalized_fps,
           (uint32_t)max_fps);
       last_check_time = now;
+    } else if (!collect_fps && fps_was_active) {
+      /* Do not aggregate FPS in normal play. Reset the window so enabling an
+       * explicit consumer starts from a fresh, representative sample. */
+      last_check_time = now;
+      atomic_store_u32(&frame_count, 0);
+      atomic_store_fps(0, 0);
     }
+    fps_was_active = collect_fps;
 
     bool live_ui =
         stream_overlay_is_open() ||
@@ -780,22 +794,24 @@ static int vita_submit_decode_unit(PDECODE_UNIT decodeUnit) {
       ui_diagnostics_record_video_frame(
           length, decode_time_us, false);
     }
-    uint64_t now_us = sceKernelGetSystemTimeWide();
-    if (last_decoder_error_log_us == 0 ||
-        now_us - last_decoder_error_log_us >=
-            DECODER_ERROR_LOG_INTERVAL_US) {
-      vita_debug_event(
-          VITA_DEBUG_LEVEL_ERROR, "decoder.state",
-          "state=error phase=decode code=0x%08x source_bytes=%u "
-          "unit_bytes=%u outputs=%d "
-          "repeats_suppressed=%u",
-          (unsigned int)ret, (unsigned int)decodeUnit->fullLength,
-          (unsigned int)length, array_picture.numOfOutput,
-          suppressed_decoder_errors);
-      last_decoder_error_log_us = now_us;
-      suppressed_decoder_errors = 0;
-    } else {
-      suppressed_decoder_errors++;
+    if (vita_debug_is_logging_enabled()) {
+      uint64_t now_us = sceKernelGetSystemTimeWide();
+      if (last_decoder_error_log_us == 0 ||
+          now_us - last_decoder_error_log_us >=
+              DECODER_ERROR_LOG_INTERVAL_US) {
+        vita_debug_event(
+            VITA_DEBUG_LEVEL_ERROR, "decoder.state",
+            "state=error phase=decode code=0x%08x source_bytes=%u "
+            "unit_bytes=%u outputs=%d "
+            "repeats_suppressed=%u",
+            (unsigned int)ret, (unsigned int)decodeUnit->fullLength,
+            (unsigned int)length, array_picture.numOfOutput,
+            suppressed_decoder_errors);
+        last_decoder_error_log_us = now_us;
+        suppressed_decoder_errors = 0;
+      } else {
+        suppressed_decoder_errors++;
+      }
     }
     pthread_mutex_unlock(&video_render_mutex);
     return DR_NEED_IDR;

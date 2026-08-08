@@ -127,8 +127,7 @@ static bool stream_preset_base_matches(void) {
          !config.enable_ref_frame_invalidation &&
          !config.enable_frame_pacer &&
          !config.enable_vita_vblank_wait &&
-         !config.center_region_only &&
-         config.disable_powersave;
+         !config.center_region_only;
 }
 
 int config_detect_stream_preset(void) {
@@ -180,7 +179,6 @@ void config_apply_stream_preset(int preset) {
   config.enable_frame_pacer = false;
   config.enable_vita_vblank_wait = false;
   config.center_region_only = false;
-  config.disable_powersave = true;
 
   switch (preset) {
     case STREAM_PRESET_RELIABLE:
@@ -835,6 +833,9 @@ bool config_parse(int argc, char* argv[], PCONFIGURATION config) {
   config->fullscreen = true;
   config->unsupported_version = false;
   config->save_debug_log = false;
+  /* Keep-awake protects hands-off playback from a display-off or suspend.
+   * Its worker is still created only for an active stream and can be disabled
+   * independently without changing the selected streaming preset. */
   config->disable_powersave = true;
   config->jp_layout = false;
   config->show_fps = false;

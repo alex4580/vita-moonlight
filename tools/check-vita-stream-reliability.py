@@ -72,19 +72,23 @@ def main() -> int:
     require(
         "VideoStreamDiagnostics" in public_header
         and "LiGetVideoStreamDiagnosticsSnapshot" in public_header
+        and "LiSetVideoStreamDiagnosticsEnabled" in public_header
         and "VIDEO_DIAGNOSTIC_COUNTER" in internal_header
         and '#include "video_diagnostics.h"' in internal_header,
         "moonlight-common-c must expose a typed caller-owned diagnostics snapshot",
     )
     require(
         "__atomic_fetch_add(destination, amount, __ATOMIC_RELAXED)" in stream
-        and stream.count("__atomic_load_n(") == 7
+        and stream.count("__atomic_load_n(") == 8
+        and "static uint32_t videoDiagnosticsEnabled;" in stream
+        and "void LiSetVideoStreamDiagnosticsEnabled(bool enabled)" in stream
+        and "__atomic_load_n(&videoDiagnosticsEnabled" in stream
         and "return false;" in body(
             stream,
             "bool LiGetVideoStreamDiagnosticsSnapshot(",
             "\n}",
         ),
-        "video counters and the snapshot API must be null-safe and atomic",
+        "video counters must be explicitly enabled, null-safe, and atomic",
     )
     require(
         "if (!isFecRecovery)" in rtp
@@ -110,6 +114,9 @@ def main() -> int:
     )
     require(
         rtp.count("VIDEO_DIAGNOSTIC_NETWORK_FRAME_LOST") == 3
+        and "queue->stats.packetCountOOS++" not in rtp
+        and "queue->stats.packetCountFecRecovered +=" not in rtp
+        and "queue->stats.packetCountFecFailed++" not in rtp
         and "VIDEO_DIAGNOSTIC_DEPACKETIZER_CORRUPT_FRAME" in depacketizer
         and "VIDEO_DIAGNOSTIC_DECODE_UNIT_QUEUE_OVERFLOW" in depacketizer
         and "VIDEO_DIAGNOSTIC_IDR_REQUEST_SENT" in control,
@@ -131,6 +138,8 @@ def main() -> int:
     vita_ci = read(".github/workflows/cmake-psvita.yml")
     require(
         "LiGetVideoStreamDiagnosticsSnapshot" in diagnostics
+        and "LiSetVideoStreamDiagnosticsEnabled(true)" in diagnostics
+        and "LiSetVideoStreamDiagnosticsEnabled(false)" in diagnostics
         and "LiGetRTPVideoStats" not in diagnostics
         and "fec_failed_blocks" in diagnostics
         and "network_lost_frames" in diagnostics
@@ -138,6 +147,21 @@ def main() -> int:
         and "decode_queue_overflows" in diagnostics
         and "idr_requests_sent" in diagnostics,
         "Vita diagnostics and support logs must use precise aggregate labels",
+    )
+    require(
+        "bool ui_diagnostics_fps_needed(void)" in diagnostics
+        and "count_video_frame && ui_diagnostics_fps_needed()" in video
+        and "bool collect_fps = ui_diagnostics_fps_needed();" in video
+        and "vita_debug_is_logging_enabled()" in body(
+            video,
+            "ret = sceAvcdecDecode(decoder, &au, &array_picture);",
+            "if (array_picture.numOfOutput != 1)",
+        )
+        and "gyro_events_sent" not in motion
+        and "accel_events_sent" not in motion
+        and "gyro_events_sent" not in diagnostics
+        and "Reporting at %u Hz" in diagnostics,
+        "optional FPS, decoder-error, transport, and gyro instrumentation must be absent unless explicitly requested",
     )
     require(
         "void ui_diagnostics_tick(uint64_t now_us)" in diagnostics

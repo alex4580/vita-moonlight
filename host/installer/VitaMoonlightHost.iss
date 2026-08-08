@@ -49,7 +49,7 @@ SignedUninstaller=no
 [Tasks]
 Name: "gamepaddriver"; Description: "Controller support (recommended for Xbox, DS4, and Steam Input)"; GroupDescription: "Choose what setup should prepare:"
 Name: "host"; Description: "Configure this PC for Vita streaming now (recommended)"; GroupDescription: "Choose what setup should prepare:"
-Name: "host\sunshine"; Description: "Sunshine and the required Vita-sized virtual display (if one existing MTT display is found, setup adopts only that exact device and restores its original enabled state on uninstall)"
+Name: "host\sunshine"; Description: "Sunshine and the required Vita-sized virtual display (setup asks before adopting an existing MTT display and restores its original enabled state on uninstall)"
 
 [Dirs]
 Name: "{app}\state"
@@ -164,7 +164,6 @@ var
   DriverNeedsAttention: Boolean;
   RestartRequiredByPrerequisite: Boolean;
   ConfigurationDeferredForRestart: Boolean;
-  RemoveVirtualDisplayOnUninstall: Boolean;
   RemoveSunshineOnUninstall: Boolean;
   RemoveViGEmBusOnUninstall: Boolean;
   PreserveDiagnosticsOnUninstall: Boolean;
@@ -183,6 +182,7 @@ var
   MaintenanceFenceActive: Boolean;
   MaintenanceHelperExtracted: Boolean;
   MaintenanceOwnerPid: Integer;
+  AdoptExistingVddApproved: Boolean;
   SetupFailureRecorded: Boolean;
   SetupFailureText: String;
   SetupFailurePage: TOutputMsgMemoWizardPage;
@@ -444,6 +444,141 @@ begin
   Log(
     'Protected installer maintenance began under owner process ' +
     IntToStr(MaintenanceOwnerPid) + '.');
+  Result := True;
+end;
+
+function HasCommandLineSwitch(const Name: String): Boolean;
+var
+  Index: Integer;
+  Value: String;
+begin
+  Result := False;
+  for Index := 1 to ParamCount do
+  begin
+    Value := ParamStr(Index);
+    if (CompareText(Value, '/' + Name) = 0) or
+      (CompareText(Value, '-' + Name) = 0) then
+    begin
+      Result := True;
+      exit;
+    end;
+  end;
+end;
+
+function QueryManagedVddAdoptionRequired(
+  var AdoptionRequired: Boolean;
+  var ErrorText: String): Boolean;
+var
+  HostError: String;
+  ResultCode: Integer;
+begin
+  Result := False;
+  AdoptionRequired := False;
+  ErrorText := '';
+  if not WizardIsTaskSelected('host\sunshine') then
+  begin
+    Result := True;
+    exit;
+  end;
+
+  WizardForm.StatusLabel.Caption :=
+    'Checking whether an existing virtual display needs your permission';
+  WizardForm.StatusLabel.Update;
+  ResultCode := -1;
+  DeleteFile(ExpandConstant(
+    '{tmp}\VitaMoonlight.Host.Maintenance.error.txt'));
+  if not Exec(
+    ExpandConstant('{tmp}\VitaMoonlight.Host.Maintenance.exe'),
+    'maintenance vdd-adoption-required --owner-pid ' +
+      IntToStr(MaintenanceOwnerPid),
+    ExpandConstant('{tmp}'),
+    SW_HIDE,
+    ewWaitUntilTerminated,
+    ResultCode) then
+  begin
+    ErrorText :=
+      'Setup could not inspect the existing virtual-display device. No device ' +
+      'was adopted or changed.';
+    exit;
+  end;
+
+  if ResultCode = 0 then
+  begin
+    AdoptionRequired := True;
+    Result := True;
+    exit;
+  end;
+  if ResultCode = 3 then
+  begin
+    Result := True;
+    exit;
+  end;
+
+  HostError := ReadMaintenanceHelperError;
+  if HostError <> '' then
+    HostError := #13#10 + #13#10 + HostError;
+  ErrorText :=
+    'Setup could not safely identify one virtual-display device it is allowed ' +
+    'to manage (exit code ' + IntToStr(ResultCode) + '). No device was adopted ' +
+    'or changed.' + HostError;
+end;
+
+function ConfirmManagedVddAdoption(var ErrorText: String): Boolean;
+var
+  AdoptionRequired: Boolean;
+begin
+  Result := False;
+  AdoptExistingVddApproved := False;
+  if not QueryManagedVddAdoptionRequired(AdoptionRequired, ErrorText) then
+    exit;
+  if not AdoptionRequired then
+  begin
+    Result := True;
+    exit;
+  end;
+
+  if HasCommandLineSwitch('ADOPTEXISTINGVDD') then
+  begin
+    AdoptExistingVddApproved := True;
+    Log(
+      'Explicit /ADOPTEXISTINGVDD approval was supplied for the one ' +
+      'unambiguous existing MTT device.');
+    Result := True;
+    exit;
+  end;
+
+  if WizardSilent then
+  begin
+    ErrorText :=
+      'Windows already has one unowned MTT virtual-display device. Silent ' +
+      'setup will not adopt it implicitly. Confirm that this installation may ' +
+      'manage that device and rerun setup with /ADOPTEXISTINGVDD, or remove ' +
+      'the Sunshine/display task. No device was changed.';
+    exit;
+  end;
+
+  if MsgBox(
+    'Windows already has one MTT virtual-display device that is not owned by ' +
+    'this Vita Moonlight installation. It may be left by an earlier Vita ' +
+    'Moonlight version, DisplayWizard, or another application.' + #13#10 + #13#10 +
+    'Allow Vita Moonlight to adopt this one device?' + #13#10 + #13#10 +
+    'Setup will record whether it is currently enabled or disabled before ' +
+    'changing it. If Vita Moonlight is later uninstalled, that exact original ' +
+    'enabled state will be restored. Choosing No leaves the device unchanged.',
+    mbConfirmation,
+    MB_YESNO) <> IDYES then
+  begin
+    ErrorText :=
+      'Setup did not adopt or change the existing MTT virtual display. Click ' +
+      'Back and clear the Sunshine/display task to continue without Vita ' +
+      'virtual-display integration, or cancel setup.';
+    exit;
+  end;
+
+  AdoptExistingVddApproved := True;
+  Log(
+    'The user explicitly approved adoption of the one unambiguous existing ' +
+    'MTT device. Its live enabled state will be recorded by the post-copy driver transaction.');
   Result := True;
 end;
 
@@ -753,6 +888,17 @@ begin
     UpgradeRecoveryTaskWasRemoved := RecoveryTaskWasInstalled;
   end;
 
+  { Reconstruct every rollback obligation before any later prompt or return.
+    Maintenance deliberately leaves an unproven pre-existing MTT node
+    untouched. The helper stages its exact instance identity in the protected
+    live-owner fence; Yes approves only that identity, and the post-copy
+    transaction fails rather than following a replacement device. }
+  if not ConfirmManagedVddAdoption(ErrorText) then
+  begin
+    Result := ErrorText;
+    exit;
+  end;
+
   { After the embedded helper's narrowly gated physical-recovery bootstrap,
     later task mutations deliberately trust only the protected, currently
     installed executable. The temporary helper receives no general installed-
@@ -834,7 +980,21 @@ end;
 
 procedure DeinitializeSetup;
 begin
-  if not UpgradeSafeguardsRestored then
+  { The durable snapshot records what must exist at handoff, not necessarily
+    what this setup instance removed. On a fresh cancel before preflight (or a
+    repair whose old executable is missing), first let the helper verify that
+    the original tasks are already present and end the fence. A dead-owner
+    takeover with genuinely missing tasks fails that proof, then uses the new
+    installed host to restore the exact obligations below. }
+  if MaintenanceFenceActive and
+    (UpgradeAgentWasStopped or UpgradeRecoveryTaskWasRemoved) and
+    EndUpgradeMaintenance then
+  begin
+    UpgradeAgentWasStopped := False;
+    UpgradeRecoveryTaskWasRemoved := False;
+    UpgradeSafeguardsRestored := True;
+  end;
+  if MaintenanceFenceActive and not UpgradeSafeguardsRestored then
     TryRestoreUpgradeSafeguards;
   if MaintenanceFenceActive then
   begin
@@ -923,6 +1083,7 @@ procedure CurStepChanged(CurStep: TSetupStep);
 var
   BackendIntent: Integer;
   DeferredSetupParameters: String;
+  DriverInstallParameters: String;
 begin
   if CurStep <> ssPostInstall then
     exit;
@@ -938,9 +1099,13 @@ begin
     exit;
 
   { A deliberate pause is a durable user preference, not a failed setup.
-    Update product files and safe shared prerequisites, reassert the
-    physical-safe paused state with the new executable, and defer work which
-    could enable VDD or recreate background tasks until explicit Enable. }
+    Update product files and safe shared prerequisites, preserve the
+    physical-safe paused state established by maintenance, and defer driver
+    installation, Sunshine configuration, and background tasks until explicit
+    Enable. If the user approved one existing device, acquire only its staged
+    identity after files are installed and immediately put it in the safe idle
+    state; this prevents a PnP-enabled fallback display during sleep without
+    running the generic legacy device-list pause path. }
   if not TryGetBackendSetupIntent(BackendIntent) then
     exit;
   if BackendIntent = 6 then
@@ -978,8 +1143,20 @@ begin
 
     if WizardIsTaskSelected('host\sunshine') then
     begin
+      if AdoptExistingVddApproved then
+      begin
+        if not RunRequiredHostCommand(
+          'Recording and safely pausing the approved existing virtual display',
+          'driver adopt-idle --adoption-owner-pid ' +
+            IntToStr(MaintenanceOwnerPid)) then
+          exit;
+      end;
+
       DeferredSetupParameters :=
         'deferred-setup save --host sunshine --virtual-driver true';
+      if AdoptExistingVddApproved then
+        DeferredSetupParameters := DeferredSetupParameters +
+          ' --adoption-owner-pid ' + IntToStr(MaintenanceOwnerPid);
       if not RunRequiredHostCommand(
         'Saving Sunshine setup until Vita host features are enabled',
         DeferredSetupParameters) then
@@ -993,10 +1170,11 @@ begin
         exit;
     end;
 
-    if not RunRequiredHostCommand(
-      'Preserving the intentionally paused Vita host features',
-      'backend disable') then
-      exit;
+    Log(
+      'The protected Disabled preference, physical-only maintenance result, ' +
+      'and removed recovery tasks establish the paused state. Any explicitly ' +
+      'approved existing display is now exact-journal-owned and disabled; no ' +
+      'unowned or missing virtual-display instance was changed.');
     BackendRemainsPausedAfterSetup := True;
     exit;
   end;
@@ -1030,9 +1208,13 @@ begin
       '"') then
       exit;
 
+    DriverInstallParameters := 'driver install';
+    if AdoptExistingVddApproved then
+      DriverInstallParameters := DriverInstallParameters +
+        ' --adoption-owner-pid ' + IntToStr(MaintenanceOwnerPid);
     if not RunRequiredHostCommand(
       'Installing and verifying the virtual display driver',
-      'driver install --adopt-existing-vdd') then
+      DriverInstallParameters) then
       exit;
     DriverReadinessChecked := False;
   end;
@@ -1234,14 +1416,12 @@ var
   HeadingLabel: TNewStaticText;
   ExplanationLabel: TNewStaticText;
   SafetyLabel: TNewStaticText;
-  RemoveVirtualDisplayCheck: TNewCheckBox;
   RemoveSunshineCheck: TNewCheckBox;
   RemoveViGEmBusCheck: TNewCheckBox;
   PreserveDiagnosticsCheck: TNewCheckBox;
   ContinueButton: TNewButton;
   CancelButton: TNewButton;
 begin
-  RemoveVirtualDisplayOnUninstall := HasUninstallSwitch('REMOVEVDD');
   RemoveSunshineOnUninstall := HasUninstallSwitch('REMOVESUNSHINE');
   RemoveViGEmBusOnUninstall := HasUninstallSwitch('REMOVEVIGEMBUS');
   PreserveDiagnosticsOnUninstall := HasUninstallSwitch('KEEPDIAGNOSTICS');
@@ -1279,25 +1459,15 @@ begin
     ExplanationLabel.WordWrap := True;
     ExplanationLabel.Caption :=
       'Sunshine and ViGEmBus can be shared with other streaming or controller ' +
-      'software and are kept by default. The MTT driver package may also be ' +
-      'shared, so Vita Moonlight never deletes that package without proof it ' +
-      'owns every consumer. The option below releases only the exact display ' +
-      'device managed by this installation.';
-
-    RemoveVirtualDisplayCheck := TNewCheckBox.Create(OptionsForm);
-    RemoveVirtualDisplayCheck.Parent := OptionsForm;
-    RemoveVirtualDisplayCheck.Left := ScaleX(36);
-    RemoveVirtualDisplayCheck.Top := ScaleY(123);
-    RemoveVirtualDisplayCheck.Width := ScaleX(520);
-    RemoveVirtualDisplayCheck.Height := ScaleY(28);
-    RemoveVirtualDisplayCheck.Caption :=
-      'Release the Vita-managed display device (remove it only if Vita created it)';
-    RemoveVirtualDisplayCheck.Checked := RemoveVirtualDisplayOnUninstall;
+      'software and are kept by default. The shared MTT driver package is also ' +
+      'kept. Vita Moonlight always releases only its exact managed display: a ' +
+      'device it created is removed, while an adopted device is restored to ' +
+      'its recorded enabled state. An unproven device is never changed.';
 
     RemoveSunshineCheck := TNewCheckBox.Create(OptionsForm);
     RemoveSunshineCheck.Parent := OptionsForm;
     RemoveSunshineCheck.Left := ScaleX(36);
-    RemoveSunshineCheck.Top := ScaleY(166);
+    RemoveSunshineCheck.Top := ScaleY(135);
     RemoveSunshineCheck.Width := ScaleX(520);
     RemoveSunshineCheck.Height := ScaleY(28);
     RemoveSunshineCheck.Caption := 'Remove Sunshine';
@@ -1306,7 +1476,7 @@ begin
     RemoveViGEmBusCheck := TNewCheckBox.Create(OptionsForm);
     RemoveViGEmBusCheck.Parent := OptionsForm;
     RemoveViGEmBusCheck.Left := ScaleX(36);
-    RemoveViGEmBusCheck.Top := ScaleY(201);
+    RemoveViGEmBusCheck.Top := ScaleY(178);
     RemoveViGEmBusCheck.Width := ScaleX(520);
     RemoveViGEmBusCheck.Height := ScaleY(28);
     RemoveViGEmBusCheck.Caption := 'Remove ViGEmBus controller emulation';
@@ -1315,7 +1485,7 @@ begin
     PreserveDiagnosticsCheck := TNewCheckBox.Create(OptionsForm);
     PreserveDiagnosticsCheck.Parent := OptionsForm;
     PreserveDiagnosticsCheck.Left := ScaleX(36);
-    PreserveDiagnosticsCheck.Top := ScaleY(246);
+    PreserveDiagnosticsCheck.Top := ScaleY(226);
     PreserveDiagnosticsCheck.Width := ScaleX(520);
     PreserveDiagnosticsCheck.Height := ScaleY(28);
     PreserveDiagnosticsCheck.Caption :=
@@ -1358,7 +1528,6 @@ begin
     Result := OptionsForm.ShowModal = mrOk;
     if Result then
     begin
-      RemoveVirtualDisplayOnUninstall := RemoveVirtualDisplayCheck.Checked;
       RemoveSunshineOnUninstall := RemoveSunshineCheck.Checked;
       RemoveViGEmBusOnUninstall := RemoveViGEmBusCheck.Checked;
       PreserveDiagnosticsOnUninstall := PreserveDiagnosticsCheck.Checked;
@@ -1541,16 +1710,6 @@ begin
       False) then
       Abort;
 
-    if RemoveVirtualDisplayOnUninstall then
-    begin
-      if not RunCheckedUninstallHostCommand(
-        'Releasing the exact Vita-managed virtual display device',
-        'driver uninstall',
-        True) then
-        Abort;
-      RecordCompletedExplicitRemoval('Vita-managed virtual display device');
-    end;
-
     if RemoveSunshineOnUninstall then
     begin
       if not RunCheckedUninstallHostCommand(
@@ -1582,8 +1741,6 @@ begin
     FinalizeParameters := 'uninstall finalize-owned';
     if RemoveSunshineOnUninstall then
       FinalizeParameters := FinalizeParameters + ' --sunshine-removed';
-    if RemoveVirtualDisplayOnUninstall then
-      FinalizeParameters := FinalizeParameters + ' --vdd-removed';
     if not RunCheckedUninstallHostCommand(
       'Removing Vita Moonlight background functions and owned state',
       FinalizeParameters,

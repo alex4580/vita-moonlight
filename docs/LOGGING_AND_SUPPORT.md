@@ -15,6 +15,13 @@ unless you are reproducing a problem. During a capture, entries are buffered
 and written in batches rather than forcing a storage write for every event. A
 capture never remains enabled across an app restart.
 
+With the performance overlay off, the diagnostics screen closed, and support
+capture stopped, the Vita also disables optional FPS aggregation, extended
+decode/transport counters, and diagnostic snapshots. It does not count gyro
+or controller reports. Gyro sampling itself still runs when the user selects a
+gyro-capable controller profile and the host requests motion reports, because
+those reports are game input rather than diagnostics.
+
 The supported Windows all-app handoff also does not force Sunshine to INFO,
 tail `sunshine.log`, or parse global client events. Its authenticated stream
 generation, sparse heartbeat lease, matching stop, and exact Sunshine-process

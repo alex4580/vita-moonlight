@@ -47,8 +47,8 @@ needs all of these paths; they may be split among testers:
 | Same-version reinstall/repair | The exact candidate is installed, then the same installer and recommended setup are run again. |
 | Paused reinstall/repair | The exact candidate is deliberately paused before the same installer is run over it; Enable later completes deferred work. |
 | Vita package lifecycle | Candidate VPK is installed over itself, removed from LiveArea, and installed again. |
-| Keep-dependencies uninstall | Host is uninstalled while Sunshine, ViGEmBus, and VDD are retained. |
-| Optional-removal uninstall | Disposable PC/snapshot where Sunshine and ViGEmBus can safely be removed and the exact Vita-managed display device can be released. |
+| Keep-dependencies uninstall | Host is uninstalled while Sunshine, ViGEmBus, and the shared VDD package are retained; exact Vita display authority is still released. |
+| Optional-removal uninstall | Disposable PC/snapshot where Sunshine and ViGEmBus can safely be removed. |
 | Different-account UAC | Disposable standard-user session where setup is approved with a different Administrator account; setup must fail before mutation, while later uninstall remains possible. |
 | Laptop | Internal panel, including a stream and recovery while on battery. |
 | Multiple monitors | Two or more connected physical displays. |
@@ -198,11 +198,14 @@ This deliberately terminates setup. Do not run it on a PC you cannot restore.
    enabled state. Start setup with the Sunshine/display task selected, then
    terminate setup after protected maintenance begins but before product files
    are copied. The device state must be unchanged and no Vita ownership journal
-   may remain. Rerun setup to completion: the task-page disclosure is the
-   explicit adoption choice, idle must leave that exact device disabled, and
-   an explicit display release during uninstall must restore the enabled state
-   recorded before installation. Repeat from a snapshot where that device was
-   initially disabled. No second MTT or legacy IDD target may be changed.
+   may remain. Rerun setup to completion: setup must show a separate adoption
+   question before copying files. Choose **No** once and verify the device is
+   unchanged, then retry and choose **Yes**. Idle must leave that exact device
+   disabled, and normal uninstall must restore the enabled state recorded
+   before installation. Repeat from a snapshot where that device was
+   initially disabled. Repeat silent setup without `/ADOPTEXISTINGVDD`; it must
+   stop before copying files. With that switch, it may adopt only one
+   unambiguous device. No second MTT or legacy IDD target may be changed.
 
 If setup requests a restart at any point, it must stop safely before applying
 stream-display configuration. Restart once and resume with
@@ -563,20 +566,24 @@ This is the recommended path on a normal PC.
 2. Open **Windows Settings > Apps > Installed apps** (Windows 11) or
    **Apps & features** (Windows 10), find **Vita Moonlight Host**, and choose
    **Uninstall**.
-3. Leave removal of MTT VDD, Sunshine, and ViGEmBus **unselected**. Optionally
-   keep the one stream-rescue log when diagnosing a recovery failure.
+3. Leave removal of Sunshine and ViGEmBus **unselected**. Optionally keep the
+   one stream-rescue log when diagnosing a recovery failure. The shared MTT
+   package is always retained; exact Vita display authority is always released.
 4. If Windows requests a restart, restart and run uninstall again.
 5. Confirm:
    - Vita Moonlight Host and its Start-menu entry are gone;
-   - the physical display is usable and the managed VDD is PnP-disabled;
+   - the physical display is usable;
    - Sunshine, ViGEmBus, and VDD remain installed;
+   - an exact Vita-created VDD node is absent, an exact adopted node matches
+     its recorded pre-install enabled state, and an unproven node is unchanged;
    - Vita-owned recovery tasks and Sunshine integration are removed; and
    - unrelated Sunshine applications and later user changes remain.
 6. Reinstall the candidate, choose **Pause Vita host features**, restart, and
    repeat this keep-dependencies uninstall without enabling again. The
    uninstaller must restore a physical-only topology, remove the saved paused
-   lifecycle/tasks, preserve Sunshine/ViGEmBus/VDD, and leave the managed VDD
-   PnP-disabled. No Vita-owned listener or background process may remain.
+   lifecycle/tasks, preserve Sunshine/ViGEmBus and the shared VDD package, and
+   release the exact display under the same ownership rules. No Vita-owned
+   listener or background process may remain.
 
 ### Interrupted-finalization retry (disposable VM/snapshot)
 
@@ -625,15 +632,15 @@ This is a maintainer/community-specialist crash fixture. Take a snapshot first.
    in-progress guard. The uninstaller must fail closed and must not claim that
    finalization committed. Do not perform this mutation on a real installation.
 
-## 13. Uninstall the Windows host while releasing the display and removing optional shared components
+## 13. Uninstall the Windows host while removing optional shared components
 
-Use a disposable PC or reversible snapshot. Removing Sunshine or ViGEmBus, or
-releasing an adopted display device, can affect other streaming/controller
-applications. The shared MTT driver package is deliberately retained.
+Use a disposable PC or reversible snapshot. Removing Sunshine or ViGEmBus can
+affect other streaming/controller applications. The shared MTT driver package
+is deliberately retained; exact display release follows the same mandatory,
+ownership-scoped behavior as a normal uninstall.
 
 1. Start with a healthy candidate installation and a visible physical display.
-2. Run uninstall and explicitly select release of the Vita-managed display
-   device, Sunshine, and ViGEmBus.
+2. Run uninstall and explicitly select Sunshine and ViGEmBus removal.
 3. The uninstaller must restore and verify a physical display before releasing
    the exact device or removing recovery safeguards.
 4. If a dependency removal fails or requests a restart, the host and recovery

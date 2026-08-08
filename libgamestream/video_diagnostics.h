@@ -22,6 +22,12 @@ typedef struct VideoStreamDiagnostics {
   uint32_t idrRequestsSent;
 } VideoStreamDiagnostics;
 
+/*
+ * Collection is disabled by default. The Vita UI enables it only while an
+ * overlay, the diagnostics screen, or an explicit support capture needs the
+ * counters. Streaming and recovery behavior are independent of this switch.
+ */
+void LiSetVideoStreamDiagnosticsEnabled(bool enabled);
 bool LiGetVideoStreamDiagnosticsSnapshot(
     VideoStreamDiagnostics *snapshot);
 

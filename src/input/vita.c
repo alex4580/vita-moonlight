@@ -52,7 +52,6 @@
 
 #define WIDTH 960
 #define HEIGHT 544
-#define MOUSE_SENSITIVITY 2400.0
 
 const short Y_MAXIMIUM_DEADZONE = -32383;
 const short Y_MINIMUM_DEADZONE = -1024;
@@ -68,7 +67,6 @@ double_click_tracker dc_tracker = {
 };
 
 struct mapping map = {0};
-SceFQuaternion deviceQuat_old = {0.0f, 0.0f, 0.0f, 0.0f};
 
 typedef struct input_data {
     int32_t button;
@@ -128,25 +126,6 @@ inline void move_mouse(TouchData old, TouchData cur) {
 }
 
 
-inline void move_motion(SceMotionState motionState) {
-  const float motion_scalar_x = config.motion_controls_scalar_x;
-  const float motion_scalar_y = config.motion_controls_scalar_y;
-
-  // Get the mouse position.
-  double delta_x = (deviceQuat_old.y-motionState.deviceQuat.y) * (float)MOUSE_SENSITIVITY * motion_scalar_x;
-  double delta_y = (deviceQuat_old.x-motionState.deviceQuat.x) * (float)MOUSE_SENSITIVITY * motion_scalar_y;
-
-  if (delta_x == 0 && delta_y == 0) {
-    return;
-  }
-
-  int x = lround(delta_x * mouse_multiplier);
-  int y = lround(delta_y * mouse_multiplier);
-
-  LiSendMouseMoveEvent(x, y);
-}
-
-
 inline void move_wheel(TouchData old, TouchData cur) {
   int old_y = (old.points[0].y + old.points[1].y) / 2;
   int cur_y = (cur.points[0].y + cur.points[1].y) / 2;
@@ -170,7 +149,6 @@ static vita_touch_zone_gesture front_zone_gesture;
 TouchData touch;
 TouchData touch_old, swipe;
 SceTouchData front, back;
-SceMotionState motionState;
 
 int front_state = NO_TOUCH_ACTION;
 short finger_count = 0;
@@ -181,11 +159,6 @@ SceRtcTick current, until;
 
 input_data curr, old;
 int controller_port;
-bool _calibrateGyro = true;
-bool _motionActivated = false;
-bool _motionCalibrated = false;
-int _motionResetCount = 0;
-
 // TODO config
 static int VERTICAL;
 static int HORIZONTAL;
@@ -441,14 +414,6 @@ inline void special(uint32_t defined, uint32_t pressed, uint32_t old_pressed) {
     }
   }
 
-}
-
-float QuatLength(SceFQuaternion v1, SceFQuaternion v2) {
-  float x_diff = v1.x - v2.x;
-  float y_diff = v1.y - v2.y;
-  float z_diff = v1.z - v2.z;
-
-  return sqrt(x_diff * x_diff + y_diff * y_diff + z_diff * z_diff);
 }
 
 inline void check_for_double_click(input_data *curr) {
@@ -1013,6 +978,9 @@ static pthread_mutex_t input_process_mutex;
 static bool input_mutex_initialized = false;
 static uint32_t input_worker_running = 0;
 static SceUID input_worker_thread = -1;
+static SceUID input_worker_event = -1;
+
+#define INPUT_WORKER_WAKE 0x1U
 
 static bool input_worker_is_running(void) {
   return __atomic_load_n(&input_worker_running, __ATOMIC_ACQUIRE) != 0;
@@ -1021,6 +989,12 @@ static bool input_worker_is_running(void) {
 static void set_input_worker_running(bool running) {
   __atomic_store_n(
       &input_worker_running, running ? 1U : 0U, __ATOMIC_RELEASE);
+}
+
+static void wake_input_worker(void) {
+  if (input_worker_event >= 0) {
+    sceKernelSetEventFlag(input_worker_event, INPUT_WORKER_WAKE);
+  }
 }
 
 static void update_front_sections(const CONFIGURATION *input_config) {
@@ -1152,14 +1126,27 @@ void vitainput_refresh_touchzones(void) {
 }
 
 int vitainput_thread(SceSize args, void *argp) {
+  (void)args;
+  (void)argp;
   while (input_worker_is_running()) {
     pthread_mutex_lock(&input_process_mutex);
-    if (active_input_thread) {
+    bool stream_active = active_input_thread != 0;
+    if (stream_active) {
       vitainput_process();
     }
     pthread_mutex_unlock(&input_process_mutex);
 
-    sceKernelDelayThread(2000); // 2 ms
+    if (stream_active) {
+      sceKernelDelayThread(2000); // 2 ms only while streaming
+    } else {
+      /* Outside a stream there is no input work to do. Block without a
+       * timeout instead of waking and taking the mutex 500 times/second. */
+      unsigned int event_bits = 0;
+      sceKernelWaitEventFlag(
+          input_worker_event, INPUT_WORKER_WAKE,
+          SCE_EVENT_WAITOR | SCE_EVENT_WAITCLEAR_PAT,
+          &event_bits, NULL);
+    }
   }
 
   return 0;
@@ -1175,6 +1162,14 @@ bool vitainput_init() {
   }
   input_mutex_initialized = true;
 
+  input_worker_event = sceKernelCreateEventFlag(
+      "vitainput_event", SCE_EVENT_WAITSINGLE, 0, NULL);
+  if (input_worker_event < 0) {
+    pthread_mutex_destroy(&input_process_mutex);
+    input_mutex_initialized = false;
+    return false;
+  }
+
   SceUID thid = sceKernelCreateThread("vitainput_thread", vitainput_thread, 0, 0x40000, 0, 0, NULL);
   if (thid >= 0) {
     input_worker_thread = thid;
@@ -1187,6 +1182,8 @@ bool vitainput_init() {
     input_worker_thread = -1;
   }
 
+  sceKernelDeleteEventFlag(input_worker_event);
+  input_worker_event = -1;
   pthread_mutex_destroy(&input_process_mutex);
   input_mutex_initialized = false;
   return false;
@@ -1195,6 +1192,7 @@ bool vitainput_init() {
 bool vitainput_shutdown(void) {
   keyboardsystem_close_keyboard();
   set_input_worker_running(false);
+  wake_input_worker();
   /* Restore the system escape path before any bounded join can fail. The
    * worker never locks PS itself, so this is safe while it finishes. */
   unlock_psbutton();
@@ -1220,6 +1218,18 @@ bool vitainput_shutdown(void) {
       return false;
     }
     input_worker_thread = -1;
+  }
+
+  if (input_worker_event >= 0) {
+    int ret = sceKernelDeleteEventFlag(input_worker_event);
+    if (ret < 0) {
+      vita_debug_event(
+          VITA_DEBUG_LEVEL_ERROR, "input.worker",
+          "state=cleanup_failed phase=delete_event code=0x%08x",
+          (unsigned int)ret);
+      return false;
+    }
+    input_worker_event = -1;
   }
 
   if (input_mutex_initialized) {
@@ -1359,6 +1369,7 @@ void vitainput_start(void) {
     lock_psbutton();
 
   active_input_thread = true;
+  wake_input_worker();
   pthread_mutex_unlock(&input_process_mutex);
 }
 

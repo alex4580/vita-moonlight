@@ -61,11 +61,12 @@ internal sealed record ManagedVddInstallPlan(
 
 internal sealed record ManagedVddAcquisitionPolicy(
     bool ExactLegacyVitaOwnershipEvidence,
-    bool AllowExistingDeviceAdoption);
+    string? ExpectedExistingDeviceInstanceId);
 
 internal sealed record ManagedVddAdoptionReadiness(
     bool RequiresExplicitAdoption,
-    string Reason);
+    string Reason,
+    string? CandidateInstanceId);
 
 internal sealed record ManagedVddReleasePlan(
     ManagedVddReleaseAction Action,
@@ -95,7 +96,9 @@ internal static class ManagedVddOwnershipJournal
         HostStatePaths.Root,
         "managed-vdd-ownership.json");
 
-    internal static bool RequiresExplicitAdoption(out string reason)
+    internal static bool RequiresExplicitAdoption(
+        out string reason,
+        out string? candidateInstanceId)
     {
         MachineStateSecurity.Secure();
         if (DisplayWizardAdapter.IsLegacyDriverInstalled())
@@ -105,22 +108,18 @@ internal static class ManagedVddOwnershipJournal
         }
         var state = LoadCore();
         var devices = DisplayWizardAdapter.InspectManagedDriverDevices();
-        var evidence = state is null &&
-            DisplayWizardAdapter.HasExactLegacyVitaOwnershipEvidence(
-                devices);
         var readiness = EvaluateAdoptionRequirement(
             state,
-            devices,
-            evidence);
+            devices);
         reason = readiness.Reason;
+        candidateInstanceId = readiness.CandidateInstanceId;
         return readiness.RequiresExplicitAdoption;
     }
 
     internal static ManagedVddAdoptionReadiness
         EvaluateAdoptionRequirement(
             ManagedVddOwnershipState? state,
-            IEnumerable<ManagedVddDeviceStatus> observedDevices,
-            bool exactLegacyVitaOwnershipEvidence)
+            IEnumerable<ManagedVddDeviceStatus> observedDevices)
     {
         var devices = NormalizeDevices(observedDevices);
         var present = devices.Where(device => device.Present).ToArray();
@@ -133,7 +132,8 @@ internal static class ManagedVddOwnershipJournal
                 RequireNoUnownedPresentDevices(state.Device!, devices);
                 return new ManagedVddAdoptionReadiness(
                     false,
-                    "The exact managed-VDD instance is already journal-owned.");
+                    "The exact managed-VDD instance is already journal-owned.",
+                    null);
             }
             if (state.PendingCreation is not null)
             {
@@ -145,62 +145,49 @@ internal static class ManagedVddOwnershipJournal
                     false,
                     present.Length == 0
                         ? "Managed-VDD creation is prepared and no device is present yet."
-                        : "Managed-VDD creation is prepared and repair can finalize its single candidate.");
+                        : "Managed-VDD creation is prepared and repair can finalize its single candidate.",
+                    null);
             }
             // A released tombstone deliberately does not auto-reclaim its
-            // former node, even while older product evidence still exists.
-            exactLegacyVitaOwnershipEvidence = false;
+            // former node.
         }
 
         if (present.Length == 0)
         {
             return new ManagedVddAdoptionReadiness(
                 false,
-                "No existing managed-VDD instance needs adoption.");
+                "No existing managed-VDD instance needs adoption.",
+                null);
         }
         if (present.Length != 1)
         {
             throw Ambiguous(present.Length);
         }
-        if (exactLegacyVitaOwnershipEvidence)
-        {
-            return new ManagedVddAdoptionReadiness(
-                false,
-                "The sole managed-VDD instance matches the complete protected pre-journal Vita footprint and will migrate as app-created.");
-        }
         return new ManagedVddAdoptionReadiness(
             true,
-            "The sole managed-VDD instance has no active ownership journal or exact protected legacy Vita footprint. Explicit adoption is required to preserve its current enabled state as the uninstall baseline.");
+            "The sole managed-VDD instance has no active ownership journal or exact protected legacy Vita footprint. Explicit adoption is required to preserve its current enabled state as the uninstall baseline.",
+            present[0].InstanceId);
     }
 
     internal static ManagedVddInstallPlan PrepareInstallLocked(
         DisplayTransactionLease transaction,
-        bool allowExistingDeviceAdoption = false,
-        bool allowAuthorizedMaintenanceBootstrap = false)
+        string? expectedExistingDeviceInstanceId = null)
     {
         transaction.RequireActive();
-        if (allowAuthorizedMaintenanceBootstrap)
-        {
-            SecureMigrationLocked(transaction);
-        }
-        else
-        {
-            SecureLocked(transaction);
-        }
+        SecureLocked(transaction);
         var state = LoadCore();
         var devices = DisplayWizardAdapter.InspectManagedDriverDevices();
-        var legacyEvidence =
-            state is null &&
-            DisplayWizardAdapter.HasExactLegacyVitaOwnershipEvidence(
-                devices,
-                allowAuthorizedMaintenanceBootstrap);
         var plan = ClassifyInstall(
             state,
             devices,
             DateTimeOffset.UtcNow,
             new ManagedVddAcquisitionPolicy(
-                legacyEvidence,
-                allowExistingDeviceAdoption));
+                // Exact legacy acquisition is intentionally exclusive to the
+                // pre-copy installer-maintenance migration. Once setup has
+                // copied the new executable, that file can no longer prove
+                // Vita created a pre-existing device.
+                ExactLegacyVitaOwnershipEvidence: false,
+                expectedExistingDeviceInstanceId));
         if (!Equals(state, plan.State))
         {
             SaveCore(plan.State);
@@ -228,16 +215,36 @@ internal static class ManagedVddOwnershipJournal
             .HasExactLegacyVitaOwnershipEvidence(
                 devices,
                 allowAuthorizedMaintenanceBootstrap);
-        var plan = ClassifyInstall(
-            null,
+        var plan = ClassifyLegacyMigration(
             devices,
             DateTimeOffset.UtcNow,
-            new ManagedVddAcquisitionPolicy(
-                evidence,
-                AllowExistingDeviceAdoption: false));
+            evidence);
+        if (plan is null) return false;
         SaveCore(plan.State);
         return plan.Device?.Ownership ==
             ManagedVddOwnershipKind.AppCreated;
+    }
+
+    /// <summary>
+    /// Classifies the narrow pre-journal migration without turning a failed
+    /// proof into an installation error. An unproven MTT node may be perfectly
+    /// legitimate third-party state, so installer maintenance must leave it
+    /// untouched and ask for explicit adoption later if virtual-display setup
+    /// was selected.
+    /// </summary>
+    internal static ManagedVddInstallPlan? ClassifyLegacyMigration(
+        IEnumerable<ManagedVddDeviceStatus> observedDevices,
+        DateTimeOffset now,
+        bool exactLegacyVitaOwnershipEvidence)
+    {
+        if (!exactLegacyVitaOwnershipEvidence) return null;
+        return ClassifyInstall(
+            null,
+            observedDevices,
+            now,
+            new ManagedVddAcquisitionPolicy(
+                ExactLegacyVitaOwnershipEvidence: true,
+                ExpectedExistingDeviceInstanceId: null));
     }
 
     internal static ManagedVddOwnedInstance CompleteCreationLocked(
@@ -539,7 +546,7 @@ internal static class ManagedVddOwnershipJournal
     {
         acquisitionPolicy ??= new ManagedVddAcquisitionPolicy(
             ExactLegacyVitaOwnershipEvidence: false,
-            AllowExistingDeviceAdoption: false);
+            ExpectedExistingDeviceInstanceId: null);
         var devices = NormalizeDevices(observedDevices);
         var present = devices.Where(device => device.Present).ToArray();
         if (state is null)
@@ -552,6 +559,22 @@ internal static class ManagedVddOwnershipJournal
         }
 
         ValidateState(state);
+        if (acquisitionPolicy.ExpectedExistingDeviceInstanceId is
+                { } expectedExisting &&
+            state.ReleasedAtUtc is null)
+        {
+            var existingAdopted = state.Device;
+            if (state.PendingCreation is not null ||
+                existingAdopted?.Ownership !=
+                    ManagedVddOwnershipKind.Adopted ||
+                !InstanceIdsEqual(
+                    existingAdopted?.InstanceId ?? string.Empty,
+                    expectedExisting))
+            {
+                throw new InvalidOperationException(
+                    "The protected managed-VDD ownership state does not match the exact adopted instance approved by the user. No device was substituted or changed.");
+            }
+        }
         if (state.ReleasedAtUtc is not null)
         {
             return ClassifyUnownedInstall(
@@ -654,6 +677,47 @@ internal static class ManagedVddOwnershipJournal
         ManagedVddAcquisitionPolicy acquisitionPolicy,
         long revision)
     {
+        var expectedExisting =
+            acquisitionPolicy.ExpectedExistingDeviceInstanceId;
+        if (expectedExisting is not null)
+        {
+            if (!IsValidInstanceId(expectedExisting))
+            {
+                throw new InvalidDataException(
+                    "The explicitly approved managed-VDD candidate identity is invalid.");
+            }
+            if (present.Count != 1 ||
+                !InstanceIdsEqual(
+                    present[0].InstanceId,
+                    expectedExisting))
+            {
+                throw new InvalidOperationException(
+                    "The exact virtual-display device approved for adoption is no longer the sole present ROOT\\MttVDD instance. " +
+                    $"Expected {expectedExisting}; observed " +
+                    (present.Count == 0
+                        ? "no present instance"
+                        : string.Join(", ", present.Select(device => device.InstanceId))) +
+                    ". No device was adopted, created, or changed. Inspect the displays and approve the current candidate again.");
+            }
+
+            var adopted = new ManagedVddOwnedInstance(
+                present[0].InstanceId,
+                ManagedVddOwnershipKind.Adopted,
+                present[0].Enabled,
+                present[0].Enabled,
+                null,
+                now);
+            var adoptedState = new ManagedVddOwnershipState(
+                CurrentFormatVersion,
+                revision,
+                adopted,
+                null);
+            return new ManagedVddInstallPlan(
+                ManagedVddInstallAction.UseOwnedInstance,
+                adoptedState,
+                adopted);
+        }
+
         if (present.Count == 0)
         {
             var pending = new ManagedVddOwnershipState(
@@ -670,8 +734,7 @@ internal static class ManagedVddOwnershipJournal
         {
             throw Ambiguous(present.Count);
         }
-        if (!acquisitionPolicy.ExactLegacyVitaOwnershipEvidence &&
-            !acquisitionPolicy.AllowExistingDeviceAdoption)
+        if (!acquisitionPolicy.ExactLegacyVitaOwnershipEvidence)
         {
             throw new InvalidOperationException(
                 "Windows has one present ROOT\\MttVDD instance, but Vita Moonlight found neither an exact protected prior-install footprint nor explicit permission to adopt it. " +
@@ -679,16 +742,11 @@ internal static class ManagedVddOwnershipJournal
                 "Remove the conflicting device, or explicitly choose adoption during display-driver repair after confirming its current enabled state should be restored on uninstall.");
         }
 
-        var ownership = acquisitionPolicy
-            .ExactLegacyVitaOwnershipEvidence
-            ? ManagedVddOwnershipKind.AppCreated
-            : ManagedVddOwnershipKind.Adopted;
+        var ownership = ManagedVddOwnershipKind.AppCreated;
         var owned = new ManagedVddOwnedInstance(
             present[0].InstanceId,
             ownership,
-            ownership == ManagedVddOwnershipKind.Adopted
-                ? present[0].Enabled
-                : null,
+            null,
             present[0].Enabled,
             null,
             now);
@@ -1081,6 +1139,9 @@ internal static class ManagedVddOwnershipJournal
             ReleasedAtUtc = null,
             ReleasedBy = null,
         };
+
+    internal static bool IsValidInstanceIdForAdoption(string? instanceId) =>
+        IsValidInstanceId(instanceId);
 
     private static bool IsValidInstanceId(string? instanceId) =>
         !string.IsNullOrWhiteSpace(instanceId) &&

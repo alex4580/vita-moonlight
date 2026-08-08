@@ -33,6 +33,10 @@ for details.
    cannot install its interactive recovery safeguards from a standard account
    by supplying a different Administrator account at the UAC prompt; setup
    detects that case and stops before changing the PC.
+   If setup finds one existing MTT virtual display that it cannot prove belongs
+   to an earlier Vita Moonlight installation, it shows a separate adoption
+   question. **Yes** records that device's current enabled state before any
+   change so uninstall can restore it; **No** leaves it untouched.
 4. Restart Windows if asked.
 5. Open **Vita Moonlight Host** from the Start menu. Choose
    **Restart as Administrator** if that button appears.
@@ -67,6 +71,13 @@ Do not uninstall the old version first:
 The upgrade is designed to preserve Sunshine credentials, pairing, unrelated
 Sunshine applications, and compatible user configuration. It restores a
 physical display before changing installed host components.
+
+An older or incomplete installation can contain the Vita display without the
+current protected ownership record. That is not treated as a clean install or
+silently claimed: setup first restores the physical desktop, then asks whether
+the one unambiguous existing MTT device may be adopted. For unattended
+deployment, `/ADOPTEXISTINGVDD` is the explicit equivalent; without it, silent
+setup stops before copying files or changing the device.
 
 If you previously chose **Pause Vita host features**, setup updates the
 installed files but preserves that paused state. It does not re-enable the
@@ -304,11 +315,12 @@ host or its recovery safeguards. By default it keeps:
 - the MTT virtual-display driver.
 
 These components may be used by other software. The uninstaller can remove
-Sunshine or ViGEmBus only when you explicitly select them. Its display option
-releases this installation's exact device: an app-created device is removed,
-while an adopted device returns to its recorded pre-install enabled state. The
-shared MTT driver package is retained because package-wide ownership cannot be
-proved safely.
+Sunshine or ViGEmBus only when you explicitly select them. It always releases
+only this installation's exact display authority: an app-created device is
+removed, while an adopted device returns to its recorded pre-install enabled
+state. With no exact ownership journal, every unproven device is left
+untouched. The shared MTT driver package is retained because package-wide
+ownership cannot be proved safely.
 
 Unlike setup/repair, uninstall may be approved with a different Administrator
 account. It verifies the exact executable and arguments of each Vita-owned
@@ -322,10 +334,11 @@ tasks. Uninstall reports the unresolved endpoint, keeps Windows' current
 default rather than guessing another device, and completes normally.
 
 When shared components are kept, uninstall leaves Sunshine unchanged and the
-VDD driver installed, but leaves its exact managed device PnP-disabled. It
-then removes both exact scheduled tasks, the running rescue agent, current
-host state, and exact legacy Vita Moonlight state. Unknown files in a legacy
-folder are retained rather than deleted recursively.
+VDD driver package installed. It removes an exact Vita-created node or restores
+an exact adopted node's recorded PnP state, then relinquishes its journal. It
+then removes both exact scheduled tasks, the running rescue agent, current host
+state, and exact legacy Vita Moonlight state. Unknown files in a legacy folder
+are retained rather than deleted recursively.
 
 If Windows requests a restart or a selected dependency cannot yet be removed,
 the host and recovery safeguards remain. Restart Windows and run uninstall

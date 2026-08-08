@@ -216,17 +216,38 @@ def main() -> int:
         "bool vitainput_shutdown(void)" in vita_input
         and "sceKernelWaitThreadEnd" in vita_input
         and "input_worker_is_running()" in vita_input
+        and "sceKernelWaitEventFlag(" in vita_input
+        and "input_worker_event" in vita_input
+        and "2 ms only while streaming" in vita_input
+        and "wake_input_worker();" in function_body(
+            vita_input, "void vitainput_start(void)", "void vitainput_stop(void)"
+        )
+        and "wake_input_worker();" in function_body(
+            vita_input, "bool vitainput_shutdown(void)", "void vitainput_config("
+        )
         and vita_input.find("unlock_psbutton();", vita_input.find(
             "bool vitainput_shutdown(void)"))
         < vita_input.find("sceKernelWaitThreadEnd", vita_input.find(
             "bool vitainput_shutdown(void)")),
-        "src/input/vita.c: the input worker must have an owned joinable lifecycle",
+        "src/input/vita.c: the input worker must block while idle, wake for a stream/shutdown, and retain an owned joinable lifecycle",
     )
     require(
         "bool vitapower_shutdown(void)" in power
         and "sceKernelWaitEventFlag" in power
-        and "power_worker_running" in power,
-        "src/power/vita.c: the power worker must be wakeable and joinable",
+        and "power_worker_running" in power
+        and "static bool start_power_worker_locked(void)" in power
+        and "static bool stop_power_worker_locked(void)" in power
+        and "sceKernelCreateThread(" not in function_body(
+            power, "bool vitapower_init()", "bool vitapower_shutdown(void)"
+        )
+        and "scePowerIsLowBattery" not in power
+        and "POWER_WORKER_STACK_SIZE 0x10000U" in power
+        and "config->disable_powersave = true;" in config
+        and "config.disable_powersave = true;" not in function_body(
+            config, "void config_apply_stream_preset(",
+            "const char *config_stream_preset_name("
+        ),
+        "src/power/vita.c: keep-awake must be independently configurable, lazy, stream-scoped, wakeable, and joinable",
     )
     require(
         "bool vita_motion_shutdown(void)" in motion

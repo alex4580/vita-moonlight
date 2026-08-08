@@ -107,6 +107,13 @@ the installer over the existing Windows installation, then open the control
 panel as Administrator and click **Set up or repair this PC**. Install the new
 VPK over the old Vita app.
 
+If Windows already contains exactly one MTT virtual-display device but setup
+cannot prove that an older Vita Moonlight release created it, setup asks before
+adopting it. Choose **Yes** only if this installation may manage that device.
+Its enabled/disabled state is recorded at adoption and restored on uninstall;
+**No** leaves it untouched. Unattended setup is fail-closed unless the operator
+deliberately supplies `/ADOPTEXISTINGVDD`.
+
 Running the same installer again is also the normal repair procedure. Your
 Sunshine credentials and unrelated Sunshine applications should be preserved.
 If Windows requests a restart, restart and run **Set up or repair this PC**
@@ -140,20 +147,21 @@ Sunshine once; this is expected and does not assume a clean install.
    **Apps & features** (Windows 10), find **Vita Moonlight Host**, and choose
    **Uninstall**.
 3. Keep the default choices for a normal uninstall. Sunshine, ViGEmBus, and
-   the shared MTT driver package are retained. The optional display choice
-   releases only this installation's exact device: a device created by Vita
-   Moonlight is removed, while an adopted existing device is restored to its
-   pre-install enabled state.
+   the shared MTT driver package are retained. The exact display owned by this
+   installation is always released safely: a device created by Vita Moonlight
+   is removed, while an adopted existing device is restored to its recorded
+   pre-install enabled state. A device without exact Vita ownership is never
+   changed.
 4. To remove the Vita app, highlight it in LiveArea, press **Triangle**, and
    choose **Delete**.
 
 The Windows uninstaller works from either the enabled or paused state. It
 restores and verifies a physical display before removing recovery safeguards,
 removes Vita-owned settings and legacy state, and leaves shared components
-that you keep in place. By default the retained Vita display device is stopped,
-so it cannot take over when the physical monitor sleeps. The shared MTT driver
-package is never guessed to be exclusively owned and is not deleted. If
-uninstall asks for a restart,
+that you keep in place. It removes an exact app-created display or restores an
+exact adopted display to its original enabled state before relinquishing it;
+an unproven display remains untouched. The shared MTT driver package is never
+guessed to be exclusively owned and is not deleted. If uninstall asks for a restart,
 restart Windows and run the uninstaller again.
 
 Before Pause or uninstall, the host makes one bounded attempt to restore the
@@ -196,7 +204,9 @@ laptops, and multi-monitor PCs:
 - [Logging and support guide](docs/LOGGING_AND_SUPPORT.md)
 
 Support logging is **off by default**. During normal play, Vita Moonlight does
-not open, create, or write a support-log file.
+not open, create, or write a support-log file. With the overlay and diagnostics
+screen also off, optional per-frame, transport, and gyro-event instrumentation
+is disabled rather than collected silently in the background.
 
 ## Build or fork the project
 

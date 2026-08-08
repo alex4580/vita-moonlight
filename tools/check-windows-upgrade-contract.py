@@ -134,6 +134,12 @@ def check_installer_legacy_surface(installer: str) -> None:
         "function PrepareToInstall(",
         "TryRestoreUpgradeSafeguards",
     )
+    deinitialize = section(
+        installer,
+        "procedure DeinitializeSetup;",
+        "function DriverReadyForConfiguration:",
+        "installer cancel/failure cleanup",
+    )
 
     require(
         "PreflightHostPath" in runner,
@@ -257,6 +263,7 @@ def check_installer_legacy_surface(installer: str) -> None:
         [
             "BeginUpgradeMaintenance(ErrorText)",
             "QueryMaintenanceSnapshotState(",
+            "ConfirmManagedVddAdoption(ErrorText)",
             "PreflightHostPath :=",
             "RunPreflightHostCommand(",
         ],
@@ -284,6 +291,16 @@ def check_installer_legacy_surface(installer: str) -> None:
             "WithMaintenanceBypass('backend status --intent-exit-code')",
         ],
         "legacy rollback capability gate",
+    )
+    require_in_order(
+        deinitialize,
+        [
+            "UpgradeAgentWasStopped or UpgradeRecoveryTaskWasRemoved",
+            "EndUpgradeMaintenance then",
+            "if MaintenanceFenceActive and not UpgradeSafeguardsRestored then",
+            "TryRestoreUpgradeSafeguards",
+        ],
+        "cancel must first let the helper prove already-present task obligations before requiring a possibly missing old host to restore them",
     )
 
 
@@ -802,6 +819,26 @@ def check_release_scope_and_rescue_surface(installer: str) -> None:
         "paused Sunshine setup must retain the mandatory VDD plan",
     )
     program = read(REPOSITORY_ROOT / "host/VitaMoonlight.Host/Program.cs")
+    require(
+        "--adoption-owner-pid " in installer
+        and "plan.ExistingDeviceAdoptionInstanceId" in program
+        and "RequireStagedVddAdoptionCandidateForOwner" in program,
+        "a paused repair must retain the exact approved existing-device identity for its protected deferred driver transaction",
+    )
+    paused_setup = section(
+        installer,
+        "if BackendIntent = 5 then",
+        "'Installing or repairing ViGEmBus',",
+        "paused post-copy setup",
+    )
+    require(
+        "deferred-setup save --host sunshine --virtual-driver true"
+        in paused_setup
+        and "if AdoptExistingVddApproved then" in paused_setup
+        and "driver adopt-idle --adoption-owner-pid " in paused_setup
+        and "'backend disable'" not in paused_setup,
+        "a paused upgrade must acquire and disable only its exact approved candidate before deferring driver repair, without rerunning a broad legacy device-list mutation",
+    )
     require_in_order(
         program,
         [
@@ -947,9 +984,67 @@ def check_idle_ownership_release_contract(
     require(
         "--prepare-vdd-ownership" not in installer
         and "maintenance begin --owner-pid " in installer
-        and "driver install --adopt-existing-vdd" in installer
-        and "--adopt-existing-vdd" in program,
-        "existing MTT adoption must be deferred until the explicit post-copy driver install",
+        and "maintenance vdd-adoption-required --owner-pid " in installer
+        and "HasCommandLineSwitch('ADOPTEXISTINGVDD')" in installer
+        and "if AdoptExistingVddApproved then" in installer
+        and "DriverInstallParameters := 'driver install'" in installer
+        and "DriverInstallParameters +" in installer
+        and "' --adoption-owner-pid '" in installer
+        and "driver install --adopt-existing-vdd" not in installer
+        and 'case "vdd-adoption-required":' in program
+        and "StageVddAdoptionCandidateForOwner(" in program
+        and "ExpectedExistingDeviceInstanceId" in read(
+            REPOSITORY_ROOT /
+            "host/VitaMoonlight.Host/ManagedVddOwnershipJournal.cs"
+        ),
+        "existing MTT adoption must bind guided or explicit unattended consent to one protected instance identity through the post-copy driver transaction",
+    )
+    require(
+        "StagedVddAdoptionInstanceId" in maintenance
+        and "private const int CurrentFormatVersion = 2;" in maintenance
+        and "state.Revision == 0" in maintenance
+        and "Revision = checked(state.Revision + 1)" in maintenance
+        and "primary.Revision >= backup.Revision" in maintenance
+        and "primary.OwnerProcessId != backup.OwnerProcessId" in maintenance,
+        "the protected staged candidate must retain the v2 wire format read by <=0.14.8, while its additive revision survives a torn backup-first update without accepting another owner",
+    )
+    ownership = read(
+        REPOSITORY_ROOT /
+        "host/VitaMoonlight.Host/ManagedVddOwnershipJournal.cs"
+    )
+    ordinary_install = section(
+        ownership,
+        "internal static ManagedVddInstallPlan PrepareInstallLocked(",
+        "/// <summary>",
+        "ordinary post-copy managed-VDD install",
+    )
+    require(
+        "HasExactLegacyVitaOwnershipEvidence(" not in ordinary_install
+        and "ExactLegacyVitaOwnershipEvidence: false" in ordinary_install,
+        "ordinary post-copy install must never manufacture AppCreated authority from the newly copied executable; exact legacy migration belongs only to pre-copy maintenance",
+    )
+    installer_bootstrap = section(
+        uninstall,
+        "RecoverPhysicalAndDiscardPendingTransactionForInstallerMaintenanceBootstrap(",
+        "/// <summary>",
+        "installer maintenance physical recovery",
+    )
+    post_copy_recovery = section(
+        uninstall,
+        "RecoverPhysicalAndDiscardPendingTransactionForRecoveryUpgradeOnly()",
+        "RecoverPhysicalAndDiscardPendingTransactionForInstallerMaintenanceBootstrap(",
+        "post-copy installer recovery",
+    )
+    require(
+        "MigrateLegacyOwnershipIfProvenLocked(" in installer_bootstrap
+        and "MigrateLegacyOwnershipIfProvenLocked(" not in post_copy_recovery
+        and "MigrateLegacyOwnershipIfProvenLocked(" not in section(
+            uninstall,
+            "RecoverPhysicalAndDiscardPendingTransaction()",
+            "RecoverPhysicalAndDiscardPendingTransactionForRecoveryUpgradeOnly()",
+            "ordinary uninstall recovery",
+        ),
+        "pre-copy maintenance may migrate only already-proven legacy ownership, while post-copy recovery and uninstall must not manufacture evidence from the newly copied executable",
     )
 
     driver_uninstall = section(
@@ -967,6 +1062,23 @@ def check_idle_ownership_release_contract(
             "CompleteReleaseLocked(",
         ],
         "uninstall must stop Sunshine and establish physical topology before releasing exact authority",
+    )
+    require(
+        "if (!File.Exists(ManagedVddOwnershipJournal.JournalFile))"
+        in driver_uninstall
+        and "The unproven device and shared driver package were left unchanged."
+        in driver_uninstall
+        and "ManagedVddReleaseAction.RestoreAdoptedInstance"
+        in driver_uninstall
+        and "release.DesiredEnabled!.Value" in driver_uninstall
+        and "restoreManagedVdd: !HasFlag(args, \"--vdd-removed\")"
+        in program
+        and "if (restoreManagedVdd)" in uninstall
+        and "ShouldAttemptManagedVddReleaseForTest(" in uninstall
+        and "restoreManagedVdd && ownershipJournalExists" in uninstall
+        and "Uninstall did not locate or run driver tools" in uninstall
+        and ".UninstallDriver(transaction)" in uninstall,
+        "default uninstall must restore an adopted device's exact baseline while preserving a no-journal foreign device and shared package even when the bundled driver tools are missing",
     )
 
     readiness = section(

@@ -11,7 +11,9 @@ internal sealed record InstallerMaintenanceState(
     DateTimeOffset BeganAtUtc,
     bool BackendWasEnabled,
     bool RescueAgentTaskWasPresent,
-    bool RecoveryTaskWasPresent);
+    bool RecoveryTaskWasPresent,
+    string? StagedVddAdoptionInstanceId = null,
+    long Revision = 0);
 
 internal sealed record InstallerMaintenanceStatus(
     InstallerMaintenanceState State,
@@ -27,6 +29,11 @@ internal sealed record InstallerMaintenanceStatus(
 /// </summary>
 internal static class InstallerMaintenanceFence
 {
+    // Keep the wire format at v2: an already-installed <=0.14.8 host must be
+    // able to read the fence before setup replaces that executable. The
+    // candidate and revision are additive JSON members, which the old
+    // System.Text.Json reader ignores. A legacy v2 record therefore has
+    // revision zero; current publications use revision one or later.
     private const int CurrentFormatVersion = 2;
     private const int LegacyFormatVersion = 1;
     private const int MaximumStateBytes = 16 * 1024;
@@ -134,7 +141,9 @@ internal static class InstallerMaintenanceFence
             DateTimeOffset.UtcNow,
             snapshot.BackendWasEnabled,
             snapshot.RescueAgentTaskWasPresent,
-            snapshot.RecoveryTaskWasPresent);
+            snapshot.RecoveryTaskWasPresent,
+            StagedVddAdoptionInstanceId: null,
+            Revision: 1);
         Validate(state);
         var serialized = JsonSerializer.Serialize(state, JsonOptions);
         // The backup becomes durable before the public primary. Therefore a
@@ -193,7 +202,107 @@ internal static class InstallerMaintenanceFence
             BackendWasEnabled = snapshot.BackendWasEnabled,
             RescueAgentTaskWasPresent = snapshot.RescueAgentTaskWasPresent,
             RecoveryTaskWasPresent = snapshot.RecoveryTaskWasPresent,
+            StagedVddAdoptionInstanceId = null,
+            Revision = 1,
         };
+    }
+
+    /// <summary>
+    /// Binds the installer's later consent decision to the exact device which
+    /// was visible when the question was prepared. This is not ownership and
+    /// authorizes no PnP mutation. The staged identity lives only inside the
+    /// live-owner maintenance fence and disappears when setup ends.
+    /// </summary>
+    internal static InstallerMaintenanceState StageVddAdoptionCandidateForOwner(
+        int ownerProcessId,
+        string? candidateInstanceId)
+    {
+        RequireControllerProcess();
+        var ownerStart = RequireLiveProcessStart(ownerProcessId);
+        MachineStateSecurity.Secure();
+        using var commandGate = AcquireCommandGate();
+        var state = RequireOwnedSnapshot(
+            ownerProcessId,
+            ownerStart);
+        if (candidateInstanceId is not null &&
+            !ManagedVddOwnershipJournal.IsValidInstanceIdForAdoption(
+                candidateInstanceId))
+        {
+            throw new InvalidDataException(
+                "Windows returned an invalid managed-VDD adoption candidate identity.");
+        }
+        if (string.Equals(
+                state.StagedVddAdoptionInstanceId,
+                candidateInstanceId,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            return state;
+        }
+        if (state.FormatVersion != CurrentFormatVersion)
+        {
+            var snapshot = NormalizeSnapshotForTakeover(state);
+            state = state with
+            {
+                FormatVersion = CurrentFormatVersion,
+                BackendWasEnabled = snapshot.BackendWasEnabled,
+                RescueAgentTaskWasPresent =
+                    snapshot.RescueAgentTaskWasPresent,
+                RecoveryTaskWasPresent =
+                    snapshot.RecoveryTaskWasPresent,
+                StagedVddAdoptionInstanceId = null,
+                Revision = 1,
+            };
+        }
+        var updated = state with
+        {
+            StagedVddAdoptionInstanceId = candidateInstanceId,
+            Revision = checked(state.Revision + 1),
+        };
+        Validate(updated);
+        var serialized = JsonSerializer.Serialize(updated, JsonOptions);
+        TrustedFileSystem.WriteAllText(BackupFile, serialized);
+        TrustedFileSystem.WriteAllText(StateFile, serialized);
+        return updated;
+    }
+
+    internal static string RequireStagedVddAdoptionCandidateForOwner(
+        int ownerProcessId)
+    {
+        RequireControllerProcess();
+        var ownerStart = RequireLiveProcessStart(ownerProcessId);
+        MachineStateSecurity.Secure();
+        InstallerMaintenanceState state;
+        if (CurrentCommandOwnsFence)
+        {
+            state = RequireOwnedSnapshot(
+                ownerProcessId,
+                ownerStart);
+        }
+        else
+        {
+            using var commandGate = AcquireCommandGate();
+            state = RequireOwnedSnapshot(
+                ownerProcessId,
+                ownerStart);
+        }
+        return state.StagedVddAdoptionInstanceId
+            ?? throw new InvalidOperationException(
+                "Setup has no exact staged virtual-display adoption candidate. Return to the setup choices and approve the current device again.");
+    }
+
+    private static InstallerMaintenanceState RequireOwnedSnapshot(
+        int ownerProcessId,
+        DateTimeOffset ownerStart)
+    {
+        var state = Load() ?? throw new InvalidOperationException(
+            "No protected installer-maintenance snapshot is active.");
+        if (state.OwnerProcessId != ownerProcessId ||
+            state.OwnerStartedAtUtc.UtcTicks != ownerStart.UtcTicks)
+        {
+            throw new InvalidOperationException(
+                $"Process {ownerProcessId} does not own the active Vita Moonlight installer-maintenance snapshot.");
+        }
+        return state;
     }
 
     internal static InstallerMaintenanceStatus? Inspect()
@@ -366,6 +475,20 @@ internal static class InstallerMaintenanceFence
         primary is null &&
         backup is null;
 
+    internal static bool IsValidStateForTest(
+        InstallerMaintenanceState state)
+    {
+        try
+        {
+            Validate(state);
+            return true;
+        }
+        catch (InvalidDataException)
+        {
+            return false;
+        }
+    }
+
     private static InstallerMaintenanceState? SelectNewestValidState(
         InstallerMaintenanceState? primary,
         InstallerMaintenanceState? backup,
@@ -380,12 +503,29 @@ internal static class InstallerMaintenanceFence
         }
         if (primary is not null &&
             backup is not null &&
-            primary.BeganAtUtc == backup.BeganAtUtc &&
-            primary != backup)
+            primary.BeganAtUtc == backup.BeganAtUtc)
         {
-            throw new InvalidDataException(
-                "The protected installer-maintenance fence records conflict. " +
-                "Run setup again to recover them safely.");
+            if (primary.OwnerProcessId != backup.OwnerProcessId ||
+                primary.OwnerStartedAtUtc.UtcTicks !=
+                    backup.OwnerStartedAtUtc.UtcTicks ||
+                primary.BackendWasEnabled != backup.BackendWasEnabled ||
+                primary.RescueAgentTaskWasPresent !=
+                    backup.RescueAgentTaskWasPresent ||
+                primary.RecoveryTaskWasPresent !=
+                    backup.RecoveryTaskWasPresent)
+            {
+                throw new InvalidDataException(
+                    "The protected installer-maintenance fence records conflict on their transaction owner or rollback baseline. Run setup again to recover them safely.");
+            }
+            if (primary.Revision == backup.Revision &&
+                primary != backup)
+            {
+                throw new InvalidDataException(
+                    "The protected installer-maintenance fence records conflict at the same revision. Run setup again to recover them safely.");
+            }
+            return primary.Revision >= backup.Revision
+                ? primary
+                : backup;
         }
         return new[] { primary, backup }
             .Where(candidate => candidate is not null)
@@ -460,7 +600,17 @@ internal static class InstallerMaintenanceFence
             state.OwnerProcessId <= 0 ||
             state.OwnerStartedAtUtc == default ||
             state.BeganAtUtc == default ||
-            state.OwnerStartedAtUtc > state.BeganAtUtc.AddMinutes(1))
+            state.OwnerStartedAtUtc > state.BeganAtUtc.AddMinutes(1) ||
+            state.StagedVddAdoptionInstanceId is not null &&
+                !ManagedVddOwnershipJournal.IsValidInstanceIdForAdoption(
+                    state.StagedVddAdoptionInstanceId) ||
+            state.Revision < 0 ||
+            state.FormatVersion == LegacyFormatVersion &&
+                (state.Revision != 0 ||
+                 state.StagedVddAdoptionInstanceId is not null) ||
+            state.FormatVersion == CurrentFormatVersion &&
+                state.Revision == 0 &&
+                state.StagedVddAdoptionInstanceId is not null)
         {
             throw new InvalidDataException(
                 "The protected installer-maintenance fence contains an unsupported value. " +

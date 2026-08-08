@@ -129,7 +129,6 @@ typedef struct UiDiagnosticsSnapshot {
   bool input_behavior_settings_pending;
   bool gyro_requested;
   uint16_t gyro_report_rate;
-  uint32_t gyro_events_sent;
   int motion_sensor_error;
 } UiDiagnosticsSnapshot;
 
@@ -153,6 +152,8 @@ const char *ui_diagnostics_overlay_mode_name(UiDiagnosticsOverlayMode mode);
 void ui_diagnostics_set_network_state(UiDiagnosticsNetworkState state);
 void ui_diagnostics_set_logging_consumer(bool enabled);
 bool ui_diagnostics_metrics_needed(void);
+/* True only while the user has requested FPS/diagnostic instrumentation. */
+bool ui_diagnostics_fps_needed(void);
 void ui_diagnostics_record_video_frame(uint32_t encoded_bytes,
                                        uint32_t decode_time_us,
                                        bool presented);

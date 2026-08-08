@@ -524,14 +524,12 @@ internal static class Program
             EnsureBackendEnabled(
                 "Virtual display maintenance is paused. Run `backend enable` first");
         }
-        var wizard = action == "uninstall"
-            ? DisplayWizardAdapter.LocateBundledForUninstall()
-            : DisplayWizardAdapter.LocateBundled();
-
         switch (action)
         {
             case "install":
                 {
+                    var expectedExistingDeviceInstanceId =
+                        GetExpectedVddAdoptionInstanceId(args);
                     var runtimeInstaller =
                         GetOption(args, "--runtime-installer") ??
                         Path.Combine(
@@ -548,16 +546,61 @@ internal static class Program
                     return PrimeDriverOrReport(
                         "installed",
                         installDriver: true,
-                        allowExistingDeviceAdoption: HasFlag(
-                            args,
-                            "--adopt-existing-vdd"));
+                        expectedExistingDeviceInstanceId:
+                            expectedExistingDeviceInstanceId);
                 }
             case "reload":
                 {
                     return PrimeDriverOrReport("reloaded");
                 }
+            case "adopt-idle":
+                {
+                    var ownerProcessId = GetRequiredInt(
+                        args,
+                        "--adoption-owner-pid");
+                    var expectedExistingDeviceInstanceId =
+                        InstallerMaintenanceFence
+                            .RequireStagedVddAdoptionCandidateForOwner(
+                                ownerProcessId);
+                    var suspendBeforeLease =
+                        DisplaySuspendIntentStore.Inspect();
+                    using var transaction =
+                        DisplayTransactionLock.Acquire();
+                    DisplaySuspendIntentStore
+                        .RequireClearForDisplayMutationLocked(
+                            transaction,
+                            suspendBeforeLease,
+                            "Approved virtual-display adoption");
+                    BackendLifecycleStateStore
+                        .RequireNoUninstallInProgress();
+                    var adoption = ManagedVddOwnershipJournal
+                        .PrepareInstallLocked(
+                            transaction,
+                            expectedExistingDeviceInstanceId);
+                    if (adoption.Action !=
+                            ManagedVddInstallAction.UseOwnedInstance ||
+                        adoption.Device?.Ownership !=
+                            ManagedVddOwnershipKind.Adopted)
+                    {
+                        throw new InvalidOperationException(
+                            "The approved existing virtual display was not adopted. No different device was created or changed.");
+                    }
+                    var idle = ManagedVirtualDisplayRuntime
+                        .ReconcileIdleLocked(
+                            transaction,
+                            requireManagedDevice: true);
+                    DisplaySuspendIntentStore
+                        .RequireClearAfterDisplayMutationLocked(
+                            transaction,
+                            "Approved virtual-display adoption");
+                    Console.WriteLine(
+                        $"Adopted exact virtual-display instance {adoption.Device.InstanceId}, recorded its enabled baseline, and safely disabled it while Vita host features remain paused. Physical display(s): {string.Join(", ", idle.PhysicalDisplays)}.");
+                    return ExitSuccess;
+                }
             case "uninstall":
                 {
+                    var wizard =
+                        DisplayWizardAdapter.LocateBundledForUninstall();
                     bool restartRequired;
                     using (var transaction = DisplayTransactionLock.Acquire())
                     {
@@ -671,6 +714,28 @@ internal static class Program
                 return required
                     ? ExitSuccess
                     : ExitMissingRequiredComponent;
+            case "vdd-adoption-required":
+                EnsureMaintenanceAdministrator(
+                    "Checking whether the existing virtual display needs explicit adoption");
+                var adoptionOwnerProcessId = GetRequiredInt(
+                    args,
+                    "--owner-pid");
+                _ = InstallerMaintenanceFence.GetSnapshotForOwner(
+                    adoptionOwnerProcessId);
+                var adoptionRequired = ManagedVddOwnershipJournal
+                    .RequiresExplicitAdoption(
+                        out var adoptionReason,
+                        out var adoptionCandidateInstanceId);
+                InstallerMaintenanceFence
+                    .StageVddAdoptionCandidateForOwner(
+                        adoptionOwnerProcessId,
+                        adoptionRequired
+                            ? adoptionCandidateInstanceId
+                            : null);
+                Console.WriteLine(adoptionReason);
+                return adoptionRequired
+                    ? ExitSuccess
+                    : ExitMissingRequiredComponent;
             default:
                 return InvalidCommand($"maintenance {action}");
         }
@@ -754,9 +819,12 @@ internal static class Program
                 }
                 var installVirtualDisplay =
                     GetOptionalBool(args, "--virtual-driver") ?? false;
+                var existingDeviceAdoptionInstanceId =
+                    GetExpectedVddAdoptionInstanceId(args);
                 DeferredHostSetupStore.Save(
                     hostMode,
-                    installVirtualDisplay);
+                    installVirtualDisplay,
+                    existingDeviceAdoptionInstanceId);
                 Console.WriteLine(
                     "Saved the protected setup work which will run the next time Vita host features are enabled.");
                 return ExitSuccess;
@@ -768,7 +836,7 @@ internal static class Program
                 var plan = DeferredHostSetupStore.Load();
                 Console.WriteLine(plan is null
                     ? "No deferred Vita host setup remains."
-                    : $"Deferred Vita host setup: {plan.HostMode}, virtual display {(plan.InstallVirtualDisplay ? "install/repair" : "keep existing")}.");
+                    : $"Deferred Vita host setup: {plan.HostMode}, virtual display {(plan.InstallVirtualDisplay ? "install/repair" : "keep existing")}, existing-device adoption {(plan.ExistingDeviceAdoptionInstanceId is null ? "not required" : "bound to " + plan.ExistingDeviceAdoptionInstanceId)}.");
                 return plan is null
                     ? ExitMissingRequiredComponent
                     : ExitSuccess;
@@ -826,7 +894,9 @@ internal static class Program
 
                 var driverResult = PrimeDriverOrReport(
                     "installed",
-                    installDriver: true);
+                    installDriver: true,
+                    expectedExistingDeviceInstanceId:
+                        plan.ExistingDeviceAdoptionInstanceId);
                 if (driverResult != ExitSuccess)
                 {
                     throw new InvalidOperationException(
@@ -926,14 +996,14 @@ internal static class Program
     private static int PrimeDriverOrReport(
         string action,
         bool installDriver = false,
-        bool allowExistingDeviceAdoption = false)
+        string? expectedExistingDeviceInstanceId = null)
     {
         try
         {
             var mode = new SessionManager()
                 .PrimeNativeModeForDriverMaintenanceOnly(
                     installDriver,
-                    allowExistingDeviceAdoption);
+                    expectedExistingDeviceInstanceId);
             Console.WriteLine(
                 $"Virtual display driver {action} and verified at " +
                 $"{mode.Width}x{mode.Height}@{mode.DesktopRefreshRate}. " +
@@ -3388,10 +3458,10 @@ internal static class Program
         Console.WriteLine("VitaMoonlight.Host runtime status|ensure-compatible [--installer PATH]");
         Console.WriteLine("VitaMoonlight.Host dependency uninstall sunshine|vigembus");
         Console.WriteLine("VitaMoonlight.Host state secure");
-        Console.WriteLine("VitaMoonlight.Host maintenance begin|end|backend-was-enabled|rescue-task-was-present|recovery-task-was-present --owner-pid PID|status");
-        Console.WriteLine("VitaMoonlight.Host deferred-setup save --host sunshine [--virtual-driver true]|clear|status");
+        Console.WriteLine("VitaMoonlight.Host maintenance begin|end|backend-was-enabled|rescue-task-was-present|recovery-task-was-present|vdd-adoption-required --owner-pid PID|status");
+        Console.WriteLine("VitaMoonlight.Host deferred-setup save --host sunshine [--virtual-driver true] [--adoption-owner-pid PID]|clear|status");
         Console.WriteLine("VitaMoonlight.Host backend enable|disable|status [--json] [--require-enabled] [--intent-exit-code]");
-        Console.WriteLine("VitaMoonlight.Host driver install [--adopt-existing-vdd]|reload|uninstall|status");
+        Console.WriteLine("VitaMoonlight.Host driver install [--adopt-existing-vdd-id INSTANCE_ID]|adopt-idle --adoption-owner-pid PID|reload|uninstall|status");
         Console.WriteLine("VitaMoonlight.Host display list");
         Console.WriteLine("VitaMoonlight.Host display disable-virtual");
         Console.WriteLine("VitaMoonlight.Host session test --width 960|1280 --height 540|544|720 --fps 24|30|40|50|60 [--seconds 5..120]");
@@ -3422,6 +3492,45 @@ internal static class Program
             }
         }
         return null;
+    }
+
+    private static string? GetExpectedVddAdoptionInstanceId(
+        string[] args)
+    {
+        if (HasFlag(args, "--adopt-existing-vdd"))
+        {
+            throw new ArgumentException(
+                "--adopt-existing-vdd no longer grants unbound device adoption. Use the control-panel question, or supply the exact --adopt-existing-vdd-id shown by `display list`.");
+        }
+        var direct = GetOption(args, "--adopt-existing-vdd-id");
+        var ownerText = GetOption(args, "--adoption-owner-pid");
+        if (direct is not null && ownerText is not null)
+        {
+            throw new ArgumentException(
+                "Specify either --adopt-existing-vdd-id or --adoption-owner-pid, not both.");
+        }
+
+        string? candidate = direct;
+        if (ownerText is not null)
+        {
+            if (!int.TryParse(ownerText, out var ownerProcessId) ||
+                ownerProcessId <= 0)
+            {
+                throw new ArgumentException(
+                    "--adoption-owner-pid requires a positive process id.");
+            }
+            candidate = InstallerMaintenanceFence
+                .RequireStagedVddAdoptionCandidateForOwner(
+                    ownerProcessId);
+        }
+        if (candidate is not null &&
+            !ManagedVddOwnershipJournal.IsValidInstanceIdForAdoption(
+                candidate))
+        {
+            throw new ArgumentException(
+                "The expected existing virtual-display instance ID is invalid.");
+        }
+        return candidate;
     }
 
     private static bool TryDescribeUnrelatedSunshineHook(

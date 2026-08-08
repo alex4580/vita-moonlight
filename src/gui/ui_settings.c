@@ -9,6 +9,7 @@
 #include "../config.h"
 #include "../input/vita.h"
 #include "../input/swap_shoulder_buttons.h"
+#include "../power/vita.h"
 #include "../video/vita.h"
 #include "../debug.h"
 #include "../input/touchabsolute.h"
@@ -367,7 +368,7 @@ static int settings_loop(int id, void *context, const input_data *input) {
         "Presets reset the complete stream path: resolution, FPS, bitrate, "
         "packet size, network detection, H.264/SDR color, stereo audio, "
         "host optimization, loss recovery, immediate presentation, scaling, "
-        "and power behavior.\n\n"
+        "and decoder timing. Keep-awake remains an independent choice.\n\n"
         "Recommended: native 960x544, 60 FPS, 8 Mbps.\n"
         "Reliable: 30 FPS/5 Mbps for unstable Wi-Fi.\n"
         "High quality: 12 Mbps for cleaner motion on a strong link.\n"
@@ -397,7 +398,10 @@ static int settings_loop(int id, void *context, const input_data *input) {
         "Frames are presented immediately for the lowest latency. Packet-loss recovery "
         "requests clean reference frames. Fit shows the whole desktop; Crop fills the panel by trimming edges. "
         "Vblank can reduce tearing but may add latency. Auto network mode is safest "
-        "unless you know the host is local or reached through a VPN.",
+        "unless you know the host is local or reached through a VPN.\n\n"
+        "If Wi-Fi is unstable, open Vita Settings > Power Save Settings and clear "
+        "Use Wi-Fi in Power Save Mode. Sony says this may improve stability; it "
+        "does not guarantee higher speed.",
         NULL, 1, NULL, NULL);
     return 0;
   }
@@ -1092,6 +1096,8 @@ static int settings_root_loop(
     config.double_tap_sprint_step_time = 200;
     ui_controller_mapping_set_enabled(false);
     swap_shoulder_buttons = false;
+    config.disable_powersave = true;
+    vitapower_config(config);
     ui_diagnostics_set_overlay_mode(UI_DIAGNOSTICS_OVERLAY_OFF);
     vita_debug_set_logging_enabled(false);
     touchabsolute_enable(false);

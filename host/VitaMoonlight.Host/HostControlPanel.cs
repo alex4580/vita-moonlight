@@ -1046,10 +1046,13 @@ internal sealed class HostControlPanel : Form
         if (!await RepairVisualCppRuntimeAsync()) return false;
         bool adoptExisting;
         string adoptionReason;
+        string? adoptionCandidateInstanceId;
         try
         {
             adoptExisting = ManagedVddOwnershipJournal
-                .RequiresExplicitAdoption(out adoptionReason);
+                .RequiresExplicitAdoption(
+                    out adoptionReason,
+                    out adoptionCandidateInstanceId);
         }
         catch (Exception error) when (
             error is IOException or
@@ -1081,12 +1084,18 @@ internal sealed class HostControlPanel : Form
                 MessageBoxButtons.YesNo,
                 MessageBoxIcon.Question);
             if (choice != DialogResult.Yes) return false;
+            if (adoptionCandidateInstanceId is null)
+            {
+                throw new InvalidOperationException(
+                    "The approved virtual-display candidate identity is unavailable. Refresh display status and try again.");
+            }
         }
 
         var arguments = new List<string> { "driver", "install" };
         if (adoptExisting)
         {
-            arguments.Add("--adopt-existing-vdd");
+            arguments.Add("--adopt-existing-vdd-id");
+            arguments.Add(adoptionCandidateInstanceId!);
         }
         return await RunCommandAsync(arguments.ToArray());
     }

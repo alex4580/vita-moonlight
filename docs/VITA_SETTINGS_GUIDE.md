@@ -6,6 +6,8 @@ The first-run configuration is designed to work without tuning:
 - **Maximum compatibility** controller: Xbox/XInput, relative-mouse touch,
   local PS button, gyro off.
 - Performance overlay Off and support log Not capturing.
+- **Keep Vita awake while streaming** On to prevent a hands-off stream from
+  dimming or suspending. It has no worker outside an active stream.
 
 The Vita's panel is 960x544. Matching the Windows virtual display, Sunshine
 encoder, decoder, and panel avoids the 4:3 fallback and unnecessary scaling
@@ -26,7 +28,6 @@ Presets are full configurations, not bitrate shortcuts. All four set:
 - immediate presentation without artificial future-frame drops;
 - Vita vblank wait disabled;
 - fit-entire-frame scaling instead of crop/fill;
-- Vita power-save suppression enabled.
 
 They differ only where the use case calls for it:
 
@@ -39,11 +40,12 @@ They differ only where the use case calls for it:
 
 Changing any owned stream value changes the displayed preset to **Custom**;
 your custom values remain saved. Selecting a named preset restores every owned
-value listed above. It does not change controller/touch settings.
+value listed above. It does not change controller, touch, or Vita power
+settings.
 
 **Restore recommended defaults** is broader than selecting the Recommended stream
 preset. It also selects Maximum compatibility input, turns the performance
-overlay off, and stops any support-log capture.
+overlay off, stops any support-log capture, and enables stream-only keep-awake.
 
 ## Resolution and the Windows virtual display
 
@@ -132,6 +134,12 @@ WMM enabled, and reduce competing 2.4 GHz traffic. Raise bitrate only after
 motion is stable; do not lower resolution merely because a static desktop
 reports fewer than 60 newly rendered frames.
 
+If the Vita link is unstable, open **Vita Settings > Power Save Settings** and
+clear **Use Wi-Fi in Power Save Mode**. [Sony's Vita manual](https://manuals.playstation.net/document/gb/psvita/settings/wifi_savemode.html)
+says disabling that power-saving option may improve Wi-Fi stability; it does
+not guarantee higher throughput. Vita Moonlight does not call undocumented
+wireless or power APIs to force this setting.
+
 ## Performance overlay
 
 Choose **Performance overlay** in Settings or on the stream menu's main page.
@@ -139,7 +147,7 @@ It is drawn in the top-right corner over a 50%-alpha background.
 
 | Mode | Shows | Collection behavior |
 |---|---|---|
-| **Off** | Nothing | Extended per-frame diagnostics are skipped unless the diagnostics screen or a support-log capture needs them. |
+| **Off** | Nothing | FPS aggregation and extended per-frame/transport diagnostics are disabled unless the diagnostics screen or a support-log capture needs them. |
 | **Frame rate** | Rendered FPS / target FPS | Smallest on-screen view. |
 | **Frame rate + network** | FPS, Moonlight connection health, estimated round-trip time, and measured encoded-video Kbps | Useful for separating encoder artifacts from an unstable link. |
 | **Advanced** | The above, stream resolution/configured bitrate, average and maximum decode time, dropped frames, and recovered/failed/out-of-sequence packet counts | Best for short tuning sessions; more screen area and metric collection. |
@@ -160,7 +168,7 @@ in-stream menu and select the dedicated **Real-time diagnostics** item to see:
   reconnect when they differ;
 - average/maximum decode time and dropped frames;
 - virtual-controller type;
-- gyro enabled/requested state, report rate, event count, and sensor errors;
+- gyro enabled/requested state, negotiated report rate, and sensor errors;
 - performance-overlay and support-log state;
 - the actual support-log path.
 
@@ -171,7 +179,8 @@ problem, choose **Stop and save support log** or press Triangle again. Press
 the configured **Cancel** button (O by default) or **START** to return.
 
 Support logging is off by default. When it is not capturing, Vita Moonlight
-does not open, create, or write a support-log file. A capture writes:
+does not open, create, or write a support-log file. It also does not maintain
+gyro-sample counters or logging-only event totals. A capture writes:
 
 `ux0:data/moonlight/moonlight.log`
 
@@ -280,8 +289,8 @@ If Steam does not expose gyro, inspect **Real-time diagnostics**:
 
 - **Awaiting host request** means the DS4 motion path is enabled locally but
   Sunshine has not requested gyro samples.
-- A report rate and increasing event count confirms the Vita is sending
-  samples.
+- **Reporting at _N_ Hz** confirms the Vita is sending samples at the rate the
+  host requested. Individual samples are deliberately not counted.
 - A sensor error identifies a Vita-side motion failure.
 
 ### Custom input and touch
@@ -366,6 +375,15 @@ stream menu, bottom-left sending PC Guide, and the other corners unassigned.
 
 The in-stream menu displays the active Confirm and Cancel buttons, so its
 button hints also follow **Swap X and O in Moonlight**.
+
+## Keep Vita awake while streaming
+
+This setting is on for a fresh installation because a hands-off cutscene or
+video should not let the Vita suspend an otherwise healthy stream. Its small
+worker exists only during an active stream, refreshes the screen/suspend timers
+every ten seconds, and is destroyed at disconnect. Turning the setting off
+removes the worker and restores the Vita's normal timers. Changing a named
+streaming preset does not change this independent preference.
 
 ## Practical tuning order
 

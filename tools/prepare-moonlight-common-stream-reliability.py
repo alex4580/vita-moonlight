@@ -14,7 +14,7 @@ from pathlib import Path
 
 UPSTREAM_COMMIT = "07c32c80f98bb0d7214c577bd080eea3ce64a856"
 EXPECTED_PATCH_SHA256 = (
-    "95d72f9ed3e17b7853ded77235d1b3b107905bb6cbd1dc65f54305b6c232cfdc"
+    "50c8c88e7a00872bb28d4adbf249e91d1bc50aaf20330da0318464daa35e1e76"
 )
 EXPECTED_FILES = {
     "src/ControlStream.c": (
@@ -27,7 +27,7 @@ EXPECTED_FILES = {
     ),
     "src/RtpVideoQueue.c": (
         "8d52ea5a6ac6e987967419d33d611a2e35db6660f8be4c6cd0abde4cfde6c33a",
-        "b16b9f6cce889e4af21ebb2cceb6b68dfbf62c836ce6b1b8e57b57cb7f610021",
+        "50525d94f8cc5292f8c0c14b16fb1a85bc53b67470ab1c1d6610dd0f2dcd4988",
     ),
     "src/VideoDepacketizer.c": (
         "8c84109789896a34934f7a775bfbc0023c21e027a0f919c2c3d3e0b88f7442c4",
@@ -35,7 +35,7 @@ EXPECTED_FILES = {
     ),
     "src/VideoStream.c": (
         "7e1e3170ace7a96d9e61743dde9b8a60dc72c1fb2ffda8ba79f9fd505743d498",
-        "fd0f920d7e96be2a80c2b86cb7302286fcdff677a4ceeca78213d077f2bae9a2",
+        "eb1084721af8765bd9722c8016d6b6b573b7ddd26e715ea5c7540456315fb1da",
     ),
 }
 

@@ -28,8 +28,6 @@ static motion_data_state motion_state = {
     .report_rate_gyro = VITA_MOTION_MIN_REPORT_RATE,
     .report_rate_accel = VITA_MOTION_MIN_REPORT_RATE,
 };
-static uint32_t gyro_events_sent = 0;
-static uint32_t accel_events_sent = 0;
 static int last_sensor_error = 0;
 static int motion_init_error = 0;
 static float stream_motion_scalar_x = 1.2f;
@@ -124,8 +122,6 @@ bool vita_motion_begin_stream(bool allow_motion) {
    * worker never races the UI's mutable global configuration. */
   stream_motion_scalar_x = config.motion_controls_scalar_x;
   stream_motion_scalar_y = config.motion_controls_scalar_y;
-  gyro_events_sent = 0;
-  accel_events_sent = 0;
   last_sensor_error = motion_resources_ready ? 0 : motion_init_error;
   unlock_motion_state();
 
@@ -363,8 +359,6 @@ void vita_motion_get_status(VitaMotionStatus *status) {
   status->accel_requested = motion_state.motion_type_accel_enabled;
   status->gyro_report_rate = motion_state.report_rate_gyro;
   status->accel_report_rate = motion_state.report_rate_accel;
-  status->gyro_events_sent = gyro_events_sent;
-  status->accel_events_sent = accel_events_sent;
   status->last_sensor_error = last_sensor_error;
   unlock_motion_state();
 }
@@ -386,6 +380,7 @@ static void motion_process_sample(bool send_gyro, bool send_accel,
     unlock_motion_state();
     return;
   }
+  if (last_sensor_error != 0) last_sensor_error = 0;
   unlock_motion_state();
 
   if (send_gyro) {
@@ -407,11 +402,6 @@ static void motion_process_sample(bool send_gyro, bool send_accel,
     LiSendControllerMotionEvent(0, LI_MOTION_TYPE_ACCEL, x, y, z);
   }
 
-  lock_motion_state();
-  if (send_gyro) gyro_events_sent++;
-  if (send_accel) accel_events_sent++;
-  last_sensor_error = 0;
-  unlock_motion_state();
 }
 
 int vitainput_motion_thread(SceSize args, void *argp) {

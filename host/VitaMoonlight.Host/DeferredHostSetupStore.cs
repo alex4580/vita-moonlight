@@ -6,7 +6,8 @@ internal sealed record DeferredHostSetupPlan(
     int FormatVersion,
     string HostMode,
     bool InstallVirtualDisplay,
-    DateTimeOffset RequestedAtUtc);
+    DateTimeOffset RequestedAtUtc,
+    string? ExistingDeviceAdoptionInstanceId = null);
 
 /// <summary>
 /// Records installer work which cannot be performed while Vita host features
@@ -47,24 +48,33 @@ internal static class DeferredHostSetupStore
         return plan;
     }
 
-    internal static void Save(string hostMode, bool installVirtualDisplay)
+    internal static void Save(
+        string hostMode,
+        bool installVirtualDisplay,
+        string? existingDeviceAdoptionInstanceId = null)
     {
         using var operationLock = BackendLifecycleStateStore.AcquireLock();
         BackendLifecycleStateStore.RequireNoUninstallInProgress();
-        SaveLocked(operationLock, hostMode, installVirtualDisplay);
+        SaveLocked(
+            operationLock,
+            hostMode,
+            installVirtualDisplay,
+            existingDeviceAdoptionInstanceId);
     }
 
     internal static void SaveLocked(
         BackendOperationLease operation,
         string hostMode,
-        bool installVirtualDisplay)
+        bool installVirtualDisplay,
+        string? existingDeviceAdoptionInstanceId = null)
     {
         operation.RequireActive();
         var plan = new DeferredHostSetupPlan(
             CurrentFormatVersion,
             NormalizeHostMode(hostMode),
             installVirtualDisplay,
-            DateTimeOffset.UtcNow);
+            DateTimeOffset.UtcNow,
+            existingDeviceAdoptionInstanceId);
         Validate(plan);
         MachineStateSecurity.Secure();
         TrustedFileSystem.WriteAllText(
@@ -93,7 +103,11 @@ internal static class DeferredHostSetupStore
                 plan.HostMode,
                 NormalizeHostMode(plan.HostMode),
                 StringComparison.Ordinal) ||
-            plan.InstallVirtualDisplay && plan.HostMode != "sunshine")
+            plan.InstallVirtualDisplay && plan.HostMode != "sunshine" ||
+            plan.ExistingDeviceAdoptionInstanceId is not null &&
+                (!plan.InstallVirtualDisplay ||
+                 !ManagedVddOwnershipJournal.IsValidInstanceIdForAdoption(
+                     plan.ExistingDeviceAdoptionInstanceId)))
         {
             throw new InvalidDataException(
                 "The deferred host-setup plan contains an unsupported value.");

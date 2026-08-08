@@ -561,7 +561,29 @@ internal static class BackendLifecycleManager
         // Retaining the shared driver package must never retain an available
         // 960x544 fallback monitor after Vita safeguards are removed.
         _ = restoreManagedVdd;
-        RestoreAndVerifyPhysicalOnlyLocked(transaction);
+        var hasManagedVddOwnership = File.Exists(
+            ManagedVddOwnershipJournal.JournalFile);
+        if (hasManagedVddOwnership)
+        {
+            RestoreAndVerifyPhysicalOnlyLocked(transaction);
+        }
+        else
+        {
+            // An incomplete/older installation can have a foreign or
+            // unproven MTT node but no exact Vita ownership. Finalization may
+            // proceed only when Windows already proves a complete
+            // physical-only layout; it must not route that node through the
+            // generic idle reconciler, which correctly refuses unowned PnP
+            // mutation.
+            var topology = new DisplayTopologyService();
+            if (!topology.TryCaptureExactPhysicalOnlySnapshot(
+                    out var physicalOnly) ||
+                physicalOnly is null)
+            {
+                throw new InvalidOperationException(
+                    "Uninstall cannot finalize an installation with no exact virtual-display ownership unless Windows already exposes a complete physical-only display layout. No unowned display device was changed.");
+            }
+        }
         BackendStateLoadResult loaded;
         try
         {
@@ -574,10 +596,37 @@ internal static class BackendLifecycleManager
             // invariant above is authoritative even when preferences are not.
             return new BackendUninstallHandoff(
                 ErrorReport(
-                    "The Vita host-feature state is unreadable. Uninstall kept Sunshine unchanged and left the retained virtual display safely disabled. " +
+                    "The Vita host-feature state is unreadable. Uninstall kept Sunshine unchanged and preserved the already verified physical-only desktop without guessing virtual-display ownership. " +
                     error.Message,
                     BackendDesiredState.Disabled,
                     preferencePersisted: true),
+                null);
+        }
+        if (!hasManagedVddOwnership)
+        {
+            // No journal means there is no display-side rollback authority to
+            // preserve. Return only an informational lifecycle view; task
+            // rollback is tracked independently by the finalizer, and neither
+            // success nor failure may route an old saved instance ID through
+            // SetManagedDriverEnabled.
+            if (loaded.State is null)
+            {
+                return new BackendUninstallHandoff(
+                    ErrorReport(
+                        "No protected Vita virtual-display ownership exists. Uninstall will remove only Vita-owned tasks, integration, and files while leaving every unproven MTT device and shared package unchanged.",
+                        BackendDesiredState.Disabled,
+                        preferencePersisted: false),
+                    null);
+            }
+            var displaySanitized = loaded.State with
+            {
+                ManagedVirtualDisplayInstancesToRestore = [],
+            };
+            return new BackendUninstallHandoff(
+                InspectCore(
+                    displaySanitized,
+                    true,
+                    loaded.StorageWarning),
                 null);
         }
         if (loaded.State is null)

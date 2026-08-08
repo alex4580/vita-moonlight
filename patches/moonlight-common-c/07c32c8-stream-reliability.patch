@@ -45,11 +45,10 @@ diff --git a/src/RtpVideoQueue.c b/src/RtpVideoQueue.c
 index dfbed48..904003b 100644
 --- a/src/RtpVideoQueue.c
 +++ b/src/RtpVideoQueue.c
-@@ -160,6 +160,9 @@ static bool queuePacket(PRTP_VIDEO_QUEUE queue, PRTPV_QUEUE_ENTRY newEntry, PRTP
+@@ -160,6 +160,8 @@ static bool queuePacket(PRTP_VIDEO_QUEUE queue, PRTPV_QUEUE_ENTRY newEntry, PRTP
      // FEC recovery packets are synthesized by us, so don't use them to determine OOS data
      if (!isFecRecovery) {
          if (outOfSequence) {
-+            queue->stats.packetCountOOS++;
 +            addVideoStreamDiagnosticCount(
 +                VIDEO_DIAGNOSTIC_RTP_PACKET_OUT_OF_SEQUENCE, 1);
              // This packet was received after a higher sequence number packet, so note that we
@@ -66,14 +65,13 @@ index dfbed48..904003b 100644
  #ifdef FEC_VERBOSE
          Limelog("Recovered %d video data shards from frame %d\n",
                  queue->bufferDataPackets - queue->receivedDataPackets,
-@@ -450,6 +455,15 @@ cleanup_packets:
+@@ -450,6 +455,14 @@ cleanup_packets:
          }
      }
  
 +    // Count only a fully successful recovery. reed_solomon_reconstruct() may
 +    // succeed before the recovered NV packets fail the sanity checks above.
 +    if (ret == 0 && recoveredDataPackets != 0) {
-+        queue->stats.packetCountFecRecovered += recoveredDataPackets;
 +        addVideoStreamDiagnosticCount(
 +            VIDEO_DIAGNOSTIC_FEC_DATA_PACKET_RECOVERED,
 +            recoveredDataPackets);
@@ -82,13 +80,12 @@ index dfbed48..904003b 100644
  cleanup:
      reed_solomon_release(rs);
  
-@@ -593,6 +607,12 @@ int RtpvAddPacket(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, PRTPV_
+@@ -593,6 +607,11 @@ int RtpvAddPacket(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, PRTPV_
      if (queue->pendingFecBlockList.count == 0 || queue->currentFrameNumber != nvPacket->frameIndex ||
              queue->multiFecCurrentBlockNumber != fecCurrentBlockNumber) {
          if (queue->pendingFecBlockList.count != 0) {
 +            // This nonempty block is about to be abandoned. Count it once here,
 +            // before any of the mutually exclusive purge/return paths below.
-+            queue->stats.packetCountFecFailed++;
 +            addVideoStreamDiagnosticCount(
 +                VIDEO_DIAGNOSTIC_FEC_BLOCK_FAILED, 1);
 +
@@ -155,23 +152,29 @@ diff --git a/src/VideoStream.c b/src/VideoStream.c
 index 402b056..080d74d 100644
 --- a/src/VideoStream.c
 +++ b/src/VideoStream.c
-@@ -6,6 +6,7 @@
+@@ -6,6 +6,8 @@
  #define FIRST_FRAME_PORT 47996
  
  static RTP_VIDEO_QUEUE rtpQueue;
 +static VideoStreamDiagnostics videoDiagnostics;
++static uint32_t videoDiagnosticsEnabled;
  
  static SOCKET rtpSocket = INVALID_SOCKET;
  static SOCKET firstFrameSocket = INVALID_SOCKET;
-@@ -417,3 +418,61 @@ int startVideoStream(void* rendererContext, int drFlags) {
+@@ -417,3 +419,66 @@ int startVideoStream(void* rendererContext, int drFlags) {
  const RTP_VIDEO_STATS* LiGetRTPVideoStats(void) {
      return &rtpQueue.stats;
  }
 +
++void LiSetVideoStreamDiagnosticsEnabled(bool enabled) {
++    __atomic_store_n(&videoDiagnosticsEnabled, enabled ? 1 : 0, __ATOMIC_RELAXED);
++}
++
 +void addVideoStreamDiagnosticCount(VIDEO_DIAGNOSTIC_COUNTER counter, uint32_t amount) {
 +    uint32_t* destination;
 +
-+    if (amount == 0) {
++    if (amount == 0 ||
++            __atomic_load_n(&videoDiagnosticsEnabled, __ATOMIC_RELAXED) == 0) {
 +        return;
 +    }
 +
