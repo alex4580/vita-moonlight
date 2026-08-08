@@ -616,8 +616,13 @@ internal static class AudioEndpointRecoveryService
         try
         {
             var executable = Environment.ProcessPath;
-            var assembly = typeof(AudioEndpointRecoveryService)
-                .Assembly.Location;
+            // Assembly.Location is intentionally unavailable after a
+            // single-file publish. Framework-dependent and contract-test
+            // hosts copy the companion DLL beside their apphost, while the
+            // production single-file apphost relaunches itself directly.
+            var assembly = Path.Combine(
+                AppContext.BaseDirectory,
+                "VitaMoonlight.Host.dll");
             if (string.IsNullOrWhiteSpace(executable))
             {
                 return new IsolatedWorkerProcessResult(
