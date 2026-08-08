@@ -58,6 +58,7 @@ def main() -> int:
     keyboard_ime = read("src/input/keyboard_ime.h")
     shortcuts = read("src/input/shortcuts.c")
     vita_input = read("src/input/vita.c")
+    touch_zone_gesture = read("src/input/touch_zone_gesture.c")
     power = read("src/power/vita.c")
     motion = read("src/input/motion.c")
     connection = read("src/connection.c")
@@ -239,13 +240,25 @@ def main() -> int:
     )
 
     require(
-        "#define OVERLAY_CHORD_WINDOW_US 1000000" in shortcuts
+        "#define LOCAL_SHORTCUT_LEADER SCE_CTRL_SELECT" in shortcuts
+        and "#define OVERLAY_CHORD_WINDOW_US 1000000" in shortcuts
         and "#define KEYBOARD_CHORD_WINDOW_US 1000000" in shortcuts
+        and "SCE_CTRL_START | SCE_CTRL_L1" not in shortcuts
+        and "SCE_CTRL_START | SCE_CTRL_LEFT" not in shortcuts
         and "keyboard_shortcut_consumed = false;" in shortcuts
         and "pad->buttons &= ~KEYBOARD_CHORD_MASK" in shortcuts
         and "reset_overlay_chord();\n                keyboardsystem_open_keyboard();"
         in shortcuts,
-        "src/input/shortcuts.c: START-led shortcuts need a humane window and release barrier",
+        "src/input/shortcuts.c: SELECT-led local shortcuts must preserve START and keep a release barrier",
+    )
+    require(
+        "vita_touch_zone_gesture_step(" in vita_input
+        and "process_touchzones();" in vita_input
+        and "VITA_TOUCH_ZONE_TAP_PENDING" in touch_zone_gesture
+        and "VITA_TOUCH_ZONE_PASSTHROUGH" in touch_zone_gesture
+        and "SETTINGS_ENABLE_SPECIAL_KEYS" not in settings
+        and "Front-touch tap-zone mapper" in settings,
+        "Vita front-touch actions must use tap arbitration and one graphical configuration authority",
     )
     require(
         "e->param.text.caretIndex" in keyboard_system
@@ -283,6 +296,43 @@ def main() -> int:
         and connection.find("pthread_mutex_unlock(&lifecycle_mutex);")
         < connection.find("LiStopConnection();"),
         "src/connection.c: stream start/stop must be serialized without reentrant LiStop deadlock",
+    )
+    terminate_internal = connection.split(
+        "static void connection_connection_terminated_internal", 1
+    )[1].split("static void connection_connection_terminated", 1)[0]
+    ordered_release = ui_connect.split(
+        "static bool release_host_client_state_with_options", 1
+    )[1].split("static bool release_host_client_state(void)", 1)[0]
+    disconnect_path = ui_connect.split("\ndisconnect:", 1)[1].split(
+        "\nint ui_connect(", 1
+    )[0]
+    require(
+        terminate_internal.find("LiStopConnection();")
+        < terminate_internal.find("set_connection_state(LI_DISCONNECTED")
+        < terminate_internal.rfind("end_termination();")
+        and "connection_wait_for_termination()" in connection
+        and "CONNECTION_TERMINATION_WAIT_US" in connection
+        and "connection_is_terminating()" in connection,
+        "src/connection.c: disconnected must be published only after bounded media teardown completes",
+    )
+    require(
+        ordered_release.find("connection_wait_for_termination();")
+        < ordered_release.find("release_stream_boundary(show_restore_error)")
+        < ordered_release.find("gs_cleanup(&server);")
+        and "status == LI_DISCONNECTED || connection_is_terminating()" in ui_connect,
+        "src/gui/ui_connect.c: host Quit/network termination must join the async owner before heartbeat/CURL cleanup",
+    )
+    require(
+        disconnect_path.find("release_host_client_state_with_options(true)")
+        < disconnect_path.find('flash_message("Disconnected")')
+        and main_source.find("ui_connect_shutdown();")
+        < main_source.find("gui_shutdown();")
+        and "void gui_shutdown()" in ui
+        and ui.find("void gui_loop()") < ui.find("void gui_shutdown()")
+        and "vita2d_fini();" not in ui.split(
+            "void gui_loop()", 1
+        )[1].split("void gui_shutdown()", 1)[0],
+        "Vita2D must not draw or finalize until asynchronous decoder teardown has joined",
     )
     require(
         "need_drop" not in video

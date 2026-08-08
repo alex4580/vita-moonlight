@@ -47,7 +47,8 @@ internal sealed record DisplayRecoveryRecord(
     string? SelectedDisplay,
     int RequestedWidth,
     int RequestedHeight,
-    int RequestedFps);
+    int RequestedFps,
+    AudioEndpointRecoveryRecord? AudioDefaults = null);
 
 internal sealed record PhysicalOnlyDisplaySnapshot(
     DisplayConfiguration Configuration,
@@ -71,6 +72,15 @@ internal static class HostStatePaths
     }
 
     internal static string RecoveryFile => Path.Combine(Root, "display-recovery.json");
+    internal static string AudioRecoveryFile => Path.Combine(
+        Root,
+        "audio-recovery.json");
+    internal static string AudioRecoveryBackupFile => Path.Combine(
+        Root,
+        "audio-recovery.backup.json");
+    internal static string AudioRecoveryLockFile => Path.Combine(
+        Root,
+        "audio-recovery.lock");
     internal static string SettingsFile => Path.Combine(Root, "host-settings.json");
     internal static string LockFile => Path.Combine(Root, "session.lock");
     internal static string DiagnosticsDirectory => Path.Combine(Root, "Diagnostics");
@@ -218,6 +228,9 @@ internal sealed class DisplayTopologyService
         }
         var configuration = exact.Configuration;
         return new DisplayRecoveryRecord(
+            // AudioDefaults is an additive optional field. Keep format 1 so
+            // the previous host can still ignore it and restore the display
+            // if setup rolls back during an in-place upgrade.
             1,
             DateTimeOffset.UtcNow,
             Marshal.SizeOf<DisplayPathInfo>(),
@@ -229,7 +242,8 @@ internal sealed class DisplayTopologyService
             null,
             width,
             height,
-            fps);
+            fps,
+            AudioEndpointRecoveryService.CaptureCurrentDefaults());
     }
 
     internal bool DisableManagedVirtualDisplays()
@@ -544,7 +558,7 @@ internal sealed class DisplayTopologyService
             TrustedFileSystem.ReadAllText(HostStatePaths.RecoveryFile),
             JsonOptions)
             ?? throw new InvalidDataException("The display recovery record is empty.");
-        if (recovery.FormatVersion != 1 ||
+        if (recovery.FormatVersion is not (1 or 2) ||
             recovery.PathStructureSize != Marshal.SizeOf<DisplayPathInfo>() ||
             recovery.ModeStructureSize != Marshal.SizeOf<DisplayModeInfo>())
         {

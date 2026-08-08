@@ -63,17 +63,21 @@ when a physical monitor sleeps. Before both a new launch and a resume of the
 same Sunshine application, the paired Vita asks the Windows companion to arm
 the display automatically. A normal disconnect, Sunshine failure, Windows
 sleep, startup recovery, or uninstall restores the exact saved physical layout
-and stops the device again. You do not select or enable the Vita display by
-hand.
+and stops the device again. The host also captures the exact pre-stream
+Windows audio defaults and reapplies them after the physical monitor's audio
+endpoint returns. You do not select or enable the Vita display by hand.
 
 ## Use it
 
-- Open the in-stream menu: hold **START**, then press **L + R** within one
-  second. The shortcut stays on the Vita and is not sent to the PC.
-- Open the Vita keyboard: hold **START**, then press **D-pad Left** within one
+- Open the in-stream menu: hold **SELECT first**, then press **L + R** within
+  one second. The documented SELECT-led shortcut stays on the Vita and is not
+  sent to the PC. Ordinary **START** is sent to the streamed game immediately.
+- Open the Vita keyboard: hold **SELECT first**, then press **D-pad Left** within one
   second, or choose
   **Open on-screen keyboard** from the in-stream menu.
 - End normally: choose **Disconnect stream** from the menu.
+- Front-corner actions are short tap gestures. Swipes, drags, holds, and
+  multitouch continue to the selected mouse, touchpad, or tablet mode.
 - Return to LiveArea if the stream is stuck: double-press **PS**.
 - Recover the PC display without the control panel: press
   **Ctrl + Alt + Shift + F11** on a keyboard connected to the PC.
@@ -151,6 +155,13 @@ so it cannot take over when the physical monitor sleeps. The shared MTT driver
 package is never guessed to be exclusively owned and is not deleted. If
 uninstall asks for a restart,
 restart Windows and run the uninstaller again.
+
+Before Pause or uninstall, the host makes one bounded attempt to restore the
+exact pre-stream Windows audio defaults. Pause may retain an inert audio retry
+record for the next Enable; it still stops every background function. Uninstall
+never guesses another output or strands the uninstaller if an old HDMI/DP audio
+device was permanently removed: Windows keeps its current default and the host
+reports a warning before removing its state.
 
 Deleting the Vita app may leave its external settings and support-log files so
 they can survive a reinstall. Use VitaShell to review or back up those files;

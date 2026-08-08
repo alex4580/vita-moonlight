@@ -19,7 +19,8 @@ internal sealed record UninstallFinalizationResult(
     IReadOnlyList<string> PhysicalDisplays,
     bool RescueAgentRemoved,
     bool RecoveryTaskRemoved,
-    OwnedStateCleanupResult StateCleanup);
+    OwnedStateCleanupResult StateCleanup,
+    IReadOnlyList<string> Warnings);
 
 internal static class UninstallManager
 {
@@ -29,6 +30,9 @@ internal static class UninstallManager
     private static readonly string[] CurrentRootStateFiles =
     [
         "display-recovery.json",
+        "audio-recovery.json",
+        "audio-recovery.backup.json",
+        "audio-recovery.lock",
         "host-settings.json",
         "session.lock",
         "last-command-error.txt",
@@ -455,6 +459,7 @@ internal static class UninstallManager
         var rescueAgentRemoved = false;
         var recoveryTaskRemoved = false;
         var integrationCleanupStarted = false;
+        var warnings = new List<string>();
 
         try
         {
@@ -490,6 +495,35 @@ internal static class UninstallManager
 
                     VerifyPhysicalOnlyTopology(
                         new DisplayTopologyService());
+
+                    try
+                    {
+                        var audio = AudioEndpointRecoveryService.RestorePending(
+                            waitForEndpoint: true);
+                        if (!audio.Succeeded)
+                        {
+                            var warning =
+                                "Windows did not re-enumerate every exact pre-stream audio endpoint before the bounded uninstall attempt ended. Uninstall continued without guessing another output; Windows kept its current default audio choice. " +
+                                (audio.Detail ?? string.Empty);
+                            warnings.Add(warning.Trim());
+                            Console.Error.WriteLine(warning);
+                        }
+                    }
+                    catch (Exception audioError) when (
+                        audioError is IOException or
+                            UnauthorizedAccessException or
+                            InvalidDataException or
+                            InvalidOperationException or
+                            ArgumentException or
+                            System.ComponentModel.Win32Exception or
+                            System.Security.SecurityException)
+                    {
+                        var warning =
+                            "Windows audio recovery state could not be inspected during uninstall. Uninstall continued because supplementary audio state never authorizes display, task, driver, or file-retention decisions; Windows kept its current default audio choice. " +
+                            audioError.Message;
+                        warnings.Add(warning);
+                        Console.Error.WriteLine(warning);
+                    }
 
                     var rescueAgentBefore =
                         HostRecoveryAgentManager.GetInstallationState();
@@ -597,7 +631,8 @@ internal static class UninstallManager
                 finalRecovery.PhysicalDisplays,
                 rescueAgentRemoved,
                 recoveryTaskRemoved,
-                stateCleanup);
+                stateCleanup,
+                warnings);
         }
         catch (Exception error) when (integrationCleanupStarted)
         {

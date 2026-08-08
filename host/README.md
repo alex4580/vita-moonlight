@@ -223,12 +223,19 @@ the separate, optional Vita capture.
 
 ## Stream controls on the Vita
 
-- Hold **START**, then press **L + R** within one second to open the in-stream
-  menu without sending the chord to Windows.
+- Hold **SELECT first**, then press **L + R** within one second to open the
+  in-stream menu without sending the chord to Windows. Ordinary **START** is
+  sent to the streamed controller immediately.
 - Use **Open on-screen keyboard** in that menu, or press
-  **START + D-pad Left**.
+  **SELECT first + D-pad Left**.
 - Use **Disconnect stream** for a normal exit.
 - Double-press **PS** for a forced return to LiveArea.
+
+Mapped front-touch corners require a short stationary single-finger tap.
+Dragging, holding, adding another finger, or moving through a corner remains
+normal mouse/touchpad/tablet input. A normal disconnect joins decoder and
+audio workers before returning to menus; the Windows host then restores the
+exact pre-stream physical layout and default audio endpoint.
 
 The first-run **Recommended** preset uses the Vita's native 960x544 display at
 60 FPS and 8 Mbps. The other display modes are 960x540 for strict 16:9 game
@@ -307,6 +314,12 @@ Unlike setup/repair, uninstall may be approved with a different Administrator
 account. It verifies the exact executable and arguments of each Vita-owned
 scheduled task before removing it; an unexpected same-name task is retained and
 uninstall stops with an explanation.
+
+Pause and uninstall first make a bounded exact-audio restoration attempt. If a
+captured HDMI/DisplayPort endpoint was permanently removed, Pause retains only
+an inert retry record for a future Enable while still removing all background
+tasks. Uninstall reports the unresolved endpoint, keeps Windows' current
+default rather than guessing another device, and completes normally.
 
 When shared components are kept, uninstall leaves Sunshine unchanged and the
 VDD driver installed, but leaves its exact managed device PnP-disabled. It

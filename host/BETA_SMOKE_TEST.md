@@ -149,16 +149,18 @@ starting state.
    Select it and launch **Steam Big Picture** or **Desktop**.
 6. Confirm the picture fills the Vita screen, is not 4:3, and is not washed
    out. The expected first-run mode is 960x544, 60 FPS, H.264 SDR, and 8 Mbps.
-7. Hold **START**, then press **L + R** within one second. The in-stream menu
-   must open without
-   those buttons reaching Windows.
+7. Press **START** once and confirm Steam/the game receives one ordinary Start
+   press. Then hold **SELECT first** and press **L + R** within one second. The
+   in-stream menu must open without SELECT/L/R reaching Windows.
 8. From the menu, briefly enable **Frame rate + network**. Move through a game
    or Steam interface and confirm the menu remains responsive.
 9. Open the on-screen keyboard from the menu and type into a non-secret field.
 10. Press a face button once and confirm it is not stuck or repeated after
    release.
-11. Choose **Disconnect stream**. The exact physical PC layout must return
-    without a restart or sign-out, and the managed VDD must be PnP-disabled.
+11. Choose **Disconnect stream**. The Vita app must return to its menus without
+    crashing. The exact physical PC layout and its pre-stream default audio
+    output must return without a restart or sign-out, and the managed VDD must
+    be PnP-disabled.
 12. Immediately select the same Sunshine application again. This exercises
     Sunshine's resume path rather than a fresh app launch. The dedicated Vita
     display must arm again at 960x544, the same Windows application must remain

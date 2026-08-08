@@ -42,6 +42,7 @@
 
 
 #include "touchabsolute.h"
+#include "touch_zone_gesture.h"
 #include "shortcuts.h"
 #include "motion.h"
 #include "../connection_overlay.h"
@@ -165,6 +166,7 @@ static SceCtrlData shortcut_pad_old;
  * still consumed when the new virtual controller arrives.
  */
 static bool suppress_remote_input_until_release = false;
+static vita_touch_zone_gesture front_zone_gesture;
 TouchData touch;
 TouchData touch_old, swipe;
 SceTouchData front, back;
@@ -714,9 +716,54 @@ bool in_front_touchzone() {
   return false;
 }
 
+static int front_touchzone_at(int x, int y) {
+  for (int zone = 0; zone < VITA_TOUCH_ZONE_COUNT; zone++) {
+    if (has_specialkey(zone) && IN_SECTION(FRONT_SECTIONS[zone], x, y)) {
+      return zone;
+    }
+  }
+  return VITA_TOUCH_ZONE_NONE;
+}
+
+static void suppress_front_touch_sample(void) {
+  touch.finger = 0;
+  memset(touch.points, 0, sizeof(touch.points));
+}
 
 void process_touchzones() {
-  read_frontscreen();
+  static const uint16_t touchzone_flags[VITA_TOUCH_ZONE_COUNT] = {
+    TOUCHSEC_SPECIAL_NW,
+    TOUCHSEC_SPECIAL_NE,
+    TOUCHSEC_SPECIAL_SW,
+    TOUCHSEC_SPECIAL_SE
+  };
+  int zone_at_contact = VITA_TOUCH_ZONE_NONE;
+  int triggered_zone = VITA_TOUCH_ZONE_NONE;
+
+  if (touch.finger == 1) {
+    zone_at_contact = front_touchzone_at(
+        touch.points[0].x, touch.points[0].y);
+  }
+
+  vita_touch_zone_decision decision = vita_touch_zone_gesture_step(
+      &front_zone_gesture,
+      config.enable_front_touchzones,
+      zone_at_contact,
+      touch.finger,
+      touch.points[0].x,
+      touch.points[0].y,
+      sceKernelGetSystemTimeWide(),
+      &triggered_zone);
+
+  if (decision == VITA_TOUCH_ZONE_SUPPRESS ||
+      decision == VITA_TOUCH_ZONE_TRIGGER) {
+    suppress_front_touch_sample();
+  }
+  if (decision == VITA_TOUCH_ZONE_TRIGGER &&
+      triggered_zone >= 0 && triggered_zone < VITA_TOUCH_ZONE_COUNT) {
+    touch.button |= touchzone_flags[triggered_zone];
+  }
+
   special(config.special_keys.nw,
           is_pressed(INPUT_TYPE_TOUCHSCREEN | TOUCHSEC_SPECIAL_NW),
           is_old_pressed(INPUT_TYPE_TOUCHSCREEN | TOUCHSEC_SPECIAL_NW));
@@ -898,6 +945,7 @@ inline void vitainput_process(void) {
   read_backscreen();
 
   if (suppress_remote_input_until_release) {
+    vita_touch_zone_gesture_reset(&front_zone_gesture);
     memcpy(&pad_old, &raw_pad, sizeof(SceCtrlData));
     memcpy(&shortcut_pad_old, &raw_pad, sizeof(SceCtrlData));
     memset(&old, 0, sizeof(input_data));
@@ -916,6 +964,7 @@ inline void vitainput_process(void) {
   }
   memcpy(&shortcut_pad_old, &raw_pad, sizeof(SceCtrlData));
   if (overlay_was_open) {
+    vita_touch_zone_gesture_reset(&front_zone_gesture);
     stream_overlay_handle_input(&pad, &pad_old);
     if (!stream_overlay_is_open()) {
       suppress_remote_input_until_release = true;
@@ -924,9 +973,7 @@ inline void vitainput_process(void) {
     memset(&old, 0, sizeof(input_data));
     return;
   }
-  if (config.enable_front_touchzones) {
-    process_touchzones();
-  }
+  process_touchzones();
   // --- FIN BLOQUE SPECIAL KEYS/ESQUINAS DEL FRENTE ---
 
   process_buttons();
@@ -1098,6 +1145,7 @@ void vitainput_refresh_touchzones(void) {
     pthread_mutex_lock(&input_process_mutex);
   }
   update_front_sections(&sanitized);
+  vita_touch_zone_gesture_reset(&front_zone_gesture);
   if (input_mutex_initialized) {
     pthread_mutex_unlock(&input_process_mutex);
   }
@@ -1259,6 +1307,7 @@ void vitainput_start(void) {
   memset(&front, 0, sizeof(front));
   memset(&back, 0, sizeof(back));
   memset(&dc_tracker, 0, sizeof(dc_tracker));
+  vita_touch_zone_gesture_reset(&front_zone_gesture);
   front_state = NO_TOUCH_ACTION;
   finger_count = 0;
   /* A reconnect must not inherit a button held during controller creation. */
@@ -1352,6 +1401,7 @@ void vitainput_stop(void) {
   memset(&front, 0, sizeof(front));
   memset(&back, 0, sizeof(back));
   memset(&dc_tracker, 0, sizeof(dc_tracker));
+  vita_touch_zone_gesture_reset(&front_zone_gesture);
   front_state = NO_TOUCH_ACTION;
   finger_count = 0;
   suppress_remote_input_until_release = true;

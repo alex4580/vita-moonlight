@@ -211,7 +211,6 @@ enum {
   SETTINGS_CONTROLLER_MAPPER,
   SETTINGS_BACK_DEADZONE,
   SETTINGS_SPECIAL_KEYS,
-  SETTINGS_ENABLE_SPECIAL_KEYS,
   SETTINGS_PSBUTTON_MODE,
   SETTINGS_CONTROLLER_TYPE,
   SETTINGS_SWAP_SHOULDER_BUTTONS,
@@ -242,7 +241,6 @@ enum {
   SETTINGS_VIEW_ENABLE_MAPPING,
   SETTINGS_VIEW_MAPPING_LOCATION,
   SETTINGS_VIEW_BACK_DEADZONE,
-  SETTINGS_VIEW_ENABLE_SPECIAL_KEYS,
   SETTINGS_VIEW_PSBUTTON_MODE,
   SETTINGS_VIEW_CONTROLLER_TYPE,
   SETTINGS_VIEW_SWAP_SHOULDER_BUTTONS,
@@ -307,7 +305,6 @@ static int settings_category_for_id(int id) {
     case SETTINGS_MOUSE_ACCEL:
     case SETTINGS_BACK_DEADZONE:
     case SETTINGS_SPECIAL_KEYS:
-    case SETTINGS_ENABLE_SPECIAL_KEYS:
     case SETTINGS_TOUCH_MODE_SELECT:
     case SETTINGS_KEYBOARD_LAYOUT:
       return SETTINGS_ROOT_TOUCH_KEYBOARD;
@@ -804,15 +801,6 @@ static int settings_loop(int id, void *context, const input_data *input) {
         did_change = 1;
       }
       break;
-    case SETTINGS_ENABLE_SPECIAL_KEYS:
-      if ((input->buttons & config.btn_confirm) == 0 || input->buttons & SCE_CTRL_HOLD) {
-        break;
-      }
-
-      config.enable_front_touchzones = !config.enable_front_touchzones;
-      vitainput_refresh_touchzones();
-      did_change = 1;
-      break;
     case SETTINGS_PSBUTTON_MODE:
       if (!left && !right) {
         break;
@@ -930,10 +918,6 @@ static int settings_loop(int id, void *context, const input_data *input) {
 
   sprintf(current, "%s", psbutton_mode_names[config.psbutton_mode]);
   MENU_REPLACE(SETTINGS_VIEW_PSBUTTON_MODE, current);
-
-  MENU_REPLACE(
-      SETTINGS_VIEW_ENABLE_SPECIAL_KEYS,
-      on_off(config.enable_front_touchzones));
 
   MENU_REPLACE(
       SETTINGS_VIEW_ENABLE_MAPPING,
@@ -1059,8 +1043,11 @@ static int ui_settings_category_menu(int category) {
     idx++;
   }
   MENU_ENTRY(SETTINGS_TOUCH_MODE_SELECT, SETTINGS_VIEW_TOUCH_MODE_SELECT, "Touchscreen mode", "");
-  MENU_ENTRY(SETTINGS_ENABLE_SPECIAL_KEYS, SETTINGS_VIEW_ENABLE_SPECIAL_KEYS, "Front-touch zones", "");
-  MENU_ACTION(SETTINGS_SPECIAL_KEYS, "Front-touch zone mapper");
+  MENU_ACTION(
+      SETTINGS_SPECIAL_KEYS,
+      config.enable_front_touchzones
+          ? "Front-touch tap-zone mapper (On)"
+          : "Front-touch tap-zone mapper (Off)");
   MENU_ENTRY(SETTINGS_BACK_DEADZONE, SETTINGS_VIEW_BACK_DEADZONE, "Back touchscreen deadzone", "");
   MENU_ENTRY(SETTINGS_MOUSE_ACCEL, SETTINGS_VIEW_MOUSE_ACCEL, "Mouse acceleration", ICON_LEFT_RIGHT_ARROWS);
   MENU_ENTRY(SETTINGS_KEYBOARD_LAYOUT, SETTINGS_VIEW_KEYBOARD_LAYOUT, "Keyboard layout", "");

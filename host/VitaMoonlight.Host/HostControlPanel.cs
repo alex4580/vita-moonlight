@@ -230,7 +230,7 @@ internal sealed class HostControlPanel : Form
             "This profile matches the Vita screen and is selected for dependable Wi-Fi performance. Tune quality later from the Vita settings menu."));
         AddPageControl(page, CreateInfoCard(
             "If a game or display gets stuck",
-            "On the Vita, hold START and then press L + R within one second to open the stream menu without sending the shortcut to the PC. Choose Open Windows Task Manager to close a stuck game. Use Recover host display only when the captured display itself is unusable. Double-press PS remains the forced return to Vita LiveArea."));
+            "On the Vita, hold SELECT first and then press L + R within one second to open the stream menu without sending the shortcut to the PC. START remains an ordinary game/controller button. Choose Open Windows Task Manager to close a stuck game. Use Recover host display only when the captured display itself is unusable. Double-press PS remains the forced return to Vita LiveArea."));
         return page;
     }
 

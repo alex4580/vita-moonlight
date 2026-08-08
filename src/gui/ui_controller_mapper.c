@@ -853,7 +853,7 @@ static int front_mapper_loop(int id,
     case FRONT_MAPPER_RESET:
       if (confirm &&
           display_confirm(
-              "Restore default front-touch zones and actions?")) {
+              "Restore default front-touch tap zones and actions?")) {
         config.special_keys.offset = 0;
         config.special_keys.size = 150;
         config.special_keys.nw =
@@ -930,7 +930,7 @@ static void front_mapper_draw(void) {
       panel_x, panel_y, panel_width, panel_height);
   draw_fitted_text(
       panel_x + 16, panel_y + 29, panel_width - 32,
-      20, TEXT_COLOR, "Front-touch zone preview");
+      20, TEXT_COLOR, "Front-touch tap-zone preview");
   draw_fitted_text(
       panel_x + 16, panel_y + 52, panel_width - 32,
       16,
@@ -1051,7 +1051,7 @@ static void front_mapper_draw(void) {
   draw_fitted_text(
       panel_x + 16, panel_y + 394, panel_width - 32,
       16, TEXT_COLOR,
-      "White dots show live touches; corners consume them.");
+      "Short stationary taps run actions; drags pass through.");
   draw_fitted_text(
       panel_x + 16, panel_y + 421, panel_width - 32,
       16, MUTED_TEXT_COLOR,

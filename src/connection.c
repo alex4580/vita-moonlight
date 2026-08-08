@@ -33,10 +33,14 @@
 #include "debug.h"
 #include "gui/ui_stream_overlay.h"
 #include "gui/ui_diagnostics.h"
+#include <psp2/kernel/threadmgr.h>
 
 static int connection_status = LI_DISCONNECTED;
 static uint32_t termination_in_progress = 0;
 static pthread_mutex_t lifecycle_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+#define CONNECTION_TERMINATION_WAIT_US 15000000ULL
+#define CONNECTION_TERMINATION_POLL_US 2000
 
 int connection_stage = 0;
 
@@ -181,16 +185,24 @@ static void connection_connection_terminated_internal(int error_code,
      * intentionally retained for resume, but must end during teardown. */
     vitapower_stop();
   }
-  set_connection_state(LI_DISCONNECTED, reason, level, error_code);
   pthread_mutex_unlock(&lifecycle_mutex);
 
-  /* Do not hold the lifecycle mutex here. Moonlight may invoke the
-   * termination callback reentrantly; the gate above makes that a no-op. */
+  /* Do not publish LI_DISCONNECTED until Moonlight has joined its media,
+   * renderer, audio, and input workers. The host can end an app while the UI
+   * thread is returning from gs_quit_app(); publishing first allowed that UI
+   * thread to free SERVER_DATA/CURL while this asynchronous callback was
+   * still inside LiStopConnection(). */
   LiStopConnection();
-  vita_debug_flush();
   stream_overlay_reset();
   ui_diagnostics_reset_session();
   ui_diagnostics_set_network_state(UI_DIAGNOSTICS_NETWORK_UNKNOWN);
+
+  pthread_mutex_lock(&lifecycle_mutex);
+  set_connection_state(LI_DISCONNECTED, reason, level, error_code);
+  pthread_mutex_unlock(&lifecycle_mutex);
+  vita_debug_flush();
+  /* This is also the process-shutdown barrier: keep ownership until the
+   * detached callback has finished its final debug I/O. */
   end_termination();
 }
 
@@ -278,13 +290,42 @@ int connection_resume() {
 }
 
 int connection_terminate() {
+  /* A host-side app exit can win the race and start the asynchronous callback
+   * before an overlay Disconnect/Quit action returns. Join that owner instead
+   * of issuing a second LiStopConnection() or letting the caller clean up
+   * shared state underneath it. */
+  if (__atomic_load_n(&termination_in_progress, __ATOMIC_ACQUIRE)) {
+    return connection_wait_for_termination();
+  }
+
   int state = connection_state_load();
+  if (state == LI_DISCONNECTED) return 0;
   if (state != LI_PAIRED && state != LI_CONNECTED &&
       state != LI_MINIMIZED) {
     log_invalid_transition("terminate_request");
     return -1;
   }
   connection_connection_terminated_internal(0, true);
+  return connection_wait_for_termination();
+}
+
+int connection_wait_for_termination() {
+  uint64_t deadline =
+      sceKernelGetSystemTimeWide() + CONNECTION_TERMINATION_WAIT_US;
+  while (__atomic_load_n(&termination_in_progress, __ATOMIC_ACQUIRE)) {
+    if (sceKernelGetSystemTimeWide() >= deadline) {
+      vita_debug_event(
+          VITA_DEBUG_LEVEL_ERROR, "connection.state",
+          "state=release_blocked reason=media_teardown_timeout code=-1");
+      return -1;
+    }
+    sceKernelDelayThread(CONNECTION_TERMINATION_POLL_US);
+  }
+
+  if (connection_state_load() != LI_DISCONNECTED) {
+    log_invalid_transition("termination_wait");
+    return -1;
+  }
   return 0;
 }
 
@@ -313,7 +354,16 @@ bool connection_is_ready() {
 }
 
 bool connection_is_connected() {
-  return connection_state_load() == LI_CONNECTED;
+  /* Stop accepting overlay/input actions as soon as either the Vita or the PC
+   * owns teardown. The disconnect path will join the owner before touching
+   * the host client or heartbeat state. */
+  return connection_state_load() == LI_CONNECTED &&
+      !__atomic_load_n(&termination_in_progress, __ATOMIC_ACQUIRE);
+}
+
+bool connection_is_terminating() {
+  return __atomic_load_n(
+      &termination_in_progress, __ATOMIC_ACQUIRE) != 0;
 }
 
 int connection_get_status() {

@@ -99,6 +99,7 @@ add_executable(${PROJECT_NAME}.elf
 	src/video/vita.c
 	src/input/vita.c
 	src/input/shortcuts.c
+	src/input/touch_zone_gesture.c
 	src/power/vita.c
 	src/input/motion.c
 	src/graphics.c

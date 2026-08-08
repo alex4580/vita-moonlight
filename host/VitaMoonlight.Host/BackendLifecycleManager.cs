@@ -312,13 +312,23 @@ internal static class BackendLifecycleManager
 
         var stepErrors = new List<string>();
         TryStep(
-            "stop and remove the stream rescue agent task",
-            HostRecoveryAgentManager.Uninstall,
+            "make a final bounded attempt to restore the exact pre-stream Windows audio defaults",
+            TryPendingAudioRecoveryBeforePause,
             stepErrors);
-        TryStep(
-            "remove the automatic logon recovery task",
-            RecoveryTaskManager.Uninstall,
-            stepErrors);
+        if (stepErrors.Count == 0)
+        {
+            // Do not remove the only asynchronous retry mechanism while an
+            // HDMI/DisplayPort endpoint is still re-enumerating. A failed
+            // Pause remains visibly partial with both safeguards intact.
+            TryStep(
+                "stop and remove the stream rescue agent task",
+                HostRecoveryAgentManager.Uninstall,
+                stepErrors);
+            TryStep(
+                "remove the automatic logon recovery task",
+                RecoveryTaskManager.Uninstall,
+                stepErrors);
+        }
         TryStep(
             "perform the final physical-display safety verification",
             RestoreAndVerifyPhysicalOnly,
@@ -363,6 +373,26 @@ internal static class BackendLifecycleManager
             allIssues.Length == 0 ? null : string.Join(" ", allIssues));
         BackendLifecycleStateStore.Save(saved);
         return InspectCore(saved, true, null);
+    }
+
+    private static void TryPendingAudioRecoveryBeforePause()
+    {
+        try
+        {
+            var audio = AudioEndpointRecoveryService.RestorePending(
+                waitForEndpoint: true);
+            if (audio.Succeeded) return;
+            Console.Error.WriteLine(
+                "Windows has not re-enumerated every exact pre-stream audio endpoint. " +
+                "Pause will still stop all background functions; the inert exact endpoint record is retained and will be retried if Vita host features are enabled again. " +
+                (audio.Detail ?? string.Empty));
+        }
+        catch (Exception error) when (IsOperationalError(error))
+        {
+            Console.Error.WriteLine(
+                "Pause could not inspect the supplementary audio recovery record, but will still stop all background functions. " +
+                error.Message);
+        }
     }
 
     internal static BackendLifecycleReport Enable()

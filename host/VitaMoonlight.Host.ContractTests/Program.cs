@@ -765,4 +765,6 @@ TestStreamBoundaryPairedCertificateAuthority();
 TestRecoveryLifecycleDecisions();
 TestSunshineInfoLoggingRetirement();
 ManagedVddOwnershipContractTests.Run();
+AudioEndpointRecoveryContractTests.Run();
+PendingAudioRecoveryAgentContractTests.Run();
 Console.WriteLine("Install/upgrade cleanup contract tests passed.");

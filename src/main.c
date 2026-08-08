@@ -261,18 +261,19 @@ int main(int argc, char* argv[]) {
 
   gui_loop();
 
-  if (connection_get_status() != LI_DISCONNECTED) {
-    connection_terminate();
-  }
-  (void)ui_connect_release_stream_boundary(false);
+  bool host_state_released = ui_connect_shutdown();
   bool boundary_cleanup_ready =
       ui_connect_stream_boundary_local_cleanup_ready();
-  ui_diagnostics_shutdown();
-  bool workers_stopped = vita_workers_shutdown();
-  if (workers_stopped && boundary_cleanup_ready) {
+  bool workers_stopped = false;
+  if (host_state_released && boundary_cleanup_ready) {
+    ui_diagnostics_shutdown();
+    workers_stopped = vita_workers_shutdown();
+  }
+  if (workers_stopped) {
+    gui_shutdown();
     vita_runtime_shutdown();
   }
-  return workers_stopped && boundary_cleanup_ready
+  return workers_stopped && boundary_cleanup_ready && host_state_released
       ? EXIT_SUCCESS
       : EXIT_FAILURE;
 }

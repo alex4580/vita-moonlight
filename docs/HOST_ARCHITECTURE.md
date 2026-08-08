@@ -50,6 +50,15 @@ restores the exact physical baseline and PnP-disables the VDD; a delayed stop
 from an older generation cannot tear down a newer stream. No manual Windows
 display selection is part of the supported path.
 
+The physical baseline also records the exact Windows default render endpoint
+for Console, Multimedia, and Communications roles. Restoration never selects
+an arbitrary replacement: after the physical display and its DisplayPort/HDMI
+audio endpoint re-enumerate, the companion reapplies only the captured device
+ID. Suspend performs no Core Audio call: it durably moves the captured IDs into
+a protected, transaction-bound audio retry record for resume; an unavailable
+or stalled endpoint can never consume the suspend deadline, delay display
+safety, or keep the VDD active.
+
 After Sunshine accepts launch or resume, the Vita marks that exact generation
 started and renews a short authenticated lease while the stream is alive. The
 renewal is protocol state, not support logging: successful heartbeats are not
@@ -74,6 +83,18 @@ alive. Sleep, startup, emergency recovery, and uninstall also restore the exact
 saved physical layout and PnP-disable the VDD. There is no idle display polling,
 continuous Sunshine-log tail, forced Sunshine INFO level, or continuous support
 log.
+
+Pending audio state uses checksummed, revisioned primary and backup records.
+Each successfully restored role is removed immediately so a still-unplugged
+communications device cannot later override a legitimate Console/Multimedia
+choice. Every Core Audio attempt runs in a short-lived helper process; a hung
+Windows audio RPC is terminated at the process boundary rather than hanging a
+Vita stop request, suspend handler, recovery agent, Pause, or uninstall. The
+background agent retries only while such a record exists and stops at a circuit
+breaker. A later real device/display arrival may open one fresh bounded window,
+while the worker's own file writes cannot. Pause quiesces the agent even if a device remains absent;
+uninstall makes one final bounded attempt, warns, and then leaves Windows'
+current default untouched rather than guessing or becoming uninstallable.
 
 The same `session start` transaction remains available for the timed control-
 panel preview and an explicitly selected experimental Apollo CLI path. Apollo

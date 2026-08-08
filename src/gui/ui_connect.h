@@ -11,6 +11,9 @@ bool ui_connect_release_stream_boundary(bool show_error);
 /* False only while local heartbeat resources may still reference server/CURL
  * state. A remote stop failure does not make local cleanup unsafe. */
 bool ui_connect_stream_boundary_local_cleanup_ready(void);
+/* Ordered process shutdown: join media teardown, stop the lease heartbeat,
+ * notify the host, then release GameStream HTTP/pairing state. */
+bool ui_connect_shutdown(void);
 
 void ui_connect_resume();
 void ui_connect_manual();

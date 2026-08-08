@@ -125,6 +125,16 @@ jobs:
             -o "$RUNNER_TEMP/vita-keyboard-ime-test"
           "$RUNNER_TEMP/vita-keyboard-ime-test"
 
+      - name: Compile and run Vita front-touch gesture tests
+        run: |
+          set -euo pipefail
+          cc -std=c99 -Wall -Wextra -Werror \
+            -Isrc \
+            tests/touch_zone_gesture_test.c \
+            src/input/touch_zone_gesture.c \
+            -o "$RUNNER_TEMP/vita-touch-zone-gesture-test"
+          "$RUNNER_TEMP/vita-touch-zone-gesture-test"
+
       - name: Compile and run Vita SPS low-latency regression
         run: |
           set -euo pipefail

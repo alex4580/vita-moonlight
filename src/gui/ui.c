@@ -573,6 +573,8 @@ void gui_loop() {
   gui_init();
 
   while (ui_main_menu() == 2);
+}
 
+void gui_shutdown() {
   vita2d_fini();
 }

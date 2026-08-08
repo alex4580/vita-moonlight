@@ -783,16 +783,18 @@ def main() -> int:
     )
 
     release_section = ""
-    if "static bool release_host_client_state(void)" in connect:
+    if "static bool release_host_client_state_with_options" in connect:
         release_section = connect.split(
-            "static bool release_host_client_state(void)", 1
-        )[1].split("int get_app_id", 1)[0]
+            "static bool release_host_client_state_with_options", 1
+        )[1].split("static bool release_host_client_state(void)", 1)[0]
     require(
         "connection_abort_attempt()" in release_section
+        and "connection_wait_for_termination()" in release_section
         and "gs_cleanup(&server);" in release_section
         and release_section.find("connection_abort_attempt()")
+        < release_section.find("connection_wait_for_termination()")
         < release_section.find("gs_cleanup(&server);"),
-        "src/gui/ui_connect.c: READY state must be aborted before client cleanup",
+        "src/gui/ui_connect.c: READY/media state must reach completed teardown before client cleanup",
     )
     require(
         re.search(r"^\s*connection_reset\(\);", connect, re.MULTILINE) is None,

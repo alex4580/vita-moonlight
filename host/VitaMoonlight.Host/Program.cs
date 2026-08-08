@@ -26,6 +26,27 @@ internal static class Program
         {
             ClearOperationalPathOverrides();
         }
+        if (string.Equals(
+                command,
+                AudioEndpointRecoveryService.IsolatedWorkerCommand,
+                StringComparison.Ordinal))
+        {
+            // This exact internal action runs in a disposable child process
+            // so stalled Core Audio COM/RPC can be terminated without hanging
+            // stream stop, recovery, Pause, or uninstall. It accepts no
+            // endpoint ID from the command line and touches only protected
+            // journal state, so it remains safe during a maintenance fence.
+            try
+            {
+                return AudioEndpointRecoveryService.RunIsolatedWorker(
+                    remaining);
+            }
+            catch (Exception workerError)
+            {
+                Console.Error.WriteLine(workerError.Message);
+                return ExitFailure;
+            }
+        }
         if (TryDescribeUnrelatedSunshineHook(
                 command,
                 remaining,
@@ -1310,6 +1331,10 @@ internal static class Program
                 Console.WriteLine(
                     "Retained unrecognized or untrusted state entries for safety: " +
                     string.Join(", ", finalization.StateCleanup.RetainedEntries));
+            }
+            foreach (var warning in finalization.Warnings)
+            {
+                Console.Error.WriteLine("Uninstall warning: " + warning);
             }
             return ExitSuccess;
         }

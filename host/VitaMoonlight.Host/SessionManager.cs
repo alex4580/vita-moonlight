@@ -804,6 +804,7 @@ internal sealed class SessionManager
                     transaction,
                     displays.Restore,
                     requireManagedDevice: false);
+                RestoreCapturedAudioDefaults(recovery);
                 DisplayTopologyService.ClearRecovery(transaction);
             }
             catch (Exception restoreError)
@@ -827,6 +828,7 @@ internal sealed class SessionManager
                 transaction,
                 displays.Restore,
                 requireManagedDevice: true);
+            RestoreCapturedAudioDefaults(recovery);
             DisplayTopologyService.ClearRecovery(transaction);
         }
         catch (Exception restoreError)
@@ -877,7 +879,6 @@ internal sealed class SessionManager
                 transaction,
                 requireManagedDevice: true);
         }
-
         var recovery = displays.CaptureRecovery(
             desktopMode.Width,
             desktopMode.Height,
@@ -937,6 +938,7 @@ internal sealed class SessionManager
                         transaction,
                         requireManagedDevice: true);
                 }
+                RestoreCapturedAudioDefaults(recovery);
                 DisplayTopologyService.ClearRecovery(transaction);
             }
             catch (Exception restoreError)
@@ -966,21 +968,25 @@ internal sealed class SessionManager
             ManagedVirtualDisplayRuntime.ReconcileIdleLocked(
                 transaction,
                 requireManagedDevice: false);
+            RestorePendingAudioDefaults(waitForEndpoint: true);
         }
         return restored;
     }
 
     internal bool RestoreIfPendingLocked(
         DisplayTransactionLease transaction,
-        DateTimeOffset? expectedCapturedAt = null)
+        DateTimeOffset? expectedCapturedAt = null,
+        bool waitForAudioEndpoint = true,
+        bool deferAudioEndpointRestore = false)
     {
         transaction.RequireActive();
         if (!File.Exists(HostStatePaths.RecoveryFile))
         {
             return false;
         }
+        var recovery = displays.LoadRecovery();
         if (expectedCapturedAt is { } expected &&
-            displays.LoadRecovery().CapturedAt != expected)
+            recovery.CapturedAt != expected)
         {
             // A newer transaction owns the current recovery record. A timed
             // test or delayed cleanup must never tear down that session.
@@ -990,14 +996,122 @@ internal sealed class SessionManager
             transaction,
             displays.Restore,
             requireManagedDevice: false);
+        if (deferAudioEndpointRestore)
+        {
+            PersistCapturedAudioDefaults(recovery);
+        }
+        else
+        {
+            RestoreCapturedAudioDefaults(
+                recovery,
+                waitForAudioEndpoint);
+        }
         DisplayTopologyService.ClearRecovery(transaction);
         return true;
+    }
+
+    private static void PersistCapturedAudioDefaults(
+        DisplayRecoveryRecord recovery)
+    {
+        if (recovery.AudioDefaults is null) return;
+        AudioEndpointRecoveryService.SavePending(
+            recovery.CapturedAt,
+            recovery.AudioDefaults);
+    }
+
+    private static void RestoreCapturedAudioDefaults(
+        DisplayRecoveryRecord recovery,
+        bool waitForEndpoint = true)
+    {
+        if (recovery.AudioDefaults is null) return;
+        // Publish the supplementary obligation before trying Core Audio. If
+        // protected persistence itself fails, let the caller retain the
+        // display recovery record as the last complete copy of those IDs.
+        AudioEndpointRecoveryService.SavePending(
+            recovery.CapturedAt,
+            recovery.AudioDefaults);
+        AudioEndpointRestoreResult audio;
+        try
+        {
+            audio = AudioEndpointRecoveryService.RestorePending(
+                waitForEndpoint);
+        }
+        catch (Exception error) when (
+            error is IOException or
+                UnauthorizedAccessException or
+                InvalidDataException or
+                InvalidOperationException or
+                ArgumentException or
+                System.ComponentModel.Win32Exception or
+                System.Security.SecurityException)
+        {
+            // Never fall back to Core Audio in this display-transaction
+            // process. A stalled COM/RPC server remains confined to the
+            // disposable helper while the already-published retry state stays
+            // independent of display safety.
+            audio = new AudioEndpointRestoreResult(
+                false,
+                [],
+                recovery.AudioDefaults.Entries()
+                    .Select(entry => entry.Role)
+                    .ToArray(),
+                "The isolated pending audio recovery attempt failed: " +
+                error.Message);
+        }
+        if (audio.Succeeded) return;
+
+        // Display safety is authoritative. A disconnected or intentionally
+        // removed audio device must not retain the display transaction or
+        // cause repeated topology churn; report the bounded best-effort audio
+        // failure while allowing the exact physical display restore to commit.
+        Console.Error.WriteLine(
+            "The physical display was restored, but Windows could not " +
+            "reconnect every pre-stream audio endpoint. " +
+            (audio.Detail ?? "The endpoint remained unavailable."));
+    }
+
+    private static void RestorePendingAudioDefaults(bool waitForEndpoint)
+    {
+        AudioEndpointRestoreResult audio;
+        try
+        {
+            audio = AudioEndpointRecoveryService.RestorePending(
+                waitForEndpoint);
+        }
+        catch (Exception error) when (
+            error is IOException or
+                UnauthorizedAccessException or
+                InvalidDataException or
+                InvalidOperationException or
+                ArgumentException or
+                System.ComponentModel.Win32Exception or
+                System.Security.SecurityException)
+        {
+            Console.Error.WriteLine(
+                "Windows audio recovery remains pending because its " +
+                $"protected state could not be read: {error.Message}");
+            return;
+        }
+        if (audio.Succeeded) return;
+        Console.Error.WriteLine(
+            "Windows has not yet reconnected every saved pre-stream audio " +
+            "endpoint. Vita Moonlight retained the exact endpoint IDs and " +
+            "will retry after the next display recovery. " +
+            (audio.Detail ?? string.Empty));
     }
 
     internal static bool DiscardPendingRecoveryLocked(
         DisplayTransactionLease transaction)
     {
         transaction.RequireActive();
+        if (!File.Exists(HostStatePaths.RecoveryFile)) return false;
+
+        // Upgrade, uninstall, stale-fence cleanup, and emergency idle repair
+        // may deliberately discard an already-restored display transaction.
+        // Preserve its independent exact-audio obligation first so removing
+        // the display record can never strand Windows on a temporary output.
+        var recovery = new DisplayTopologyService().LoadRecovery();
+        PersistCapturedAudioDefaults(recovery);
         return DisplayTopologyService.ClearRecovery(transaction);
     }
 

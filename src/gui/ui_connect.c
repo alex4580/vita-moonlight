@@ -33,6 +33,7 @@
 #include <sys/types.h>
 
 #include <psp2/kernel/threadmgr.h>
+#include <psp2/kernel/processmgr.h>
 #include <psp2/ctrl.h>
 #include <psp2/io/stat.h>
 #include <vita2d.h>
@@ -309,7 +310,7 @@ bool ui_connect_release_stream_boundary(bool show_error) {
   return release_stream_boundary(show_error);
 }
 
-static bool release_host_client_state(void) {
+static bool release_host_client_state_with_options(bool show_restore_error) {
   int status = connection_get_status();
   int transition_result = 0;
 
@@ -317,6 +318,12 @@ static bool release_host_client_state(void) {
     transition_result = connection_abort_attempt();
   else if (status != LI_DISCONNECTED)
     transition_result = connection_terminate();
+
+  /* LI_DISCONNECTED is a completed-media invariant. Keep an explicit barrier
+   * here as defense in depth for host-initiated termination and future state
+   * transitions before the heartbeat or shared SERVER_DATA/CURL is touched. */
+  if (transition_result == 0)
+    transition_result = connection_wait_for_termination();
 
   if (transition_result != 0) {
     vita_debug_event(
@@ -326,7 +333,7 @@ static bool release_host_client_state(void) {
     return false;
   }
 
-  bool restore_confirmed = release_stream_boundary(false);
+  bool restore_confirmed = release_stream_boundary(show_restore_error);
   if (!ui_connect_stream_boundary_local_cleanup_ready()) {
     vita_debug_event(
         VITA_DEBUG_LEVEL_ERROR, "connection.state",
@@ -337,7 +344,24 @@ static bool release_host_client_state(void) {
   gs_free_applist(&server_applist);
   gs_cleanup(&server);
   active_saved_host_name[0] = '\0';
-  return restore_confirmed;
+  if (!restore_confirmed) {
+    vita_debug_event(
+        VITA_DEBUG_LEVEL_WARNING, "stream.boundary",
+        "action=stop state=observer_pending local_cleanup=complete code=-1");
+  }
+  /* Remote restore confirmation and local cleanup safety are intentionally
+   * different results. A network-loss stop can fail while the host observer
+   * still owns recovery; once the worker is joined, local CURL cleanup is
+   * safe and must not be skipped. */
+  return true;
+}
+
+static bool release_host_client_state(void) {
+  return release_host_client_state_with_options(false);
+}
+
+bool ui_connect_shutdown(void) {
+  return release_host_client_state_with_options(false);
 }
 
 int get_app_id(PAPP_LIST list, char *name) {
@@ -647,7 +671,13 @@ int ui_connect_loop(int id, void *context, const input_data *input) {
                 VITA_DEBUG_LEVEL_INFO, "stream.action",
                 "action=reconnect state=requested reason=input_settings");
           }
-          connection_terminate();
+          if (connection_terminate() != 0) {
+            vita_debug_event(
+                VITA_DEBUG_LEVEL_ERROR, "stream.action",
+                "action=reconnect state=failed phase=media_teardown reason=%s",
+                apply_display ? "display_settings" : "input_settings");
+            break;
+          }
           if (!release_stream_boundary(true))
             break;
           sceKernelDelayThread(500 * 1000);
@@ -715,7 +745,11 @@ int ui_connect_loop(int id, void *context, const input_data *input) {
                 VITA_DEBUG_LEVEL_INFO, "stream.action",
                 "action=stop_stream_app state=complete");
             server.currentGame = 0;
-            connection_terminate();
+            if (connection_terminate() != 0) {
+              vita_debug_event(
+                  VITA_DEBUG_LEVEL_ERROR, "stream.action",
+                  "action=stop_stream_app state=failed phase=media_teardown");
+            }
             break;
           }
           vita_debug_event(
@@ -728,11 +762,11 @@ int ui_connect_loop(int id, void *context, const input_data *input) {
               "action=recover_display state=requested");
           send_host_rescue_hotkey(0x7A); // F11
           sceKernelDelayThread(350 * 1000);
-          connection_terminate();
+          (void)connection_terminate();
           break;
         }
         if (stream_overlay_take_disconnect_request()) {
-          connection_terminate();
+          (void)connection_terminate();
           break;
         }
         sceKernelDelayThread(50 * 1000);
@@ -740,7 +774,7 @@ int ui_connect_loop(int id, void *context, const input_data *input) {
 
       int status = connection_get_status();
 
-      if (status == LI_DISCONNECTED) {
+      if (status == LI_DISCONNECTED || connection_is_terminating()) {
           goto disconnect;
       }
 
@@ -748,15 +782,21 @@ int ui_connect_loop(int id, void *context, const input_data *input) {
   }
 
 disconnect:
-  flash_message("Disconnecting...");
-  status = connection_get_status();
-  if (status == LI_READY)
-    connection_abort_attempt();
-  else if (status != LI_DISCONNECTED)
-    connection_terminate();
-  (void)release_stream_boundary(true);
-  sceKernelDelayThread(1000 * 1000);
-  release_host_client_state();
+  /* The host can terminate from Moonlight's callback thread. Do not issue a
+   * Vita2D draw (even a "Disconnecting" message) until that thread has left
+   * LiStopConnection() and released the decoder/render callbacks. */
+  if (!release_host_client_state_with_options(true)) {
+    vita_debug_event(
+        VITA_DEBUG_LEVEL_ERROR, "connection.state",
+        "state=process_exit reason=unsafe_media_cleanup code=-1");
+    vita_debug_flush();
+    /* A worker that did not join may still own Vita2D, CURL, or SERVER_DATA.
+     * Let the OS reclaim the process instead of returning to menus and
+     * manufacturing the use-after-free crash this guard is meant to prevent. */
+    sceKernelExitProcess(EXIT_FAILURE);
+    return 1;
+  }
+  flash_message("Disconnected");
   return 1;
 }
 

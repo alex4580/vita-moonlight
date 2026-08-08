@@ -149,9 +149,39 @@ internal static class MachineStateSecurity
         }
     }
 
+    /// <summary>
+    /// Narrow startup path for the short-lived Core Audio helper. Its parent
+    /// may hold session.lock while committing display restoration, so a full
+    /// machine-state ACL walk would deadlock/fail against that intentional
+    /// exclusive lease. The helper has no configurable endpoint argument and
+    /// may read or update only the three exact protected audio journal files.
+    /// </summary>
+    internal static void RequireAudioRecoveryWorkerAccess()
+    {
+        Environment.SetEnvironmentVariable(
+            "VITA_MOONLIGHT_STATE_DIR",
+            null);
+        if (!IsProtectionInitialized())
+        {
+            throw new InvalidOperationException(
+                "Legacy machine state has not been migrated. Run " +
+                "`session recover-upgrade` before using audio recovery state.");
+        }
+        SecureContainer();
+        TrustedFileSystem.SecureExistingFile(
+            HostStatePaths.AudioRecoveryFile);
+        TrustedFileSystem.SecureExistingFile(
+            HostStatePaths.AudioRecoveryBackupFile);
+        // OpenExclusiveFile applies the exact protected ACL when the worker
+        // acquires AudioRecoveryLockFile. Do not pre-open a competing lock.
+    }
+
     private static IEnumerable<string> ProtectedMachineFiles()
     {
         yield return HostStatePaths.RecoveryFile;
+        yield return HostStatePaths.AudioRecoveryFile;
+        yield return HostStatePaths.AudioRecoveryBackupFile;
+        yield return HostStatePaths.AudioRecoveryLockFile;
         yield return HostStatePaths.SettingsFile;
         yield return HostStatePaths.LockFile;
         // The suspend intent is secured only while its dedicated protected

@@ -111,11 +111,14 @@ release notes.
       0.1x-5.0x range, while Steam Input remains available for per-game
       refinement.
 - [ ] All four touch modes and the floating keyboard pass from both
-      **START + Left** and **Open on-screen keyboard** on the in-stream menu.
+      **SELECT first + Left** and **Open on-screen keyboard** on the in-stream
+      menu. Mapped corner taps fire once; drags, holds, and multitouch pass
+      through without a zone action.
 - [ ] Default Local double-tap sends no single-PS event, keeps paused PC media
       paused, and double PS always returns to LiveArea. Safe Guide, Immediate
-      Guide, and System / LiveArea match the documented behavior; START + L +
-      R opens the overlay without leaking input.
+      Guide, and System / LiveArea match the documented behavior; ordinary
+      START reaches the PC, while SELECT first + L + R opens the overlay
+      without leaking input.
 - [ ] Every destructive overlay action requires a second press of the
       configured Confirm button, and the configured Cancel button backs out.
       The on-screen X/O hints must follow **Swap X and O in Moonlight**.
@@ -272,6 +275,11 @@ release notes.
       boundary listener/firewall ownership and leaves a retained managed VDD
       PnP-disabled. Default and silent uninstall keep shared Sunshine,
       ViGEmBus, and VDD installations.
+
+- [ ] With a captured HDMI/DP audio endpoint deliberately unplugged, Pause
+      still removes every background task while retaining only inert retry
+      state. Uninstall makes a bounded attempt, reports a warning, keeps the
+      current Windows default, and completes without guessing another output.
 - [ ] Run uninstall once from an enabled backend and once from an intentionally
       paused backend. Cover default shared-dependency retention and explicit
       display release / Sunshine / ViGEmBus removal in disposable snapshots. A forced late finalization failure must

@@ -536,6 +536,17 @@ internal sealed class HostRecoveryHotkeyWindow : NativeWindow, IDisposable
         TimeSpan.FromSeconds(1);
     private static readonly TimeSpan SunshineWatcherDisposeWait =
         TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan PendingAudioRecoveryInitialDelay =
+        TimeSpan.FromMilliseconds(750);
+    private static readonly TimeSpan PendingAudioRecoveryRetryInterval =
+        TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan PendingAudioRecoveryBudget =
+        TimeSpan.FromSeconds(60);
+    private static readonly TimeSpan PendingAudioRecoveryDeviceEventCooldown =
+        TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan PendingAudioRecoveryDisposeWait =
+        TimeSpan.FromSeconds(2);
+    private const int MaximumPendingAudioRecoveryAttempts = 30;
     private const int MaximumSunshineConfigurationBytes = 1024 * 1024;
     private const int MaximumSunshineLogTailBytes = 1024 * 1024;
     private const int ResumeSampleAttempts = 12;
@@ -546,6 +557,9 @@ internal sealed class HostRecoveryHotkeyWindow : NativeWindow, IDisposable
     private readonly object resumeInspectionSync = new();
     private readonly CancellationTokenSource sunshineWatchCancellation = new();
     private readonly object sunshineLifecycleSync = new();
+    private readonly CancellationTokenSource pendingAudioRecoveryCancellation =
+        new();
+    private readonly object pendingAudioRecoverySync = new();
     private readonly bool sunshineLifecycleEnabled;
     private readonly bool legacySunshineLogObserverEnabled;
     private readonly string? sunshineExecutablePath;
@@ -553,6 +567,13 @@ internal sealed class HostRecoveryHotkeyWindow : NativeWindow, IDisposable
     private Task sunshineWatchTask = Task.CompletedTask;
     private FileSystemWatcher? sunshineLogWatcher;
     private FileSystemWatcher? sunshineRecoveryWatcher;
+    private FileSystemWatcher? pendingAudioRecoveryWatcher;
+    private Task pendingAudioRecoveryTask = Task.CompletedTask;
+    private bool pendingAudioRecoveryScheduled;
+    private bool pendingAudioRecoveryRequested;
+    private string? pendingAudioRecoveryCircuitBreakerFingerprint;
+    private long? pendingAudioRecoveryLastDeviceEventRearmMilliseconds;
+    private int pendingAudioRecoveryWatcherFailureRecorded;
     private CancellationTokenSource? sunshineScheduledRecoveryCancellation;
     private string? sunshineScheduledRecoveryTransaction;
     private TimeSpan sunshineScheduledRecoveryDelay;
@@ -605,6 +626,7 @@ internal sealed class HostRecoveryHotkeyWindow : NativeWindow, IDisposable
                     VkF10,
                     new VitaDisplayMode(1280, 720, 60));
             }
+            InitializePendingAudioRecoveryWatcher();
             if (settings.HostMode.Equals(
                     "sunshine",
                     StringComparison.OrdinalIgnoreCase))
@@ -750,10 +772,12 @@ internal sealed class HostRecoveryHotkeyWindow : NativeWindow, IDisposable
         }
         else if (message.Msg == WmDisplayChange)
         {
+            RearmPendingAudioRecoveryForDeviceEvent();
             HandleTopologyNotification("resume-display-change");
         }
         else if (message.Msg == WmDeviceChange)
         {
+            RearmPendingAudioRecoveryForDeviceEvent();
             HandleTopologyNotification("resume-device-change");
         }
         if (message.Msg == WmHotkey)
@@ -1067,6 +1091,471 @@ internal sealed class HostRecoveryHotkeyWindow : NativeWindow, IDisposable
             return null;
         }
     }
+
+    private void InitializePendingAudioRecoveryWatcher()
+    {
+        FileSystemWatcher? watcher = null;
+        try
+        {
+            var directory = Path.GetDirectoryName(
+                HostStatePaths.AudioRecoveryFile);
+            if (!string.IsNullOrWhiteSpace(directory) &&
+                Directory.Exists(directory))
+            {
+                watcher = new FileSystemWatcher(
+                    directory,
+                    "audio-recovery*.json")
+                {
+                    NotifyFilter = NotifyFilters.FileName |
+                                   NotifyFilters.CreationTime |
+                                   NotifyFilters.LastWrite |
+                                   NotifyFilters.Size,
+                    IncludeSubdirectories = false,
+                };
+                watcher.Created += OnPendingAudioRecoveryFileChanged;
+                watcher.Changed += OnPendingAudioRecoveryFileChanged;
+                watcher.Renamed += OnPendingAudioRecoveryFileRenamed;
+                watcher.Error += OnPendingAudioRecoveryWatcherError;
+                lock (pendingAudioRecoverySync)
+                {
+                    pendingAudioRecoveryWatcher = watcher;
+                }
+                watcher.EnableRaisingEvents = true;
+                watcher = null;
+            }
+        }
+        catch (Exception error) when (IsOperationalAudioRetryError(error))
+        {
+            watcher?.Dispose();
+            lock (pendingAudioRecoverySync)
+            {
+                pendingAudioRecoveryWatcher?.Dispose();
+                pendingAudioRecoveryWatcher = null;
+            }
+            RecordPendingAudioRecoveryWatcherFailure(error);
+        }
+
+        // Startup recovery is asynchronous and completely dormant when both
+        // protected records are absent. The watcher is the only steady-state
+        // mechanism; no timer or polling loop exists without an obligation.
+        SchedulePendingAudioRecovery();
+    }
+
+    private void OnPendingAudioRecoveryFileChanged(
+        object sender,
+        FileSystemEventArgs args)
+    {
+        if (IsPendingAudioRecoveryFileName(args.Name))
+        {
+            SchedulePendingAudioRecovery();
+        }
+    }
+
+    private void OnPendingAudioRecoveryFileRenamed(
+        object sender,
+        RenamedEventArgs args)
+    {
+        if (ShouldSchedulePendingAudioRecoveryForRename(
+                args.Name,
+                args.OldName))
+        {
+            SchedulePendingAudioRecovery();
+        }
+    }
+
+    private void RearmPendingAudioRecoveryForDeviceEvent()
+    {
+        if (disposed || !PendingAudioRecoveryRecordExists()) return;
+
+        var schedule = false;
+        lock (pendingAudioRecoverySync)
+        {
+            var nowMilliseconds = Environment.TickCount64;
+            if (ShouldRearmPendingAudioRecoveryForDeviceEvent(
+                    hasPendingRecord: true,
+                    circuitBreakerFingerprint:
+                        pendingAudioRecoveryCircuitBreakerFingerprint,
+                    nowMilliseconds: nowMilliseconds,
+                    lastRearmMilliseconds:
+                        pendingAudioRecoveryLastDeviceEventRearmMilliseconds))
+            {
+                // Only an actual Windows topology/device notification may
+                // release an unchanged durable fingerprint from the breaker.
+                // FileSystemWatcher callbacks never enter this path, so the
+                // worker's own partial-progress write cannot extend its
+                // lifetime. Clearing before scheduling also coalesces the
+                // rest of this notification burst.
+                pendingAudioRecoveryCircuitBreakerFingerprint = null;
+                pendingAudioRecoveryLastDeviceEventRearmMilliseconds =
+                    nowMilliseconds;
+                schedule = true;
+            }
+        }
+
+        if (schedule)
+        {
+            // Scheduling is intentionally outside WndProc's display/resume
+            // decision path. No Core Audio call or endpoint wait occurs on
+            // the window-message thread.
+            _ = Task.Run(SchedulePendingAudioRecovery);
+        }
+    }
+
+    private void OnPendingAudioRecoveryWatcherError(
+        object sender,
+        ErrorEventArgs args)
+    {
+        if (disposed) return;
+        RecordPendingAudioRecoveryWatcherFailure(
+            args.GetException() ??
+            new IOException(
+                "The pending audio endpoint watcher stopped unexpectedly."));
+        // A record already on disk still receives its bounded attempt even if
+        // future filesystem notifications are unavailable.
+        SchedulePendingAudioRecovery();
+    }
+
+    private void RecordPendingAudioRecoveryWatcherFailure(Exception error)
+    {
+        if (Interlocked.CompareExchange(
+                ref pendingAudioRecoveryWatcherFailureRecorded,
+                1,
+                0) != 0)
+        {
+            return;
+        }
+        HostRecoveryActions.RecordPendingAudioRecoveryDecision(
+            false,
+            "The event-driven pending audio recovery watcher became " +
+            $"unavailable: {error.Message}. Existing pending state received " +
+            "one bounded startup attempt; restart the host agent after " +
+            "repairing state-directory access to re-arm file notifications.");
+    }
+
+    private void SchedulePendingAudioRecovery()
+    {
+        if (disposed ||
+            pendingAudioRecoveryCancellation.IsCancellationRequested)
+        {
+            return;
+        }
+
+        var fingerprint = CapturePendingAudioRecoveryFingerprint();
+        lock (pendingAudioRecoverySync)
+        {
+            if (disposed ||
+                pendingAudioRecoveryCancellation.IsCancellationRequested ||
+                !ShouldArmPendingAudioRecoveryRetry(
+                    fingerprint,
+                    pendingAudioRecoveryCircuitBreakerFingerprint))
+            {
+                return;
+            }
+
+            pendingAudioRecoveryRequested = true;
+            if (pendingAudioRecoveryScheduled)
+            {
+                return;
+            }
+
+            pendingAudioRecoveryRequested = false;
+            pendingAudioRecoveryScheduled = true;
+            // A new durable fingerprint is a new obligation. An event caused
+            // by this worker's own partial-progress write retains the same
+            // active deadline and is latched at the breaker below.
+            pendingAudioRecoveryCircuitBreakerFingerprint = null;
+            pendingAudioRecoveryTask = Task.Run(
+                () => RunPendingAudioRecoveryAsync(
+                    pendingAudioRecoveryCancellation.Token));
+        }
+    }
+
+    private async Task RunPendingAudioRecoveryAsync(
+        CancellationToken token)
+    {
+        var runtime = Stopwatch.StartNew();
+        var attempts = 0;
+        AudioEndpointRestoreResult? lastResult = null;
+        Exception? lastError = null;
+        try
+        {
+            // SavePending is normally followed by an immediate in-transaction
+            // restore. Coalescing its primary/backup write burst here avoids a
+            // competing Core Audio call and guarantees this worker starts
+            // after the display transaction has had time to release.
+            await Task.Delay(
+                    PendingAudioRecoveryInitialDelay,
+                    token)
+                .ConfigureAwait(false);
+
+            while (!disposed && !token.IsCancellationRequested)
+            {
+                var fingerprint =
+                    CapturePendingAudioRecoveryFingerprint();
+                if (fingerprint is null)
+                {
+                    return;
+                }
+                var hasPendingRecord = true;
+                if (!ShouldContinuePendingAudioRecoveryRetry(
+                        attempts,
+                        runtime.Elapsed,
+                        succeeded: false,
+                        hasPendingRecord: hasPendingRecord,
+                        cancellationRequested:
+                            token.IsCancellationRequested))
+                {
+                    OpenPendingAudioRecoveryCircuitBreaker(
+                        fingerprint,
+                        attempts,
+                        lastResult,
+                        lastError,
+                        displaySessionStillActive:
+                            File.Exists(HostStatePaths.RecoveryFile));
+                    return;
+                }
+
+                // The display recovery record is also the live-session fence.
+                // Never race SessionManager's SavePending/RestorePending pair,
+                // and never spend Core Audio work on an endpoint hidden by an
+                // active Vita display handoff. This delay owns no display or
+                // session lock.
+                if (File.Exists(HostStatePaths.RecoveryFile))
+                {
+                    await Task.Delay(
+                            PendingAudioRecoveryRetryInterval,
+                            token)
+                        .ConfigureAwait(false);
+                    continue;
+                }
+
+                attempts++;
+                try
+                {
+                    lastResult = AudioEndpointRecoveryService.RestorePending(
+                        waitForEndpoint: false);
+                    lastError = null;
+                }
+                catch (Exception error) when (
+                    IsOperationalAudioRetryError(error))
+                {
+                    lastResult = null;
+                    lastError = error;
+                }
+
+                if (lastResult?.Succeeded == true)
+                {
+                    lock (pendingAudioRecoverySync)
+                    {
+                        pendingAudioRecoveryCircuitBreakerFingerprint = null;
+                    }
+                    HostRecoveryActions.RecordPendingAudioRecoveryDecision(
+                        true,
+                        "Windows reconnected the exact pre-stream audio " +
+                        $"endpoint defaults after {attempts} asynchronous " +
+                        $"attempt{(attempts == 1 ? string.Empty : "s")}.");
+                    return;
+                }
+
+                fingerprint = CapturePendingAudioRecoveryFingerprint();
+                hasPendingRecord = fingerprint is not null;
+                if (!ShouldContinuePendingAudioRecoveryRetry(
+                        attempts,
+                        runtime.Elapsed,
+                        succeeded: false,
+                        hasPendingRecord: hasPendingRecord,
+                        cancellationRequested:
+                            token.IsCancellationRequested))
+                {
+                    if (fingerprint is not null)
+                    {
+                        OpenPendingAudioRecoveryCircuitBreaker(
+                            fingerprint,
+                            attempts,
+                            lastResult,
+                            lastError,
+                            displaySessionStillActive: false);
+                    }
+                    return;
+                }
+
+                await Task.Delay(
+                        PendingAudioRecoveryRetryInterval,
+                        token)
+                    .ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested)
+        {
+            // Disposal is the normal cancellation path.
+        }
+        finally
+        {
+            bool inspectRacingNotification;
+            lock (pendingAudioRecoverySync)
+            {
+                pendingAudioRecoveryScheduled = false;
+                inspectRacingNotification =
+                    pendingAudioRecoveryRequested &&
+                    !disposed &&
+                    !token.IsCancellationRequested;
+                pendingAudioRecoveryRequested = false;
+            }
+            if (inspectRacingNotification)
+            {
+                // A self-write from partial progress resolves to the exact
+                // fingerprint latched by the breaker and therefore cannot
+                // create a fresh 60-second retry window.
+                SchedulePendingAudioRecovery();
+            }
+        }
+    }
+
+    private void OpenPendingAudioRecoveryCircuitBreaker(
+        string fingerprint,
+        int attempts,
+        AudioEndpointRestoreResult? lastResult,
+        Exception? lastError,
+        bool displaySessionStillActive)
+    {
+        lock (pendingAudioRecoverySync)
+        {
+            pendingAudioRecoveryCircuitBreakerFingerprint = fingerprint;
+        }
+        var detail = lastError?.Message ??
+            lastResult?.Detail ??
+            (displaySessionStillActive
+                ? "A Vita display session remained active for the full retry window."
+                : "The exact endpoint remained unavailable.");
+        HostRecoveryActions.RecordPendingAudioRecoveryDecision(
+            false,
+            "Pending audio endpoint recovery reached its 60-second circuit " +
+            $"breaker after {attempts} Core Audio attempt" +
+            $"{(attempts == 1 ? string.Empty : "s")}. {detail} " +
+            "The protected exact endpoint record was retained; a later " +
+            "record change or agent restart can re-arm recovery.");
+    }
+
+    private static string? CapturePendingAudioRecoveryFingerprint()
+    {
+        if (!PendingAudioRecoveryRecordExists()) return null;
+        try
+        {
+            var pending = AudioEndpointRecoveryService.InspectPending();
+            return pending is null
+                ? null
+                : "valid:" + JsonSerializer.Serialize(pending);
+        }
+        catch (Exception error) when (IsOperationalAudioRetryError(error))
+        {
+            // A damaged record must still be circuit-bounded. Metadata is a
+            // fallback identity only; the recovery service remains the sole
+            // parser and authority for protected endpoint state.
+            return "unreadable:" + string.Join(
+                "|",
+                CapturePendingAudioRecoveryFileIdentity(
+                    HostStatePaths.AudioRecoveryFile),
+                CapturePendingAudioRecoveryFileIdentity(
+                    HostStatePaths.AudioRecoveryBackupFile));
+        }
+    }
+
+    private static string CapturePendingAudioRecoveryFileIdentity(
+        string path)
+    {
+        try
+        {
+            var information = new FileInfo(path);
+            information.Refresh();
+            return information.Exists
+                ? $"present:{information.Length}:" +
+                  information.LastWriteTimeUtc.Ticks
+                : "missing";
+        }
+        catch (Exception error) when (IsOperationalAudioRetryError(error))
+        {
+            return "unreadable";
+        }
+    }
+
+    private static bool PendingAudioRecoveryRecordExists() =>
+        File.Exists(HostStatePaths.AudioRecoveryFile) ||
+        File.Exists(HostStatePaths.AudioRecoveryBackupFile);
+
+    private static bool IsPendingAudioRecoveryFileName(string? name) =>
+        string.Equals(
+            name,
+            Path.GetFileName(HostStatePaths.AudioRecoveryFile),
+            StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(
+            name,
+            Path.GetFileName(HostStatePaths.AudioRecoveryBackupFile),
+            StringComparison.OrdinalIgnoreCase);
+
+    internal static bool ShouldSchedulePendingAudioRecoveryForRename(
+        string? name,
+        string? oldName) =>
+        IsPendingAudioRecoveryFileName(name) ||
+        IsPendingAudioRecoveryFileName(oldName);
+
+    internal static bool IsPendingAudioRecoveryFileNameForContractTest(
+        string? name) =>
+        IsPendingAudioRecoveryFileName(name);
+
+    internal static bool ShouldArmPendingAudioRecoveryRetry(
+        string? currentFingerprint,
+        string? circuitBreakerFingerprint) =>
+        currentFingerprint is not null &&
+        !string.Equals(
+            currentFingerprint,
+            circuitBreakerFingerprint,
+            StringComparison.Ordinal);
+
+    internal static bool ShouldContinuePendingAudioRecoveryRetry(
+        int attempts,
+        TimeSpan elapsed,
+        bool succeeded,
+        bool hasPendingRecord,
+        bool cancellationRequested) =>
+        !succeeded &&
+        hasPendingRecord &&
+        !cancellationRequested &&
+        attempts < MaximumPendingAudioRecoveryAttempts &&
+        elapsed < PendingAudioRecoveryBudget;
+
+    internal static bool ShouldRearmPendingAudioRecoveryForDeviceEvent(
+        bool hasPendingRecord,
+        string? circuitBreakerFingerprint,
+        long nowMilliseconds,
+        long? lastRearmMilliseconds) =>
+        hasPendingRecord &&
+        circuitBreakerFingerprint is not null &&
+        (lastRearmMilliseconds is null ||
+         nowMilliseconds - lastRearmMilliseconds.Value >=
+         PendingAudioRecoveryDeviceEventCooldown.TotalMilliseconds);
+
+    internal static int MaximumPendingAudioRecoveryAttemptsForContractTest =>
+        MaximumPendingAudioRecoveryAttempts;
+
+    internal static TimeSpan PendingAudioRecoveryBudgetForContractTest =>
+        PendingAudioRecoveryBudget;
+
+    internal static TimeSpan
+        PendingAudioRecoveryDeviceEventCooldownForContractTest =>
+        PendingAudioRecoveryDeviceEventCooldown;
+
+    private static bool IsOperationalAudioRetryError(Exception error) =>
+        error is COMException or
+            ExternalException or
+            IOException or
+            ArgumentException or
+            InvalidCastException or
+            InvalidDataException or
+            InvalidOperationException or
+            PlatformNotSupportedException or
+            UnauthorizedAccessException or
+            System.ComponentModel.Win32Exception or
+            System.Security.SecurityException;
 
     private void InitializeSunshineLifecycleWatchers()
     {
@@ -1928,7 +2417,9 @@ internal sealed class HostRecoveryHotkeyWindow : NativeWindow, IDisposable
     {
         if (disposed) return;
         disposed = true;
+        pendingAudioRecoveryCancellation.Cancel();
         sunshineWatchCancellation.Cancel();
+        StopPendingAudioRecoveryWatcher();
         StopSunshineLifecycleWatchers();
         StopResumeObservation();
         if (Handle != IntPtr.Zero)
@@ -1947,6 +2438,49 @@ internal sealed class HostRecoveryHotkeyWindow : NativeWindow, IDisposable
         }
         modeReadinessEvents.Clear();
         StopSunshineWatcher();
+    }
+
+    private void StopPendingAudioRecoveryWatcher()
+    {
+        FileSystemWatcher? watcher;
+        Task worker;
+        lock (pendingAudioRecoverySync)
+        {
+            watcher = pendingAudioRecoveryWatcher;
+            pendingAudioRecoveryWatcher = null;
+            worker = pendingAudioRecoveryTask;
+            pendingAudioRecoveryRequested = false;
+        }
+        watcher?.Dispose();
+
+        try
+        {
+            worker.Wait(PendingAudioRecoveryDisposeWait);
+        }
+        catch (AggregateException error)
+        {
+            // Observe cancellation and any unexpected worker fault without
+            // making application-context disposal throw on the UI thread.
+            _ = error;
+        }
+
+        if (worker.IsCompleted)
+        {
+            _ = worker.Exception;
+            pendingAudioRecoveryCancellation.Dispose();
+            return;
+        }
+
+        _ = worker.ContinueWith(
+            (completed, state) =>
+            {
+                _ = completed.Exception;
+                ((CancellationTokenSource)state!).Dispose();
+            },
+            pendingAudioRecoveryCancellation,
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
     }
 
     private void StopSunshineLifecycleWatchers()
@@ -2462,6 +2996,17 @@ internal sealed class HostRecoveryHotkeyWindow : NativeWindow, IDisposable
                         .ReconcileIdleLocked(
                             heldTransaction,
                             requireManagedDevice: false);
+                    var audioPending = PendingAudioRecoveryRecordExists();
+                    if (audioPending)
+                    {
+                        // This method still owns the display transaction. Arm
+                        // the separate delayed worker, but never call Core
+                        // Audio or wait for endpoint enumeration under it.
+                        SchedulePendingAudioRecovery();
+                    }
+                    var audioDetail = audioPending
+                        ? " Exact pre-stream audio recovery is pending in the asynchronous endpoint worker."
+                        : " No pre-stream audio endpoint recovery is pending.";
                     if (StopResumeObservation(
                             cancelCurrentInspection: false,
                             expectedCurrent: cancellation))
@@ -2470,7 +3015,8 @@ internal sealed class HostRecoveryHotkeyWindow : NativeWindow, IDisposable
                             trigger,
                             true,
                             "Windows resumed to a physical-only topology, but the managed Vita VDD was still PnP-enabled; " +
-                            $"reconciled and verified idle for {string.Join(", ", idle.PhysicalDisplays)}.");
+                            $"reconciled and verified idle for {string.Join(", ", idle.PhysicalDisplays)}." +
+                            audioDetail);
                     }
                 }
                 catch (Exception error)
@@ -3185,7 +3731,11 @@ internal static class HostRecoveryActions
         try
         {
             restoredTransaction = new SessionManager()
-                .RestoreIfPendingLocked(transaction);
+                .RestoreIfPendingLocked(
+                    transaction,
+                    expectedCapturedAt: null,
+                    waitForAudioEndpoint: false,
+                    deferAudioEndpointRestore: true);
         }
         catch (Exception error)
         {
@@ -3536,6 +4086,11 @@ internal static class HostRecoveryActions
         bool success,
         string message) =>
         Record("sunshine-session-idle-recovery", success, message);
+
+    internal static HostRescueStatus RecordPendingAudioRecoveryDecision(
+        bool success,
+        string message) =>
+        Record("pending-audio-endpoint-recovery", success, message);
 
     private static HostRescueStatus Record(string action, bool success, string message)
     {

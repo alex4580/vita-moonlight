@@ -1,5 +1,21 @@
 ## 0.14.8
 
+* Replaced front-corner hit-test buttons with deterministic tap gestures. A
+  mapped action now requires one short stationary touch; swipes, drags, holds,
+  and multitouch pass through to relative mouse, absolute mouse, DS4 touchpad,
+  or Sunshine tablet mode until all fingers lift. The graphical tap-zone
+  mapper is now the single enable/configuration authority.
+* Moved local stream-menu and keyboard chords to SELECT-led sequences. START
+  is no longer buffered by local shortcut detection and reaches the streamed
+  controller immediately; holding SELECT first keeps every member of a
+  completed SELECT+L+R or SELECT+Left chord local.
+* Ordered stream teardown behind Moonlight's media-worker completion barrier,
+  fixing the crash that could occur when Sunshine ended an application while
+  the Vita UI was returning to its menus.
+* The host now records the exact pre-stream Windows default render endpoints.
+  After restoring the physical display it waits boundedly for those same
+  endpoints, reapplies only them, and keeps a protected retry record across
+  monitor sleep when DisplayPort/HDMI audio is not available yet.
 * Fixed the idle virtual display remaining PnP-available after a stream. When a
   physical monitor entered standby before Windows sleep, Windows could promote
   the 960x544 target, resize or relocate open windows, and leave DWM/display

@@ -61,9 +61,10 @@ already running.
 
 To change it remotely:
 
-1. Hold **START**, then press **L + R** within one second to open the stream
-   menu. All three shortcut buttons are consumed locally instead of being sent
-   to the PC.
+1. Hold **SELECT first**, then press **L + R** within one second to open the
+   stream menu. That documented SELECT-led sequence is consumed locally
+   instead of being sent to the PC. START remains an ordinary immediate
+   Menu/Start button for the streamed application.
 2. Open **Stream & virtual display**.
 3. Select **Stream + virtual display** and choose 960x544, 960x540, or
    1280x720.
@@ -96,7 +97,7 @@ configuration.
 | **Stream quality** | Preset, managed resolution, FPS, and bitrate | **Stream & virtual display**, plus Apply resolution + reconnect |
 | **Advanced streaming** | Packet recovery, network mode, optional display synchronization, and aspect scaling | The same four controls under **Stream & virtual display**, plus Apply resolution + reconnect |
 | **Controller** | Controller preset, gyro/sensitivity, sprint helper, PS behavior, shoulder swap, and graphical button mapping | Profile, gyro, sprint, PS, touch mode, and shoulder swap under **Controller & input**; sensitivity and graphical mapping remain pre-stream |
-| **Touch and keyboard** | Touch mode, front/rear zones, mouse acceleration, and keyboard layout | Core touch mode under **Controller & input**; keyboard on the main stream menu |
+| **Touch and keyboard** | Touch mode, graphical front tap-zone mapper, rear zones, mouse acceleration, and keyboard layout | Core touch mode under **Controller & input**; keyboard on the main stream menu |
 | **System and support** | Performance overlay, Start/Stop support log, PC audio, Vita power behavior, and X/O layout | Performance overlay, Real-time diagnostics, and Start/Stop support log; audio, power, and X/O layout remain pre-stream |
 
 Immediate settings such as performance-overlay mode update while streaming.
@@ -219,7 +220,7 @@ optional Python summarizer.
 ## On-screen keyboard
 
 Focus a text field in the streamed Windows application first. Then either hold
-**START** and tap **D-pad Left** within one second, or choose **Open on-screen
+**SELECT first** and tap **D-pad Left** within one second, or choose **Open on-screen
 keyboard** from the in-stream menu. Typed characters are forwarded
 immediately; Backspace, Left/Right, and Enter are sent as PC keys. Close or
 minimize the Vita keyboard to return to the stream. When opened from the
@@ -330,22 +331,29 @@ virtual controller type. Reconnect only after changing the advertised
 Xbox/DS4 controller profile. The simple **Swap L1/R1 with L2/R2** option and
 Custom mapping are mutually exclusive.
 
-#### Front-touch zone mapper
+#### Front-touch tap-zone mapper
 
-Open **Settings > Touch and keyboard > Front-touch zone mapper** for a scaled
+Open **Settings > Touch and keyboard > Front-touch tap-zone mapper** for a scaled
 Vita-screen preview. White dots show current front touches. The four corner
 zones share an **Edge inset** and square **Zone size**, while each corner has
 its own action. Available actions include the local stream menu and keyboard,
 PC Guide and gamepad buttons, mouse buttons, Esc/Tab/I/M, F1-F12, or a manual
-keyboard code. Set a corner to **None** when touches there should continue to
-the selected normal touch mode.
+keyboard code. Set a corner to **None** when no action is needed there.
 
-The **Enabled** row in the graphical editor and the **Front-touch zones** row
-under **Touch and keyboard** control the same setting. Geometry, enabled state, and
-assignments take effect immediately; leaving Settings writes them to the main
-Moonlight configuration. No reconnect is required. Reset restores a 150-pixel
-corner size with top-left opening the stream menu, bottom-left sending PC
-Guide, and the other corners unassigned.
+The graphical editor is the single place that enables and configures these
+zones. A zone action fires only for a short, stationary, single-finger tap that
+begins in that corner. Moving farther than the tap tolerance, holding for more
+than 250 ms, or adding another finger permanently hands that gesture to the
+selected normal touch mode until every finger is lifted. A mouse drag, tablet
+stroke, DS4 touch, or swipe can therefore begin in or cross a mapped corner
+without firing its action. The small initial tap tolerance prevents hand
+jitter from triggering a drag; it does not add delay to touches that begin
+outside an assigned zone.
+
+Geometry, enabled state, and assignments take effect immediately; leaving
+Settings writes them to the main Moonlight configuration. No reconnect is
+required. Reset restores a 150-pixel corner size with top-left opening the
+stream menu, bottom-left sending PC Guide, and the other corners unassigned.
 
 ### PS button behavior
 

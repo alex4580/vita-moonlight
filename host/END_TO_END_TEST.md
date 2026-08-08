@@ -304,8 +304,10 @@ panel label.
 
 ## 5. Check the Vita interface and stream controls
 
-1. During a stream, hold **START**, then press **L + R** within one second.
-   Confirm the in-stream menu opens and START/L/R do not reach Windows.
+1. During a stream, press **START** once and confirm Windows receives one
+   ordinary controller Start press. Then hold **SELECT first** and press
+   **L + R** within one second. Confirm the in-stream menu opens and
+   SELECT/L/R do not reach Windows.
 2. Open and close every menu and settings page. Record text that is clipped,
    poorly aligned, rendered incorrectly, or covered by another element.
 3. Compare pre-stream Settings with **Stream & virtual display** and
@@ -438,14 +440,15 @@ black game frame alone does not prove a display-driver crash.
    button, one shoulder/trigger, Guide, and a rear-touch zone. Enable the
    custom map, verify each assignment, then disable it and confirm hardware
    defaults return.
-7. Open **Settings > Touch and keyboard > Front-touch zone mapper**. Change
+7. Open **Settings > Touch and keyboard > Front-touch tap-zone mapper**. Change
    zone size/inset and assign one local action plus one gamepad, mouse, or
-   keyboard action. Confirm the preview is readable, touches correspond to the
-   drawn zones, and settings survive an app restart.
+   keyboard action. Confirm a short stationary tap runs the action once, while
+   a swipe, drag, hold, and two-finger touch beginning in that same zone remain
+   normal touch input. Confirm settings survive an app restart.
 8. Test Relative mouse, DS4 Touchpad, Absolute mouse, and Tablet touch modes.
    Record app compatibility and corner alignment.
 9. Focus a non-secret Windows text field. Open the keyboard with
-   **START + D-pad Left**, type, use Backspace/Enter, and close it. Repeat from
+   **SELECT first + D-pad Left**, type, use Backspace/Enter, and close it. Repeat from
    **Open on-screen keyboard** in the stream menu. No menu-confirm/cancel input
    should leak to the game.
 

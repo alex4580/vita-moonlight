@@ -518,16 +518,30 @@ def _check_vita(root: Path, values: dict[str, Any]) -> None:
         release_boundary,
         "Vita must stop heartbeat, consume a generation once, and delegate failed restore to the host observer",
     )
+    main_source = _read(root, "src/main.c")
+    release_host_state = _extract_braced_block(
+        connect,
+        r"static\s+bool\s+release_host_client_state_with_options\s*\(",
+        "Vita ordered host-client release",
+    )
     _require(
-        "ui_connect_release_stream_boundary(false);" in
-        _read(root, "src/main.c") and
-        "ui_connect_stream_boundary_local_cleanup_ready();" in
-        _read(root, "src/main.c") and
+        "ui_connect_shutdown();" in main_source and
+        "ui_connect_stream_boundary_local_cleanup_ready();" in main_source and
+        "connection_wait_for_termination();" in release_host_state and
+        release_host_state.find("connection_wait_for_termination();") <
+        release_host_state.find("release_stream_boundary(show_restore_error)") <
+        release_host_state.find("gs_cleanup(&server);") and
         "if (!ui_connect_stream_boundary_local_cleanup_ready())" in connect and
         "VITA_STREAM_BOUNDARY_HEARTBEAT_INTERVAL_MS" in connect and
         "gs_heartbeat_stream_boundary(" in connect and
         "sceKernelWaitEventFlag(" in connect,
-        "Vita process shutdown and the event-driven heartbeat worker must release the exact lease",
+        "Vita shutdown must join media, stop the event-driven heartbeat, and only then release host/CURL state",
+    )
+    _require(
+        "release_host_client_state_with_options(true)" in connect and
+        "sceKernelDelayThread(1000 * 1000)" not in connect and
+        "action=stop state=observer_pending local_cleanup=complete" in connect,
+        "ordinary disconnect must use one ordered cleanup owner and treat remote restore separately from local safety",
     )
     bridge_http = _extract_braced_block(
         http,
@@ -648,13 +662,14 @@ def _check_vita(root: Path, values: dict[str, Any]) -> None:
         r"if\s*\(apply_display\s*\|\|\s*apply_input\)\s*",
         "Vita controlled reconnect",
     )
+    reconnect_terminate = reconnect.find("connection_terminate()")
     _require(
-        reconnect.find("connection_terminate();") < reconnect.find("gs_refresh(&server);") <
+        reconnect_terminate < reconnect.find("gs_refresh(&server);") <
         reconnect.find("ui_connect_stream(reconnect_app);") and
-        reconnect.find("connection_terminate();") <
+        reconnect_terminate <
         reconnect.find("release_stream_boundary(true)") <
         reconnect.find("gs_refresh(&server);") and
-        reconnect.find("connection_terminate();") >= 0,
+        reconnect_terminate >= 0,
         "the Vita controlled reconnect must terminate, restore, refresh, and resume in order",
     )
 
