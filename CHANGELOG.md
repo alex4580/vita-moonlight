@@ -1,5 +1,11 @@
 ## 0.14.8
 
+* Fixed in-place repair of older hosts whose missing managed firewall rule was
+  surfaced by Windows as `FileNotFoundException` (`0x80070002`). Pre-copy
+  safeguard shutdown and cancel rollback now run through the current host
+  embedded in Setup, never the executable being replaced, while remaining
+  bound to the live maintenance owner, exact Program Files path, scheduled-task
+  principal, and owned firewall rule.
 * Replaced front-corner hit-test buttons with deterministic tap gestures. A
   mapped action now requires one short stationary touch; swipes, drags, holds,
   and multitouch pass through to relative mouse, absolute mouse, DS4 touchpad,

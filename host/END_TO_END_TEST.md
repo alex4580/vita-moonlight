@@ -122,20 +122,24 @@ setup path.
    paired Vita and any unrelated Sunshine applications.
 2. End the stream and run the candidate installer directly over the older
    installation.
-3. Restart Windows if requested, then open the Administrator control panel and
+3. Repeat once after deleting only the exact managed Vita firewall rule while
+   leaving both Vita scheduled tasks installed. The candidate must use its
+   embedded current helper for pre-copy shutdown; it must not fail inside the
+   older host with `0x80070002`, and cancel rollback must recreate a ready agent.
+4. Restart Windows if requested, then open the Administrator control panel and
    click **Set up or repair this PC**.
-4. Run **Check readiness**. Confirm there is one Vita Moonlight Host entry, one
+5. Run **Check readiness**. Confirm there is one Vita Moonlight Host entry, one
    managed virtual display, and no second Sunshine installation.
-5. Confirm Sunshine credentials, Vita pairing, unrelated applications, and
+6. Confirm Sunshine credentials, Vita pairing, unrelated applications, and
    user-created Sunshine settings were not discarded.
-6. Before upgrading, use Notepad to place a harmless
+7. Before upgrading, use Notepad to place a harmless
    `community-test-retain.txt` beneath `C:\ProgramData\VitaMoonlight` if that
    old directory exists. After upgrade, confirm the exact retired state files
    from the older release and obsolete duplicate guide files beside the host
    executable are gone, while that unrelated test file remains. Cleanup must
    not follow reparse points or broadly delete an old directory. Remove the
    test file yourself after recording the result.
-7. Complete a stream before judging the upgrade successful.
+8. Complete a stream before judging the upgrade successful.
 
 ### Same-version reinstall and repair
 

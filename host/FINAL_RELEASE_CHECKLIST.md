@@ -342,6 +342,11 @@ release notes.
       snapshot—not current task absence—must restore exactly the safeguards
       that belonged to the enabled installation before the maintenance fence
       can clear. A persisted Paused intent must never recreate them.
+- [ ] Upgrade an older host after deleting only the exact managed Vita firewall
+      rule. Pre-copy shutdown and cancel rollback must use the current embedded
+      helper, not execute the older host; neither path may report `0x80070002`.
+      Verify both task principals, the exact Program Files action, the managed
+      firewall rule, and the running authenticated agent before handoff.
 - [ ] Hold `VitaMoonlight.Host.exe` open without delete sharing during an
       otherwise successful keep-dependencies uninstall. Host deletion failure
       must retain the exact finalized guard. Release the handle, rename the

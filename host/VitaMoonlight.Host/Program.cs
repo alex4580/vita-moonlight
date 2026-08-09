@@ -736,6 +736,28 @@ internal static class Program
                 return adoptionRequired
                     ? ExitSuccess
                     : ExitMissingRequiredComponent;
+            case "suspend-safeguards":
+                EnsureMaintenanceAdministrator(
+                    "Suspending Vita recovery safeguards for setup");
+                var suspendOwnerProcessId = GetRequiredInt(
+                    args,
+                    "--owner-pid");
+                InstallerMaintenanceFence.SuspendSafeguardsForOwner(
+                    suspendOwnerProcessId);
+                Console.WriteLine(
+                    "The exact installed Vita recovery safeguards are suspended for setup.");
+                return ExitSuccess;
+            case "restore-safeguards":
+                EnsureMaintenanceAdministrator(
+                    "Restoring Vita recovery safeguards after setup");
+                var restoreOwnerProcessId = GetRequiredInt(
+                    args,
+                    "--owner-pid");
+                InstallerMaintenanceFence.RestoreSafeguardsForOwner(
+                    restoreOwnerProcessId);
+                Console.WriteLine(
+                    "The exact installed Vita recovery safeguards match the protected setup snapshot.");
+                return ExitSuccess;
             default:
                 return InvalidCommand($"maintenance {action}");
         }
@@ -3463,7 +3485,7 @@ internal static class Program
         Console.WriteLine("VitaMoonlight.Host runtime status|ensure-compatible [--installer PATH]");
         Console.WriteLine("VitaMoonlight.Host dependency uninstall sunshine|vigembus");
         Console.WriteLine("VitaMoonlight.Host state secure");
-        Console.WriteLine("VitaMoonlight.Host maintenance begin|end|backend-was-enabled|rescue-task-was-present|recovery-task-was-present|vdd-adoption-required --owner-pid PID|status");
+        Console.WriteLine("VitaMoonlight.Host maintenance begin|end|backend-was-enabled|rescue-task-was-present|recovery-task-was-present|vdd-adoption-required|suspend-safeguards|restore-safeguards --owner-pid PID|status");
         Console.WriteLine("VitaMoonlight.Host deferred-setup save --host sunshine [--virtual-driver true] [--adoption-owner-pid PID]|clear|status");
         Console.WriteLine("VitaMoonlight.Host backend enable|disable|status [--json] [--require-enabled] [--intent-exit-code]");
         Console.WriteLine("VitaMoonlight.Host driver install [--adopt-existing-vdd-id INSTANCE_ID]|adopt-idle --adoption-owner-pid PID|reload|uninstall|status");

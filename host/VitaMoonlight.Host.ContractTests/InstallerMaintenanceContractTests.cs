@@ -97,6 +97,94 @@ internal static class InstallerMaintenanceContractTests
                 restoreManagedVdd: false,
                 ownershipJournalExists: true),
             "No-journal uninstall could still locate or invoke driver-release tools without exact ownership authority.");
+
+        // An interrupted upgrade must reconcile from the durable v2 baseline
+        // rather than the tasks which happen to remain after the crash. Test
+        // every original enabled-state combination so retry cannot silently
+        // manufacture or discard a safeguard obligation.
+        foreach (var rescueWasPresent in new[] { false, true })
+        {
+            foreach (var recoveryWasPresent in new[] { false, true })
+            {
+                var restore = InstallerMaintenanceFence
+                    .GetSafeguardRestorePlanForTest(
+                        backendIsEnabled: true,
+                        backendWasEnabled: true,
+                        rescueAgentTaskWasPresent: rescueWasPresent,
+                        recoveryTaskWasPresent: recoveryWasPresent);
+                Require(
+                    restore.RescueAgent == rescueWasPresent &&
+                    restore.RecoveryTask == recoveryWasPresent,
+                    "Enabled upgrade retry did not preserve the exact durable safeguard baseline.");
+
+                var paused = InstallerMaintenanceFence
+                    .GetSafeguardRestorePlanForTest(
+                        backendIsEnabled: false,
+                        backendWasEnabled: true,
+                        rescueAgentTaskWasPresent: rescueWasPresent,
+                        recoveryTaskWasPresent: recoveryWasPresent);
+                Require(
+                    !paused.RescueAgent && !paused.RecoveryTask,
+                    "A newer Paused preference could recreate a background safeguard during cancel rollback.");
+            }
+        }
+
+        var enabledAfterPausedSnapshot = InstallerMaintenanceFence
+            .GetSafeguardRestorePlanForTest(
+                backendIsEnabled: true,
+                backendWasEnabled: false,
+                rescueAgentTaskWasPresent: false,
+                recoveryTaskWasPresent: false);
+        Require(
+            enabledAfterPausedSnapshot.RescueAgent &&
+            enabledAfterPausedSnapshot.RecoveryTask,
+            "A newer Enable preference did not restore both standard safeguards after a paused snapshot.");
+
+        Require(
+            !InstallerMaintenanceFence.ShouldReconcileRescueForTest(
+                rescueTaskPresent: false,
+                installedExecutableAvailable: false) &&
+            InstallerMaintenanceFence.ShouldReconcileRescueForTest(
+                rescueTaskPresent: true,
+                installedExecutableAvailable: false) &&
+            InstallerMaintenanceFence.ShouldReconcileRescueForTest(
+                rescueTaskPresent: false,
+                installedExecutableAvailable: true) &&
+            InstallerMaintenanceFence.ShouldReconcileRescueForTest(
+                rescueTaskPresent: true,
+                installedExecutableAvailable: true),
+            "Rescue reconciliation can either leak an owned firewall rule from an installed host or touch a genuine clean install with no task and no executable.");
+
+        Require(
+            !InstallerMaintenanceFence.CanEndForTest(
+                backendIsEnabled: true,
+                backendWasEnabled: true,
+                rescueAgentTaskWasPresent: true,
+                recoveryTaskWasPresent: true,
+                ExactScheduledTaskState.Missing,
+                ExactScheduledTaskState.Present) &&
+            InstallerMaintenanceFence.CanEndForTest(
+                backendIsEnabled: true,
+                backendWasEnabled: true,
+                rescueAgentTaskWasPresent: true,
+                recoveryTaskWasPresent: true,
+                ExactScheduledTaskState.Present,
+                ExactScheduledTaskState.Present) &&
+            !InstallerMaintenanceFence.CanEndForTest(
+                backendIsEnabled: false,
+                backendWasEnabled: true,
+                rescueAgentTaskWasPresent: true,
+                recoveryTaskWasPresent: true,
+                ExactScheduledTaskState.Present,
+                ExactScheduledTaskState.Missing) &&
+            InstallerMaintenanceFence.CanEndForTest(
+                backendIsEnabled: false,
+                backendWasEnabled: true,
+                rescueAgentTaskWasPresent: true,
+                recoveryTaskWasPresent: true,
+                ExactScheduledTaskState.Missing,
+                ExactScheduledTaskState.Missing),
+            "Cancel/retry could clear its fence before exact enabled restoration or paused cleanup completed.");
     }
 
     private static void Require(bool condition, string message)

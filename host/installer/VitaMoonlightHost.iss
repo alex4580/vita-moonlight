@@ -173,7 +173,6 @@ var
   ExistingInstallDetected: Boolean;
   PreviousInstalledVersion: String;
   BackendRemainsPausedAfterSetup: Boolean;
-  PreflightHostPath: String;
   UpgradeBackendWasEnabled: Boolean;
   UpgradeBackendWasDisabled: Boolean;
   UpgradeAgentWasStopped: Boolean;
@@ -660,9 +659,9 @@ begin
   Result := False;
 end;
 
-function RunPreflightHostCommand(
+function RunMaintenanceSafeguardCommand(
   const Description: String;
-  const Parameters: String;
+  const Action: String;
   var ResultCode: Integer;
   var ErrorText: String): Boolean;
 begin
@@ -671,9 +670,10 @@ begin
   ErrorText := '';
   ResultCode := -1;
   Result := Exec(
-    PreflightHostPath,
-    WithMaintenanceBypass(Parameters),
-    ExpandConstant('{app}'),
+    ExpandConstant('{tmp}\VitaMoonlight.Host.Maintenance.exe'),
+    'maintenance ' + Action + ' --owner-pid ' +
+      IntToStr(MaintenanceOwnerPid),
+    ExpandConstant('{tmp}'),
     SW_HIDE,
     ewWaitUntilTerminated,
     ResultCode);
@@ -684,7 +684,7 @@ begin
   end;
   if ResultCode <> 0 then
   begin
-    ErrorText := ReadSetupHostCommandError;
+    ErrorText := ReadMaintenanceHelperError;
     if ErrorText <> '' then
       ErrorText := #13#10 + ErrorText;
     ErrorText := Description + ' failed with exit code ' +
@@ -693,119 +693,31 @@ begin
   end;
 end;
 
-function BackendLifecycleStateExists: Boolean;
-begin
-  Result :=
-    FileExists(ExpandConstant('{app}\state\backend-lifecycle.json')) or
-    FileExists(ExpandConstant('{app}\state\backend-lifecycle.backup.json')) or
-    FileExists(ExpandConstant('{app}\state\backend-disabled.intent'));
-end;
-
 procedure TryRestoreUpgradeSafeguards;
 var
-  InstalledHostPath: String;
   ResultCode: Integer;
+  ErrorText: String;
 begin
-  if not UpgradeBackendWasEnabled then
-    exit;
-  if not (UpgradeAgentWasStopped or UpgradeRecoveryTaskWasRemoved) then
+  if not MaintenanceFenceActive then
     exit;
 
-  InstalledHostPath := ExpandConstant('{app}\VitaMoonlight.Host.exe');
-  if not FileExists(InstalledHostPath) then
+  if RunMaintenanceSafeguardCommand(
+    'Restoring the exact Vita recovery safeguards after setup',
+    'restore-safeguards',
+    ResultCode,
+    ErrorText) then
   begin
-    Log(
-      'ERROR: Setup could not roll back the recovery safeguards because ' +
-      'the installed host executable is unavailable: ' + InstalledHostPath);
-    exit;
-  end;
-
-  { A legacy host with no lifecycle record has no Pause feature to re-read and
-    may not expose the current `backend` command. Keep its enabled snapshot
-    authoritative without sending it a command it cannot understand. A
-    private pre-fence build which did publish lifecycle state may still have
-    accepted Pause after setup's initial snapshot, so re-read that intent
-    immediately before rollback and never recreate enabled-state tasks over a
-    newer Paused preference. }
-  ResultCode := 0;
-  if not BackendLifecycleStateExists then
-  begin
-    Log(
-      'The installed host has no backend lifecycle record; using the protected ' +
-      'enabled-state maintenance snapshot for legacy safeguard rollback.');
-  end
-  else if not Exec(
-    InstalledHostPath,
-    WithMaintenanceBypass('backend status --intent-exit-code'),
-    ExpandConstant('{app}'),
-    SW_HIDE,
-    ewWaitUntilTerminated,
-    ResultCode) then
-  begin
-    Log(
-      'ERROR: Setup could not re-read the current Vita host preference before ' +
-      'safeguard rollback. The maintenance fence will be kept for retry.');
-    exit;
-  end;
-  if ResultCode = 5 then
-  begin
-    UpgradeBackendWasEnabled := False;
-    UpgradeBackendWasDisabled := True;
     UpgradeAgentWasStopped := False;
     UpgradeRecoveryTaskWasRemoved := False;
+    UpgradeSafeguardsRestored := True;
     Log(
-      'The current Vita host preference is Paused; setup did not recreate ' +
-      'the previously enabled recovery tasks during rollback.');
-    exit;
-  end;
-  if ResultCode <> 0 then
-  begin
+      'The current maintenance helper restored the protected safeguard ' +
+      'snapshot for the exact Program Files host.');
+  end
+  else
     Log(
-      'ERROR: Setup could not safely classify the current Vita host preference ' +
-      'before safeguard rollback. Exit code: ' + IntToStr(ResultCode) +
-      '. The maintenance fence will be kept for retry.');
-    exit;
-  end;
-
-  if UpgradeRecoveryTaskWasRemoved then
-  begin
-    ResultCode := -1;
-    if Exec(
-      InstalledHostPath,
-      WithMaintenanceBypass('recovery install'),
-      ExpandConstant('{app}'),
-      SW_HIDE,
-      ewWaitUntilTerminated,
-      ResultCode) and (ResultCode = 0) then
-    begin
-      UpgradeRecoveryTaskWasRemoved := False;
-      Log('Rolled back the automatic display-recovery task.');
-    end
-    else
-      Log(
-        'ERROR: Setup could not roll back the automatic display-recovery task. ' +
-        'Exit code: ' + IntToStr(ResultCode));
-  end;
-
-  if UpgradeAgentWasStopped then
-  begin
-    ResultCode := -1;
-    if Exec(
-      InstalledHostPath,
-      WithMaintenanceBypass('agent install'),
-      ExpandConstant('{app}'),
-      SW_HIDE,
-      ewWaitUntilTerminated,
-      ResultCode) and (ResultCode = 0) then
-    begin
-      UpgradeAgentWasStopped := False;
-      Log('Rolled back the stream-rescue agent.');
-    end
-    else
-      Log(
-        'ERROR: Setup could not roll back the stream-rescue agent. ' +
-        'Exit code: ' + IntToStr(ResultCode));
-  end;
+      'ERROR: Setup could not restore the exact Vita recovery safeguards. ' +
+      ErrorText + ' The maintenance fence will be kept for retry.');
 end;
 
 procedure RecordSetupFailure(const ErrorText: String);
@@ -899,65 +811,18 @@ begin
     exit;
   end;
 
-  { After the embedded helper's narrowly gated physical-recovery bootstrap,
-    later task mutations deliberately trust only the protected, currently
-    installed executable. The temporary helper receives no general installed-
-    host authority. }
-  PreflightHostPath := ExpandConstant('{app}\VitaMoonlight.Host.exe');
-  if not FileExists(PreflightHostPath) then
-  begin
-    if ExistingInstallDetected then
-      Log(
-        'The registered installation has no host executable. Setup will repair ' +
-        'the payload after the embedded helper has already restored and verified ' +
-        'the physical display. No existing background process was stopped.')
-    else
-      Log(
-        'Protected maintenance now covers this clean installation. The physical ' +
-        'desktop is safe and no installed-host preflight is required before files are copied.');
-    exit;
-  end;
-
   { The embedded current maintenance helper already restored and verified a
-    physical-only topology before it published the maintenance snapshot in
-    BeginUpgradeMaintenance. Do not repeat that step through the installed
-    host: older supported builds do not expose `uninstall prepare` and return
-    exit code 2 for that current-only command. }
+    physical-only topology before it published the maintenance snapshot. It
+    also owns the narrowly scoped task/firewall shutdown below. Never delegate
+    this upgrade-critical action to the executable being replaced: an older
+    installed build may contain the exact integration bug this repair fixes. }
   Log(
     'Protected installer maintenance already restored and verified the ' +
     'physical display before upgrade or repair.');
 
-  if UpgradeBackendWasDisabled then
-  begin
-    if not RunPreflightHostCommand(
-      'Stopping any remaining paused stream-rescue agent',
-      'agent uninstall',
-      ResultCode,
-      ErrorText) then
-    begin
-      Result := ErrorText + #13#10 + #13#10 +
-        'Setup stopped before replacing files. The saved paused preference was kept.';
-      exit;
-    end;
-    if not RunPreflightHostCommand(
-      'Removing any remaining paused display-recovery task',
-      'recovery uninstall',
-      ResultCode,
-      ErrorText) then
-    begin
-      Result := ErrorText + #13#10 + #13#10 +
-        'Setup stopped before replacing files. The saved paused preference was kept.';
-      exit;
-    end;
-    Log(
-      'Existing Vita host features are intentionally paused; setup will ' +
-      'update product files without re-enabling shared components or safeguards.');
-    exit;
-  end;
-
-  if not RunPreflightHostCommand(
-    'Stopping the stream-rescue agent for upgrade or repair',
-    'agent uninstall',
+  if not RunMaintenanceSafeguardCommand(
+    'Suspending the exact Vita recovery safeguards for upgrade or repair',
+    'suspend-safeguards',
     ResultCode,
     ErrorText) then
   begin
@@ -965,16 +830,11 @@ begin
       'The physical display is safe, but setup stopped before replacing files.';
     exit;
   end;
-  if not RunPreflightHostCommand(
-    'Suspending automatic display recovery for upgrade or repair',
-    'recovery uninstall',
-    ResultCode,
-    ErrorText) then
+  if UpgradeBackendWasDisabled then
   begin
-    Result := ErrorText + #13#10 + #13#10 +
-      'Setup is restoring any safeguard it already stopped before returning.';
-    TryRestoreUpgradeSafeguards;
-    exit;
+    Log(
+      'Existing Vita host features are intentionally paused; setup will ' +
+      'update product files without re-enabling shared components or safeguards.');
   end;
 end;
 

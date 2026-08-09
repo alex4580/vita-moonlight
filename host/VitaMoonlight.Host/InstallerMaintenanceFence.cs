@@ -22,10 +22,11 @@ internal sealed record InstallerMaintenanceStatus(
 /// <summary>
 /// Serializes every host mutation with setup and leaves a durable, live-owner
 /// fence across the separate child processes used by Inno Setup. Read-only
-/// diagnostics remain available while setup owns the fence. Only an installed
-/// host command carrying the exact live setup PID receives the maintenance
-/// bypass; a stale fence can be taken over only after its recorded process has
-/// ended.
+/// diagnostics remain available while setup owns the fence. Generic mutation
+/// bypass remains limited to the installed host carrying the exact live setup
+/// PID. The extracted current helper receives only dedicated, path-free
+/// safeguard reconciliation methods after proving the same owner; a stale
+/// fence can be taken over only after its recorded process has ended.
 /// </summary>
 internal static class InstallerMaintenanceFence
 {
@@ -205,6 +206,88 @@ internal static class InstallerMaintenanceFence
             StagedVddAdoptionInstanceId = null,
             Revision = 1,
         };
+    }
+
+    /// <summary>
+    /// Stops only the two exact Vita safeguards captured by the live setup
+    /// transaction. This deliberately runs in the extracted current helper:
+    /// an older installed host may contain the very task/firewall bug that the
+    /// repair is replacing. No executable path is accepted from the caller.
+    /// </summary>
+    internal static void SuspendSafeguardsForOwner(int ownerProcessId)
+    {
+        RequireBootstrapHelper(ownerProcessId);
+        ScheduledTaskAccount.RequireCurrentInteractiveUser(
+            "Suspending Vita recovery safeguards for setup");
+        var ownerStart = RequireLiveProcessStart(ownerProcessId);
+        MachineStateSecurity.SecureContainer();
+        using var commandAccess = new CommandAccessLease(
+            AcquireCommandGate(),
+            ownsFence: true);
+        _ = RequireOwnedSnapshot(ownerProcessId, ownerStart);
+        MachineStateSecurity.Secure();
+        var preference = BackendLifecycleManager.ReadPreference();
+        if (preference.State == BackendPreferenceState.Error)
+        {
+            throw new InvalidOperationException(
+                "Setup cannot suspend the recovery safeguards because the protected Enabled/Paused preference is unavailable. No task was changed. " +
+                (preference.Error ?? "Unknown backend preference error."));
+        }
+        var executablePath = InstallationTrust.ExpectedExecutablePath;
+        var deleteDefinitions =
+            preference.State != BackendPreferenceState.Enabled ||
+            IsExactInstalledExecutableAvailable(executablePath);
+        SuspendSafeguardsCore(executablePath, deleteDefinitions);
+    }
+
+    /// <summary>
+    /// Reconciles the exact pre-setup safeguard obligation using the current
+    /// extracted helper while keeping task actions bound to the Program Files
+    /// executable. Paused state always wins and restores no background work.
+    /// </summary>
+    internal static void RestoreSafeguardsForOwner(int ownerProcessId)
+    {
+        RequireBootstrapHelper(ownerProcessId);
+        ScheduledTaskAccount.RequireCurrentInteractiveUser(
+            "Restoring Vita recovery safeguards after setup");
+        var ownerStart = RequireLiveProcessStart(ownerProcessId);
+        MachineStateSecurity.SecureContainer();
+        using var commandAccess = new CommandAccessLease(
+            AcquireCommandGate(),
+            ownsFence: true);
+        var state = RequireOwnedSnapshot(ownerProcessId, ownerStart);
+        MachineStateSecurity.Secure();
+        var preference = BackendLifecycleManager.ReadPreference();
+        if (preference.State == BackendPreferenceState.Error)
+        {
+            throw new InvalidOperationException(
+                "Setup cannot reconcile the recovery safeguards because the protected Enabled/Paused preference is unavailable. No task was changed. " +
+                (preference.Error ?? "Unknown backend preference error."));
+        }
+        var backendIsEnabled =
+            preference.State == BackendPreferenceState.Enabled;
+        var plan = GetSafeguardRestorePlanForTest(
+            backendIsEnabled,
+            state.BackendWasEnabled,
+            state.RescueAgentTaskWasPresent,
+            state.RecoveryTaskWasPresent);
+        RestoreSafeguardsCore(
+            InstallationTrust.ExpectedExecutablePath,
+            plan.RescueAgent,
+            plan.RecoveryTask);
+    }
+
+    internal static (bool RescueAgent, bool RecoveryTask)
+        GetSafeguardRestorePlanForTest(
+            bool backendIsEnabled,
+            bool backendWasEnabled,
+            bool rescueAgentTaskWasPresent,
+            bool recoveryTaskWasPresent)
+    {
+        if (!backendIsEnabled) return (false, false);
+        return backendWasEnabled
+            ? (rescueAgentTaskWasPresent, recoveryTaskWasPresent)
+            : (true, true);
     }
 
     /// <summary>
@@ -638,7 +721,8 @@ internal static class InstallerMaintenanceFence
                 HostRecoveryAgentManager.TaskName,
                 InstallationTrust.ExpectedExecutablePath,
                 "agent run --background",
-                requireInteractiveHighest: false);
+                requireInteractiveHighest: false,
+                requireCurrentUser: true);
         }
         if (recovery.State == ExactScheduledTaskState.Present)
         {
@@ -646,12 +730,215 @@ internal static class InstallerMaintenanceFence
                 RecoveryTaskManager.TaskName,
                 InstallationTrust.ExpectedExecutablePath,
                 "session recover",
-                requireInteractiveHighest: false);
+                requireInteractiveHighest: false,
+                requireCurrentUser: true);
         }
         return new MaintenanceSafeguardSnapshot(
             backendWasEnabled,
             rescueAgent.State == ExactScheduledTaskState.Present,
             recovery.State == ExactScheduledTaskState.Present);
+    }
+
+    private static void SuspendSafeguardsCore(
+        string executablePath,
+        bool deleteDefinitions)
+    {
+        var present = RequireSafeguardMutationPreflight(executablePath);
+        var reconcileRescue = deleteDefinitions &&
+            ShouldReconcileRescueForTest(
+                present.RescueAgent,
+                IsExactInstalledExecutableAvailable(executablePath));
+        if (reconcileRescue)
+        {
+            ManagedStreamBridgeFirewall.RequireAbsentOrOwned(executablePath);
+        }
+        HostRecoveryAgentManager.StopForMaintenance(executablePath);
+        if (!deleteDefinitions)
+        {
+            if (present.RecoveryTask)
+            {
+                ExactScheduledTaskManager.StopExact(
+                    RecoveryTaskManager.TaskName);
+            }
+            return;
+        }
+        if (reconcileRescue)
+        {
+            HostRecoveryAgentManager.Uninstall(
+                executablePath,
+                requireCurrentUser: true);
+        }
+        if (present.RecoveryTask)
+        {
+            RecoveryTaskManager.Uninstall(
+                executablePath,
+                requireCurrentUser: true);
+        }
+        RequireSafeguardState(
+            rescueRequired: false,
+            recoveryRequired: false,
+            executablePath);
+    }
+
+    private static void RestoreSafeguardsCore(
+        string executablePath,
+        bool rescueRequired,
+        bool recoveryRequired)
+    {
+        var present = RequireSafeguardMutationPreflight(executablePath);
+        var executableAvailable =
+            IsExactInstalledExecutableAvailable(executablePath);
+        var reconcileRescue = rescueRequired ||
+            ShouldReconcileRescueForTest(
+                present.RescueAgent,
+                executableAvailable);
+        if (reconcileRescue)
+        {
+            ManagedStreamBridgeFirewall.RequireAbsentOrOwned(executablePath);
+        }
+        if ((rescueRequired || recoveryRequired) &&
+            !executableAvailable)
+        {
+            throw new InvalidOperationException(
+                $"Setup cannot restore its recovery safeguards because the exact installed host executable is unavailable: {executablePath}. Run the installer again so it can repair the application files.");
+        }
+
+        if (recoveryRequired)
+        {
+            RecoveryTaskManager.Install(executablePath);
+        }
+        else if (present.RecoveryTask)
+        {
+            RecoveryTaskManager.Uninstall(
+                executablePath,
+                requireCurrentUser: true);
+        }
+
+        if (rescueRequired)
+        {
+            HostRecoveryAgentManager.Install(executablePath);
+        }
+        else
+        {
+            HostRecoveryAgentManager.StopForMaintenance(executablePath);
+            if (reconcileRescue)
+            {
+                HostRecoveryAgentManager.Uninstall(
+                    executablePath,
+                    requireCurrentUser: true);
+            }
+        }
+        RequireSafeguardState(
+            rescueRequired,
+            recoveryRequired,
+            executablePath);
+    }
+
+    private static (bool RescueAgent, bool RecoveryTask)
+        RequireSafeguardMutationPreflight(
+            string executablePath)
+    {
+        var rescue = HostRecoveryAgentManager.GetInstallationState();
+        var recovery = RecoveryTaskManager.GetInstallationState();
+        ExactScheduledTaskManager.RequireKnown(
+            rescue,
+            HostRecoveryAgentManager.TaskName);
+        ExactScheduledTaskManager.RequireKnown(
+            recovery,
+            RecoveryTaskManager.TaskName);
+        if (rescue.State == ExactScheduledTaskState.Present)
+        {
+            ExactScheduledTaskManager.RequireOwnedInteractiveTask(
+                HostRecoveryAgentManager.TaskName,
+                executablePath,
+                "agent run --background",
+                requireInteractiveHighest: false,
+                requireCurrentUser: true);
+        }
+        if (recovery.State == ExactScheduledTaskState.Present)
+        {
+            ExactScheduledTaskManager.RequireOwnedInteractiveTask(
+                RecoveryTaskManager.TaskName,
+                executablePath,
+                "session recover",
+                requireInteractiveHighest: false,
+                requireCurrentUser: true);
+        }
+        return (
+            rescue.State == ExactScheduledTaskState.Present,
+            recovery.State == ExactScheduledTaskState.Present);
+    }
+
+    private static void RequireSafeguardState(
+        bool rescueRequired,
+        bool recoveryRequired,
+        string executablePath)
+    {
+        var rescue = HostRecoveryAgentManager.GetInstallationState();
+        var recovery = RecoveryTaskManager.GetInstallationState();
+        ExactScheduledTaskManager.RequireKnown(
+            rescue,
+            HostRecoveryAgentManager.TaskName);
+        ExactScheduledTaskManager.RequireKnown(
+            recovery,
+            RecoveryTaskManager.TaskName);
+        if ((rescue.State == ExactScheduledTaskState.Present) != rescueRequired ||
+            (recovery.State == ExactScheduledTaskState.Present) != recoveryRequired)
+        {
+            throw new InvalidOperationException(
+                "Windows did not reach the exact scheduled-task state required by protected installer maintenance. The maintenance fence was kept for a safe retry.");
+        }
+        if (rescueRequired)
+        {
+            ExactScheduledTaskManager.RequireOwnedInteractiveTask(
+                HostRecoveryAgentManager.TaskName,
+                executablePath,
+                "agent run --background",
+                requireCurrentUser: true);
+            if (!HostRecoveryAgentManager.IsRunning(executablePath))
+            {
+                throw new InvalidOperationException(
+                    "Windows restored the stream-rescue task, but the exact installed agent did not become ready.");
+            }
+        }
+        if (recoveryRequired)
+        {
+            ExactScheduledTaskManager.RequireOwnedInteractiveTask(
+                RecoveryTaskManager.TaskName,
+                executablePath,
+                "session recover",
+                requireCurrentUser: true);
+        }
+    }
+
+    internal static bool ShouldReconcileRescueForTest(
+        bool rescueTaskPresent,
+        bool installedExecutableAvailable) =>
+        rescueTaskPresent || installedExecutableAvailable;
+
+    private static bool IsExactInstalledExecutableAvailable(string path)
+    {
+        var expected = Path.GetFullPath(
+            InstallationTrust.ExpectedExecutablePath);
+        var actual = Path.GetFullPath(path);
+        if (!actual.Equals(expected, StringComparison.OrdinalIgnoreCase) ||
+            !File.Exists(actual))
+        {
+            return false;
+        }
+        try
+        {
+            return (File.GetAttributes(actual) &
+                    FileAttributes.ReparsePoint) == 0 &&
+                   (File.GetAttributes(
+                        Path.GetDirectoryName(actual)!) &
+                    FileAttributes.ReparsePoint) == 0;
+        }
+        catch (Exception error) when (
+            error is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
     }
 
     private static MaintenanceSafeguardSnapshot NormalizeSnapshotForTakeover(
@@ -739,6 +1026,34 @@ internal static class InstallerMaintenanceFence
                 backendIsEnabled
                     ? "Installer maintenance cannot end because one or more pre-existing Vita recovery safeguards have not been restored. Run setup again to finish recovery."
                     : "Installer maintenance cannot end because Vita host features are Paused but a Vita recovery task is still installed. Run setup again to finish the pause operation.");
+        }
+
+        if (rescueAgent.State == ExactScheduledTaskState.Present)
+        {
+            ExactScheduledTaskManager.RequireOwnedInteractiveTask(
+                HostRecoveryAgentManager.TaskName,
+                InstallationTrust.ExpectedExecutablePath,
+                "agent run --background",
+                requireInteractiveHighest: false,
+                requireCurrentUser: true);
+            if (backendIsEnabled &&
+                IsExactInstalledExecutableAvailable(
+                    InstallationTrust.ExpectedExecutablePath) &&
+                !HostRecoveryAgentManager.IsRunning(
+                    InstallationTrust.ExpectedExecutablePath))
+            {
+                throw new InvalidOperationException(
+                    "Installer maintenance cannot end because the exact stream-rescue task exists but its authenticated agent and firewall handoff are not ready.");
+            }
+        }
+        if (recovery.State == ExactScheduledTaskState.Present)
+        {
+            ExactScheduledTaskManager.RequireOwnedInteractiveTask(
+                RecoveryTaskManager.TaskName,
+                InstallationTrust.ExpectedExecutablePath,
+                "session recover",
+                requireInteractiveHighest: false,
+                requireCurrentUser: true);
         }
 
         // Task presence alone is not a safe handoff. Prove the display-side

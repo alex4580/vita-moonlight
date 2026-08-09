@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Security.Principal;
 
 namespace VitaMoonlight.Host;
 
@@ -17,6 +18,7 @@ internal sealed record ExactScheduledTaskProbe(
 internal sealed record ExactScheduledTaskDefinition(
     string ExecutablePath,
     string Arguments,
+    string UserId,
     int LogonType,
     int RunLevel);
 
@@ -214,7 +216,8 @@ internal static class ExactScheduledTaskManager
         string taskName,
         string expectedExecutablePath,
         string expectedArguments,
-        bool requireInteractiveHighest = true)
+        bool requireInteractiveHighest = true,
+        bool requireCurrentUser = false)
     {
         var definition = ReadDefinition(taskName);
         var expectedPath = Path.GetFullPath(expectedExecutablePath);
@@ -229,6 +232,8 @@ internal static class ExactScheduledTaskManager
                 definition.Arguments.Trim(),
                 expectedArguments,
                 StringComparison.Ordinal) ||
+            (requireCurrentUser &&
+             !PrincipalMatchesCurrentUser(definition.UserId)) ||
             (requireInteractiveHighest &&
              (definition.LogonType != TaskLogonInteractiveToken ||
               definition.RunLevel != TaskRunLevelHighest)))
@@ -237,8 +242,41 @@ internal static class ExactScheduledTaskManager
                 $"Scheduled task '{taskName}' is not the exact Vita Moonlight " +
                 (requireInteractiveHighest ? "interactive/highest task. " : "owned task. ") +
                 $"Observed action: {definition.ExecutablePath} {definition.Arguments}; " +
-                $"logon type {definition.LogonType}, run level {definition.RunLevel}. " +
+                $"principal {definition.UserId}; logon type {definition.LogonType}, " +
+                $"run level {definition.RunLevel}. " +
                 "No task was removed or trusted.");
+        }
+    }
+
+    private static bool PrincipalMatchesCurrentUser(string principalUserId)
+    {
+        if (string.IsNullOrWhiteSpace(principalUserId)) return false;
+        using var current = WindowsIdentity.GetCurrent();
+        if (string.Equals(
+                principalUserId.Trim(),
+                current.Name,
+                StringComparison.OrdinalIgnoreCase) ||
+            current.User is not null && string.Equals(
+                principalUserId.Trim(),
+                current.User.Value,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+        try
+        {
+            var observed = (SecurityIdentifier)new NTAccount(
+                    principalUserId.Trim())
+                .Translate(typeof(SecurityIdentifier));
+            return current.User is not null && current.User.Equals(observed);
+        }
+        catch (IdentityNotMappedException)
+        {
+            return false;
+        }
+        catch (SystemException)
+        {
+            return false;
         }
     }
 
@@ -279,6 +317,7 @@ internal static class ExactScheduledTaskManager
             return new ExactScheduledTaskDefinition(
                 (string)((dynamic)action).Path,
                 (string?)((dynamic)action).Arguments ?? string.Empty,
+                (string?)((dynamic)principal).UserId ?? string.Empty,
                 (int)((dynamic)principal).LogonType,
                 (int)((dynamic)principal).RunLevel);
         }
@@ -387,7 +426,8 @@ internal static class RecoveryTaskManager
                 TaskName,
                 executablePath,
                 "session recover",
-                requireInteractiveHighest: false);
+                requireInteractiveHighest: false,
+                requireCurrentUser: true);
         }
         var taskCommand = $"\"{Path.GetFullPath(executablePath)}\" session recover";
         var exitCode = Run(
@@ -405,22 +445,31 @@ internal static class RecoveryTaskManager
         ExactScheduledTaskManager.RequireOwnedInteractiveTask(
             TaskName,
             executablePath,
-            "session recover");
+            "session recover",
+            requireCurrentUser: true);
     }
 
-    internal static void Uninstall()
+    internal static void Uninstall() =>
+        Uninstall(
+            Environment.ProcessPath ?? Path.Combine(
+                AppContext.BaseDirectory,
+                "VitaMoonlight.Host.exe"));
+
+    internal static void Uninstall(
+        string executablePath,
+        bool requireCurrentUser = false)
     {
+        executablePath = Path.GetFullPath(executablePath);
         var existing = GetInstallationState();
         ExactScheduledTaskManager.RequireKnown(existing, TaskName);
         if (existing.State == ExactScheduledTaskState.Present)
         {
             ExactScheduledTaskManager.RequireOwnedInteractiveTask(
                 TaskName,
-                Environment.ProcessPath ?? Path.Combine(
-                    AppContext.BaseDirectory,
-                    "VitaMoonlight.Host.exe"),
+                executablePath,
                 "session recover",
-                requireInteractiveHighest: false);
+                requireInteractiveHighest: false,
+                requireCurrentUser: requireCurrentUser);
         }
         ExactScheduledTaskManager.DeleteExact(TaskName);
     }

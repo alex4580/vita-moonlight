@@ -64,9 +64,14 @@ internal static class HostRecoveryAgentManager
     internal static ExactScheduledTaskProbe GetInstallationState() =>
         ExactScheduledTaskManager.Probe(TaskName);
 
-    internal static bool IsRunning()
+    internal static bool IsRunning() =>
+        IsRunning(CurrentExecutablePath());
+
+    internal static bool IsRunning(string executablePath)
     {
-        if (!IsProcessPresent() || !IsEventSignaled(ReadyEventName))
+        executablePath = Path.GetFullPath(executablePath);
+        if (!IsExactProcessPresent(executablePath) ||
+            !IsEventSignaled(ReadyEventName))
         {
             return false;
         }
@@ -75,9 +80,7 @@ internal static class HostRecoveryAgentManager
             var bridge = SunshineStreamBridgeConfiguration.LoadIfEnabled();
             return bridge is null || ManagedStreamBridgeFirewall.IsReady(
                 bridge.Port,
-                Environment.ProcessPath ?? Path.Combine(
-                    AppContext.BaseDirectory,
-                    "VitaMoonlight.Host.exe"));
+                Path.GetFullPath(executablePath));
         }
         catch (Exception error) when (
             error is IOException or
@@ -158,10 +161,11 @@ internal static class HostRecoveryAgentManager
                 TaskName,
                 executablePath,
                 "agent run --background",
-                requireInteractiveHighest: false);
+                requireInteractiveHighest: false,
+                requireCurrentUser: true);
             ExactScheduledTaskManager.StopExact(TaskName);
         }
-        StopCurrentSessionAgent();
+        StopCurrentSessionAgent(executablePath);
         var taskCommand = $"\"{Path.GetFullPath(executablePath)}\" agent run --background";
         var createExitCode = RunTask(
             "/Create", "/F",
@@ -178,7 +182,8 @@ internal static class HostRecoveryAgentManager
         ExactScheduledTaskManager.RequireOwnedInteractiveTask(
             TaskName,
             executablePath,
-            "agent run --background");
+            "agent run --background",
+            requireCurrentUser: true);
         var bridge = SunshineStreamBridgeConfiguration.LoadIfEnabled();
         if (bridge is null)
         {
@@ -194,35 +199,60 @@ internal static class HostRecoveryAgentManager
         {
             throw new InvalidOperationException("Windows created the stream rescue agent but could not start it.");
         }
-        for (var attempt = 0; attempt < 100 && !IsRunning(); attempt++) Thread.Sleep(100);
-        if (!IsRunning())
+        for (var attempt = 0;
+             attempt < 100 && !IsRunning(executablePath);
+             attempt++)
+        {
+            Thread.Sleep(100);
+        }
+        if (!IsRunning(executablePath))
         {
             throw new InvalidOperationException(
                 "Windows started the stream rescue task, but authenticated stream handoff and display recovery did not become ready.");
         }
     }
 
-    internal static void Uninstall()
+    internal static void Uninstall() =>
+        Uninstall(CurrentExecutablePath());
+
+    internal static void Uninstall(
+        string executablePath,
+        bool requireCurrentUser = false)
     {
+        executablePath = Path.GetFullPath(executablePath);
         var existing = GetInstallationState();
         ExactScheduledTaskManager.RequireKnown(existing, TaskName);
         if (existing.State == ExactScheduledTaskState.Present)
         {
             ExactScheduledTaskManager.RequireOwnedInteractiveTask(
                 TaskName,
-                Environment.ProcessPath ?? Path.Combine(
-                    AppContext.BaseDirectory,
-                    "VitaMoonlight.Host.exe"),
+                executablePath,
                 "agent run --background",
-                requireInteractiveHighest: false);
+                requireInteractiveHighest: false,
+                requireCurrentUser: requireCurrentUser);
             ExactScheduledTaskManager.StopExact(TaskName);
         }
-        StopCurrentSessionAgent();
+        StopCurrentSessionAgent(executablePath);
         ExactScheduledTaskManager.DeleteExact(TaskName);
-        ManagedStreamBridgeFirewall.RemoveOwned(
-            Environment.ProcessPath ?? Path.Combine(
-                AppContext.BaseDirectory,
-                "VitaMoonlight.Host.exe"));
+        ManagedStreamBridgeFirewall.RemoveOwned(executablePath);
+    }
+
+    internal static void StopForMaintenance(string executablePath)
+    {
+        executablePath = Path.GetFullPath(executablePath);
+        var existing = GetInstallationState();
+        ExactScheduledTaskManager.RequireKnown(existing, TaskName);
+        if (existing.State == ExactScheduledTaskState.Present)
+        {
+            ExactScheduledTaskManager.RequireOwnedInteractiveTask(
+                TaskName,
+                executablePath,
+                "agent run --background",
+                requireInteractiveHighest: false,
+                requireCurrentUser: true);
+            ExactScheduledTaskManager.StopExact(TaskName);
+        }
+        StopCurrentSessionAgent(executablePath);
     }
 
     internal static HostRescueStatus? ReadLastStatus()
@@ -280,23 +310,40 @@ internal static class HostRecoveryAgentManager
         }
     }
 
-    private static void StopCurrentSessionAgent()
+    private static void StopCurrentSessionAgent(string executablePath)
     {
+        executablePath = Path.GetFullPath(executablePath);
         var window = FindWindow(null, WindowCaption);
         uint processId = 0;
         if (window != IntPtr.Zero) GetWindowThreadProcessId(window, out processId);
-        if (window != IntPtr.Zero) PostMessage(window, WmClose, IntPtr.Zero, IntPtr.Zero);
+        if (window != IntPtr.Zero && processId > 4 &&
+            processId != Environment.ProcessId)
+        {
+            try
+            {
+                RequireExpectedAgentProcess(
+                    checked((int)processId),
+                    executablePath);
+                PostMessage(window, WmClose, IntPtr.Zero, IntPtr.Zero);
+            }
+            catch (Exception error) when (
+                (error is ArgumentException or InvalidOperationException or
+                    System.ComponentModel.Win32Exception) &&
+                !IsProcessPresent())
+            {
+                // The exact process exited between FindWindow and image
+                // verification. Absence is the requested state.
+            }
+        }
         for (var attempt = 0; attempt < 10 && IsProcessPresent(); attempt++) Thread.Sleep(100);
         if (IsProcessPresent() && processId > 4 && processId != Environment.ProcessId)
         {
             try
             {
                 using var process = Process.GetProcessById(checked((int)processId));
-                if (process.ProcessName.Equals("VitaMoonlight.Host", StringComparison.OrdinalIgnoreCase))
-                {
-                    process.Kill(entireProcessTree: false);
-                    process.WaitForExit(5000);
-                }
+                RequireExpectedAgentProcess(process, executablePath);
+                process.Kill(entireProcessTree: false);
+                process.WaitForExit(5000);
             }
             catch (Exception error) when (error is ArgumentException or InvalidOperationException or System.ComponentModel.Win32Exception)
             {
@@ -310,6 +357,58 @@ internal static class HostRecoveryAgentManager
                 "An earlier stream rescue agent is still running. Sign out once, then repair the agent from the control panel.");
         }
     }
+
+    private static void RequireExpectedAgentProcess(
+        int processId,
+        string executablePath)
+    {
+        using var process = Process.GetProcessById(processId);
+        RequireExpectedAgentProcess(process, executablePath);
+    }
+
+    private static bool IsExactProcessPresent(string executablePath)
+    {
+        if (!IsProcessPresent()) return false;
+        var window = FindWindow(null, WindowCaption);
+        if (window == IntPtr.Zero) return false;
+        GetWindowThreadProcessId(window, out var processId);
+        if (processId <= 4) return false;
+        try
+        {
+            RequireExpectedAgentProcess(
+                checked((int)processId),
+                Path.GetFullPath(executablePath));
+            return true;
+        }
+        catch (Exception error) when (
+            error is ArgumentException or
+                InvalidOperationException or
+                System.ComponentModel.Win32Exception or
+                UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
+    private static void RequireExpectedAgentProcess(
+        Process process,
+        string executablePath)
+    {
+        var actual = process.MainModule?.FileName;
+        if (string.IsNullOrWhiteSpace(actual) ||
+            !Path.GetFullPath(actual).Equals(
+                executablePath,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException(
+                "A process using the Vita Moonlight rescue-agent identity is not the exact installed host. It was left running and setup made no attempt to stop it.");
+        }
+    }
+
+    private static string CurrentExecutablePath() =>
+        Environment.ProcessPath ?? Path.Combine(
+            AppContext.BaseDirectory,
+            "VitaMoonlight.Host.exe");
 
     private static void ConfigurePersistentTask()
     {

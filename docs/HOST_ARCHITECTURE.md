@@ -169,8 +169,8 @@ sends the F11 recovery chord through the normal encrypted Moonlight input
 channel only for emergency recovery.
 
 Both scheduled tasks are created for the current interactive token at highest
-available privilege and their executable, arguments, logon type, and run level
-are verified through Task Scheduler after creation. Before setup or repair can
+available privilege and their executable, arguments, principal, logon type,
+and run level are verified through Task Scheduler after creation. Before setup or repair can
 recover displays or replace files, the maintenance helper compares the elevated
 Windows identity with the owner of the current interactive session. An
 over-the-shoulder UAC elevation with a different Administrator account is
@@ -209,12 +209,17 @@ warnings and never invalidate an already visible physical topology.
 An in-place upgrade or repair first uses the installer-embedded current host to
 recover and verify a physical-only topology. It then publishes redundant,
 protected maintenance records containing the exact live setup PID/start time,
-the saved backend intent, and pre-mutation recovery-task obligations. A command
-gate serializes all later installed-host children; only the matching live owner
-may mutate state, while exact physical recovery remains available without an
-owner. Dead-owner takeover carries the original obligations forward, and a
-live or unverifiable owner is never displaced. Uninstall bridges a dead setup
-record into its own durable guard before removing either maintenance copy.
+the saved backend intent, and pre-mutation recovery-task obligations. The same
+current helper performs the narrowly scoped pre-copy task/firewall suspension
+and cancel rollback against the hard-coded Program Files host; Setup never asks
+the older executable being replaced to repair its own integration bug. A
+command gate spans each reconciliation, and both task definitions plus any
+affected firewall rule are proven before the first mutation. Generic later
+installed-host children remain limited to the matching live owner, while exact
+physical recovery remains available without an owner. Dead-owner takeover
+carries the original obligations forward, and a live or unverifiable owner is
+never displaced. Uninstall bridges a dead setup record into its own durable
+guard before removing either maintenance copy.
 After a successful installed-payload transition, versioned cleanup removes only
 the immutable exact names shipped at obsolete root/ProgramData locations by
 older releases. Unknown, busy, or reparse entries are retained and prevent that

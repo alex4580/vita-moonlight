@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Statically verify the safe Windows in-place-upgrade compatibility contract.
 
-The installer must run against older installed host binaries before it can
-replace them.  Those binaries cannot be assumed to expose commands introduced
-by the candidate.  This check records the command surface of real legacy
-builds and verifies that pre-replacement setup uses only that common surface.
+The installer must repair older installations before it can replace their
+host executable.  The old executable is deliberately treated as inert data:
+all protected pre-copy task removal and cancel rollback must run through the
+current host embedded in setup.  This catches upgrade bootstrap failures which
+the candidate cannot fix by changing only the eventually installed payload.
 
 This is deliberately a source-only check: it never queries or changes the live
 Windows display topology, services, scheduled tasks, registry, or installation.
@@ -109,7 +110,13 @@ def load_legacy_hosts() -> list[dict[str, object]]:
     return hosts
 
 
-def check_installer_legacy_surface(installer: str) -> None:
+def check_installer_precopy_helper_surface(
+    installer: str,
+    program: str,
+    maintenance: str,
+    rescue_agent: str,
+    recovery_task: str,
+) -> None:
     prepare = section(
         installer,
         "function PrepareToInstall(",
@@ -118,9 +125,9 @@ def check_installer_legacy_surface(installer: str) -> None:
     )
     runner = section(
         installer,
-        "function RunPreflightHostCommand(",
-        "function BackendLifecycleStateExists:",
-        "RunPreflightHostCommand",
+        "function RunMaintenanceSafeguardCommand(",
+        "procedure TryRestoreUpgradeSafeguards;",
+        "RunMaintenanceSafeguardCommand",
     )
     begin = section(
         installer,
@@ -141,53 +148,13 @@ def check_installer_legacy_surface(installer: str) -> None:
         "installer cancel/failure cleanup",
     )
 
-    require(
-        "PreflightHostPath" in runner,
-        "preflight runner no longer clearly targets the installed host",
-    )
-    require(
-        "WithMaintenanceBypass(Parameters)" in runner,
-        "installed-host preflight no longer carries the live maintenance owner",
-    )
-    commands = re.findall(
-        r"RunPreflightHostCommand\(\s*'[^']*',\s*'([^']+)'",
-        prepare,
-        flags=re.DOTALL,
-    )
-    require(bool(commands), "PrepareToInstall has no installed-host safeguard commands")
-    require(
-        len(commands) == prepare.count("RunPreflightHostCommand("),
-        "every installed-host preflight call must use a literal command "
-        "which the legacy compatibility fixture can audit",
-    )
-
-    rollback_commands = re.findall(
-        r"WithMaintenanceBypass\('([^']+)'\)",
-        rollback,
-    )
-    require(
-        len(rollback_commands) == rollback.count("WithMaintenanceBypass("),
-        "every installed-host rollback call must use a literal command "
-        "which the legacy compatibility fixture can audit",
-    )
-    require(
-        len(rollback_commands) == rollback.count("InstalledHostPath,"),
-        "every installed-host rollback Exec call must pass through the "
-        "audited maintenance-bypass command surface",
-    )
-    backend_probe = "backend status --intent-exit-code"
-    common_rollback_commands = [
-        command for command in rollback_commands if command != backend_probe
-    ]
-
+    # Keep the observed legacy fixture as release evidence, but never delegate
+    # a protected mutation to those binaries.  In particular, <=0.14.8 can
+    # throw FileNotFoundException while removing an absent firewall rule.
     legacy_hosts = load_legacy_hosts()
     for host in legacy_hosts:
         version = host.get("productVersion")
         sha256 = host.get("sha256")
-        backend_lifecycle_record = host.get("backendLifecycleRecord")
-        supported = host.get("preReplacementCommands")
-        rollback_supported = host.get("rollbackCommands")
-        unsupported = host.get("unsupportedCommands")
         require(
             isinstance(version, str) and bool(version),
             "legacy host fixture has no productVersion",
@@ -197,66 +164,47 @@ def check_installer_legacy_surface(installer: str) -> None:
             f"legacy host {version} has no valid observed SHA-256",
         )
         require(
-            isinstance(backend_lifecycle_record, bool),
-            f"legacy host {version} has no backendLifecycleRecord classification",
+            isinstance(host.get("backendLifecycleRecord"), bool)
+            and isinstance(host.get("preReplacementCommands"), list)
+            and isinstance(host.get("rollbackCommands"), list)
+            and isinstance(host.get("unsupportedCommands"), list),
+            f"legacy host {version} has an incomplete observed command fixture",
         )
-        require(
-            isinstance(supported, list) and all(isinstance(item, str) for item in supported),
-            f"legacy host {version} has an invalid preReplacementCommands list",
-        )
-        require(
-            isinstance(rollback_supported, list)
-            and all(isinstance(item, str) for item in rollback_supported),
-            f"legacy host {version} has an invalid rollbackCommands list",
-        )
-        require(
-            isinstance(unsupported, list) and all(isinstance(item, str) for item in unsupported),
-            f"legacy host {version} has an invalid unsupportedCommands list",
-        )
-        unexpected = sorted(set(commands) - set(supported))
-        require(
-            not unexpected,
-            f"PrepareToInstall invokes commands unsupported by legacy host {version}: "
-            + ", ".join(unexpected),
-        )
-        forbidden = sorted(set(commands).intersection(unsupported))
-        require(
-            not forbidden,
-            f"PrepareToInstall invokes known current-only commands on legacy host {version}: "
-            + ", ".join(forbidden),
-        )
-        rollback_unexpected = sorted(
-            set(common_rollback_commands) - set(rollback_supported)
-        )
-        require(
-            not rollback_unexpected,
-            f"Rollback invokes commands unsupported by legacy host {version}: "
-            + ", ".join(rollback_unexpected),
-        )
-        rollback_forbidden = sorted(
-            set(common_rollback_commands).intersection(unsupported)
-        )
-        require(
-            not rollback_forbidden,
-            f"Rollback invokes known current-only commands on legacy host {version}: "
-            + ", ".join(rollback_forbidden),
-        )
-        if backend_lifecycle_record:
-            require(
-                backend_probe in rollback_supported,
-                f"legacy host {version} has lifecycle state but cannot report its intent",
-            )
-        else:
-            require(
-                backend_probe in unsupported,
-                f"legacy host {version} without lifecycle state must classify "
-                "the gated backend probe as unsupported",
-            )
 
     require(
-        "'uninstall prepare'" not in prepare,
-        "PrepareToInstall must not send current-only `uninstall prepare` "
-        "to an older installed host",
+        "RunPreflightHostCommand(" not in installer,
+        "setup can still delegate a protected pre-copy mutation to the old installed host",
+    )
+    require(
+        "PreflightHostPath," not in prepare and
+        "InstalledHostPath," not in rollback and
+        "WithMaintenanceBypass(" not in rollback and
+        "Exec(" not in prepare and
+        "Exec(" not in rollback,
+        "pre-copy or cancel rollback can still execute the old installed host",
+    )
+    require(
+        "VitaMoonlight.Host.Maintenance.exe" in runner and
+        "'maintenance ' + Action + ' --owner-pid '" in runner and
+        "ReadMaintenanceHelperError" in runner,
+        "the protected safeguard runner is not bound to the current embedded helper, live owner, and helper error channel",
+    )
+    require(
+        prepare.count("'suspend-safeguards'") >= 1 and
+        "RunMaintenanceSafeguardCommand(" in prepare,
+        "PrepareToInstall does not suspend exact safeguards through the current embedded helper",
+    )
+    require(
+        "'restore-safeguards'" in rollback and
+        "RunMaintenanceSafeguardCommand(" in rollback,
+        "cancel/failure rollback does not restore safeguards through the current embedded helper",
+    )
+    require(
+        "'agent uninstall'" not in prepare and
+        "'recovery uninstall'" not in prepare and
+        "'agent install'" not in rollback and
+        "'recovery install'" not in rollback,
+        "installer still exposes old-host task mutations instead of one current-helper transaction",
     )
     require_in_order(
         prepare,
@@ -264,8 +212,8 @@ def check_installer_legacy_surface(installer: str) -> None:
             "BeginUpgradeMaintenance(ErrorText)",
             "QueryMaintenanceSnapshotState(",
             "ConfirmManagedVddAdoption(ErrorText)",
-            "PreflightHostPath :=",
-            "RunPreflightHostCommand(",
+            "RunMaintenanceSafeguardCommand(",
+            "'suspend-safeguards'",
         ],
         "upgrade safety gate ordering",
     )
@@ -282,15 +230,257 @@ def check_installer_legacy_surface(installer: str) -> None:
         ],
         "maintenance helper begin ordering",
     )
+    maintenance_command = section(
+        program,
+        "private static int MaintenanceCommand(",
+        "private static int BackendCommand(",
+        "maintenance command surface",
+    )
+    require(
+        'case "suspend-safeguards":' in maintenance_command and
+        'case "restore-safeguards":' in maintenance_command,
+        "the embedded host does not expose both exact safeguard maintenance actions",
+    )
+    require(
+        '"--installed-executable"' not in maintenance_command and
+        '"--installed-executable"' not in maintenance and
+        "InstallationTrust.ExpectedExecutablePath" in maintenance,
+        "safeguard maintenance accepts a caller-selected target instead of the exact Program Files path",
+    )
     require_in_order(
-        rollback,
+        maintenance_command,
         [
-            "ResultCode := 0",
-            "if not BackendLifecycleStateExists then",
-            "else if not Exec(",
-            "WithMaintenanceBypass('backend status --intent-exit-code')",
+            'case "suspend-safeguards":',
+            "EnsureMaintenanceAdministrator(",
+            '"--owner-pid"',
+            "InstallerMaintenanceFence.SuspendSafeguardsForOwner(",
+            'case "restore-safeguards":',
+            "EnsureMaintenanceAdministrator(",
+            '"--owner-pid"',
+            "InstallerMaintenanceFence.RestoreSafeguardsForOwner(",
         ],
-        "legacy rollback capability gate",
+        "maintenance safeguard command authorization",
+    )
+    suspend = section(
+        maintenance,
+        "internal static void SuspendSafeguardsForOwner(",
+        "internal static void RestoreSafeguardsForOwner(",
+        "fence-owned safeguard suspension",
+    )
+    restore = section(
+        maintenance,
+        "internal static void RestoreSafeguardsForOwner(",
+        "internal static (bool RescueAgent, bool RecoveryTask)",
+        "fence-owned safeguard restoration",
+    )
+    for operation_name, operation in (
+        ("suspend", suspend),
+        ("restore", restore),
+    ):
+        require_in_order(
+            operation,
+            [
+                "RequireBootstrapHelper(ownerProcessId)",
+                "RequireLiveProcessStart(ownerProcessId)",
+                "AcquireCommandGate()",
+                "ownsFence: true",
+                "RequireOwnedSnapshot(",
+                "InstallationTrust.ExpectedExecutablePath",
+            ],
+            f"fence-owned safeguard {operation_name}",
+        )
+    require(
+        "BackendLifecycleManager.ReadPreference()" in restore and
+        "BackendPreferenceState.Error" in restore and
+        restore.find("BackendPreferenceState.Error") <
+        restore.find("RestoreSafeguardsCore("),
+        "safeguard restoration does not fail closed on an unreadable, deferred, or uninstalling backend preference",
+    )
+    suspend_core = section(
+        maintenance,
+        "private static void SuspendSafeguardsCore(",
+        "private static void RestoreSafeguardsCore(",
+        "exact safeguard suspension core",
+    )
+    restore_core = section(
+        maintenance,
+        "private static void RestoreSafeguardsCore(",
+        "private static (bool RescueAgent, bool RecoveryTask)\n        RequireSafeguardMutationPreflight(",
+        "exact safeguard restoration core",
+    )
+    preflight = section(
+        maintenance,
+        "private static (bool RescueAgent, bool RecoveryTask)\n        RequireSafeguardMutationPreflight(",
+        "private static void RequireSafeguardState(",
+        "safeguard mutation preflight",
+    )
+    require_in_order(
+        preflight,
+        [
+            "HostRecoveryAgentManager.GetInstallationState()",
+            "RecoveryTaskManager.GetInstallationState()",
+            "ExactScheduledTaskManager.RequireKnown(",
+            "ExactScheduledTaskManager.RequireKnown(",
+            "ExactScheduledTaskManager.RequireOwnedInteractiveTask(",
+            "ExactScheduledTaskManager.RequireOwnedInteractiveTask(",
+        ],
+        "prevalidate both exact task definitions",
+    )
+    require(
+        preflight.count("requireCurrentUser: true") >= 2,
+        "safeguard preflight can trust a same-name task owned by another interactive account",
+    )
+    require_in_order(
+        suspend_core,
+        [
+            "RequireSafeguardMutationPreflight(",
+            "ShouldReconcileRescueForTest(",
+            "present.RescueAgent",
+            "IsExactInstalledExecutableAvailable(executablePath)",
+            "if (reconcileRescue)",
+            "ManagedStreamBridgeFirewall.RequireAbsentOrOwned(",
+            "HostRecoveryAgentManager.StopForMaintenance(",
+            "if (!deleteDefinitions)",
+            "RecoveryTaskManager.TaskName",
+            "if (reconcileRescue)",
+            "HostRecoveryAgentManager.Uninstall(",
+            "executablePath",
+            "requireCurrentUser: true",
+            "RecoveryTaskManager.Uninstall(",
+            "RequireSafeguardState(",
+        ],
+        "prevalidated all-or-fail safeguard suspension",
+    )
+    require(
+        "IsExactInstalledExecutableAvailable(executablePath)" in suspend and
+        "SuspendSafeguardsCore(executablePath, deleteDefinitions)" in suspend and
+        suspend_core.find("StopForMaintenance(") <
+        suspend_core.find("if (!deleteDefinitions)"),
+        "a missing old executable can block stopping the exact safeguards before setup repairs the payload",
+    )
+    require(
+        suspend_core.find("RequireSafeguardMutationPreflight(") <
+        suspend_core.find("RequireAbsentOrOwned(") and
+        suspend_core.find("RequireAbsentOrOwned(") <
+        suspend_core.find("HostRecoveryAgentManager.Uninstall(") and
+        suspend_core.find("RequireSafeguardMutationPreflight(") <
+        suspend_core.find("RecoveryTaskManager.Uninstall("),
+        "safeguard suspension can mutate an exact task before its definitions, and any affected firewall rule, are proven owned",
+    )
+    require_in_order(
+        restore_core,
+        [
+            "RequireSafeguardMutationPreflight(",
+            "IsExactInstalledExecutableAvailable(executablePath)",
+            "ShouldReconcileRescueForTest(",
+            "present.RescueAgent",
+            "executableAvailable",
+            "if (reconcileRescue)",
+            "ManagedStreamBridgeFirewall.RequireAbsentOrOwned(",
+            "RecoveryTaskManager.Install(",
+            "HostRecoveryAgentManager.Install(",
+            "if (reconcileRescue)",
+            "HostRecoveryAgentManager.Uninstall(",
+            "executablePath",
+            "requireCurrentUser: true",
+            "RequireSafeguardState(",
+        ],
+        "cancel/takeover safeguard restoration",
+    )
+    reconcile_policy = section(
+        maintenance,
+        "internal static bool ShouldReconcileRescueForTest(",
+        "private static bool IsExactInstalledExecutableAvailable(",
+        "stale rescue/firewall reconciliation policy",
+    )
+    require(
+        "rescueTaskPresent || installedExecutableAvailable" in reconcile_policy,
+        "rescue cleanup can skip a stale firewall rule when the exact installed host remains, or mutate a genuine no-task/no-host clean install",
+    )
+    require(
+        restore_core.find("RequireAbsentOrOwned(") <
+        restore_core.find("RecoveryTaskManager.Install(") and
+        restore_core.find("RequireAbsentOrOwned(") <
+        restore_core.find("HostRecoveryAgentManager.Uninstall("),
+        "restore can mutate a safeguard before preflighting the stale rescue firewall rule",
+    )
+    require(
+        "internal static void Uninstall(\n        string executablePath" in rescue_agent and
+        "RemoveOwned(executablePath)" in rescue_agent and
+        "internal static void Uninstall(\n        string executablePath" in recovery_task,
+        "current-helper suspension is not path-bound through both exact task managers and firewall cleanup",
+    )
+    rescue_install = section(
+        rescue_agent,
+        "internal static void Install(string executablePath)",
+        "internal static void Uninstall()",
+        "rescue task installation",
+    )
+    recovery_install = section(
+        recovery_task,
+        "internal static void Install(string executablePath)",
+        "internal static void Uninstall()",
+        "recovery task installation",
+    )
+    require(
+        rescue_install.count("requireCurrentUser: true") >= 2 and
+        recovery_install.count("requireCurrentUser: true") >= 2,
+        "task repair does not verify the current interactive principal both before replacement and after creation",
+    )
+    require(
+        suspend_core.count("requireCurrentUser: true") >= 2 and
+        restore_core.count("requireCurrentUser: true") >= 2,
+        "fence-owned task removal does not request a current-principal race recheck from both managers",
+    )
+    running = section(
+        rescue_agent,
+        "internal static bool IsRunning(string executablePath)",
+        "internal static IReadOnlyList<HostModeHotkeyStatus>",
+        "explicit-path rescue readiness",
+    )
+    require_in_order(
+        running,
+        [
+            "IsExactProcessPresent(executablePath)",
+            "executablePath",
+        ],
+        "explicit-path rescue process identity",
+    )
+    process_identity = section(
+        rescue_agent,
+        "private static bool IsExactProcessPresent(",
+        "private static void RequireExpectedAgentProcess(\n        Process process",
+        "exact rescue process identity",
+    )
+    require(
+        "FindWindow(" in process_identity and
+        "GetWindowThreadProcessId(" in process_identity and
+        "RequireExpectedAgentProcess(" in process_identity,
+        "rescue readiness does not bind its signaling process to the exact installed executable",
+    )
+    require(
+        "Install(executablePath)" in restore_core and
+        "Uninstall(\n                executablePath" in suspend_core and
+        "IsRunning(executablePath)" in maintenance,
+        "embedded safeguard maintenance can substitute its temporary helper path for the installed task target",
+    )
+    require(
+        "RequireControllerProcess();" in maintenance and
+        "RequireLiveProcessStart(ownerProcessId)" in maintenance and
+        "RequireOwnedSnapshot(" in maintenance,
+        "maintenance actions are not protected by the exact live-owner fence",
+    )
+    end_verification = section(
+        maintenance,
+        "private static void VerifySafeToEnd(",
+        "internal static bool CanEndForTest(",
+        "maintenance fence handoff verification",
+    )
+    require(
+        end_verification.count("RequireOwnedInteractiveTask(") >= 2 and
+        "HostRecoveryAgentManager.IsRunning(" in end_verification and
+        "InstallationTrust.ExpectedExecutablePath" in end_verification,
+        "maintenance can end without exact task ownership and explicit installed-path rescue readiness",
     )
     require_in_order(
         deinitialize,
@@ -300,7 +490,21 @@ def check_installer_legacy_surface(installer: str) -> None:
             "if MaintenanceFenceActive and not UpgradeSafeguardsRestored then",
             "TryRestoreUpgradeSafeguards",
         ],
-        "cancel must first let the helper prove already-present task obligations before requiring a possibly missing old host to restore them",
+        "cancel must let the current helper prove or restore the durable task obligations before ending the fence",
+    )
+    require_in_order(
+        rollback,
+        [
+            "RunMaintenanceSafeguardCommand(",
+            "'restore-safeguards'",
+            "UpgradeSafeguardsRestored := True",
+        ],
+        "cancel rollback current-helper invocation",
+    )
+    require(
+        "if not UpgradeBackendWasEnabled then" not in rollback and
+        "if not (UpgradeAgentWasStopped or UpgradeRecoveryTaskWasRemoved) then" not in rollback,
+        "cancel rollback can skip current-helper reconciliation for a paused or partially suspended upgrade",
     )
 
 
@@ -706,7 +910,7 @@ def check_interactive_task_account_safety(
     snapshot = section(
         maintenance,
         "private static MaintenanceSafeguardSnapshot CaptureCurrentSnapshot()",
-        "private static MaintenanceSafeguardSnapshot NormalizeSnapshotForTakeover(",
+        "private static void SuspendSafeguardsCore(",
         "installer task snapshot",
     )
     require(
@@ -1221,7 +1425,13 @@ def check_versioned_install_cleanup_contract(
 def main() -> int:
     try:
         installer = read(INSTALLER_PATH)
-        check_installer_legacy_surface(installer)
+        check_installer_precopy_helper_surface(
+            installer,
+            read(PROGRAM_PATH),
+            read(MAINTENANCE_PATH),
+            read(RESCUE_AGENT_PATH),
+            read(RECOVERY_TASK_PATH),
+        )
         check_installer_failure_ux(installer)
         check_helper_physical_proof(
             read(MAINTENANCE_PATH),
@@ -1268,9 +1478,10 @@ def main() -> int:
         return 1
 
     print(
-        "Windows upgrade contract check passed: legacy installed-host commands "
-        "are compatible, expected setup failures use a normal failure page and "
-        "nonzero result, the embedded helper proves physical-only safety, "
+        "Windows upgrade contract check passed: protected pre-copy and rollback "
+        "mutations use only the current embedded helper and exact installed path, "
+        "expected setup failures use a normal failure page and nonzero result, "
+        "the embedded helper proves physical-only safety, "
         "interactive tasks cannot bind to different-account UAC, uninstall "
         "remains available, versioned exact install residue is cleaned, and "
         "no unsafe foreground-close rescue exists."

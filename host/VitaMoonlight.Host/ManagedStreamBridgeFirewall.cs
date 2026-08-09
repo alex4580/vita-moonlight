@@ -136,6 +136,30 @@ internal static class ManagedStreamBridgeFirewall
         }
     }
 
+    internal static void RequireAbsentOrOwned(string executablePath)
+    {
+        var normalizedExecutable = Path.GetFullPath(executablePath);
+        var (policy, rules) = OpenRules();
+        try
+        {
+            var existing = TryGetRule(rules);
+            if (existing is null) return;
+            try
+            {
+                RequireOwned(existing, normalizedExecutable);
+            }
+            finally
+            {
+                Marshal.FinalReleaseComObject(existing);
+            }
+        }
+        finally
+        {
+            Marshal.FinalReleaseComObject(rules);
+            Marshal.FinalReleaseComObject(policy);
+        }
+    }
+
     private static void RequireReadyCore(
         INetFwRules rules,
         int port,
