@@ -174,8 +174,13 @@ release notes.
       Microsoft Visual C++ runtime 14.44.35211.0 or newer, the pinned signed VDD,
       recovery task, and running stream-rescue agent without manual downloads.
 - [ ] Readiness proves the authenticated Vita/host boundary is listening before
-      the rescue agent reports ready. A paired Vita certificate prepares both a
-      fresh launch and same-app resume; an unknown, disabled, expired, or
+      the rescue agent reports ready. Startup must first complete a local
+      Schannel handshake with the exact Sunshine certificate; a PEM-backed
+      ephemeral key or unusable temporary key container must fail readiness
+      without opening the public listener. Expired or orphaned display recovery
+      must run before TLS credential loading so a credential failure cannot
+      strand the VDD. A paired Vita certificate prepares both a fresh launch
+      and same-app resume; an unknown, disabled, expired, or
       malformed client identity is rejected without enabling the VDD or writing
       a recovery transaction. The endpoint exposes no unauthenticated status or
       display action.

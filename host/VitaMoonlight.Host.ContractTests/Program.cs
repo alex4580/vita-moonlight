@@ -660,6 +660,12 @@ static void TestStreamBoundaryPairedCertificateAuthority()
     }
 }
 
+static void TestSchannelServerCertificateActivation()
+{
+    if (!OperatingSystem.IsWindows()) return;
+    SchannelServerCertificate.VerifyRuntimeForSelfTest();
+}
+
 static void TestRecoveryLifecycleDecisions()
 {
     Require(
@@ -782,6 +788,7 @@ TestStreamBoundaryOperationalFailures();
 TestStreamBoundaryLeaseContract();
 TestStreamBoundaryLifecycleContract();
 TestStreamBoundaryPairedCertificateAuthority();
+TestSchannelServerCertificateActivation();
 TestRecoveryLifecycleDecisions();
 TestSunshineInfoLoggingRetirement();
 ManagedVddOwnershipContractTests.Run();

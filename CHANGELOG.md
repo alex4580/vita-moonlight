@@ -1,5 +1,10 @@
 ## 0.14.8
 
+* Fixed the Windows TLS representation of Sunshine's PEM private key. On
+  affected Windows 11 builds the certificate reported a private key but
+  Schannel rejected every bridge handshake with `SEC_E_NO_CREDENTIALS`. The
+  rescue agent now uses a disposable current-user key container and completes
+  a bounded loopback TLS handshake before it reports ready.
 * Fixed in-place repair of older hosts whose missing managed firewall rule was
   surfaced by Windows as `FileNotFoundException` (`0x80070002`). Pre-copy
   safeguard shutdown and cancel rollback now run through the current host

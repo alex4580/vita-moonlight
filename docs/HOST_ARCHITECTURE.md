@@ -41,10 +41,16 @@ display default and disables Sunshine's native `dd_*` topology transaction.
 The supported client and host add a small authenticated preflight beside the
 standard GameStream protocol. The endpoint presents the same host identity
 that the Vita pinned during pairing and accepts only a client certificate still
-enabled in Sunshine's paired-client state. Before sending either Sunshine's
-launch or resume request, the Vita asks the companion to prepare one supported
-mode. The companion creates a protected recovery record, enables the exact
-managed VDD, activates 960x544, 960x540, or 1280x720 at a driver-safe 60 Hz,
+enabled in Sunshine's paired-client state. Sunshine's PEM identity is imported
+into a non-persistent current-user key container because Windows Schannel
+cannot use an ephemeral PEM key on every supported build. The agent performs
+an exact-certificate loopback TLS handshake before publishing readiness and
+disposes the temporary key container at shutdown. Expired or orphaned display
+handoffs are reconciled before any external TLS credential is loaded, so a
+credential failure cannot strand the virtual desktop. Before sending either
+Sunshine's launch or resume request, the Vita asks the companion to prepare one
+supported mode. The companion creates a protected recovery record, enables the
+exact managed VDD, activates 960x544, 960x540, or 1280x720 at a driver-safe 60 Hz,
 applies SDR, and returns a generation token. A matching authenticated stop
 restores the exact physical baseline and PnP-disables the VDD; a delayed stop
 from an older generation cannot tear down a newer stream. No manual Windows

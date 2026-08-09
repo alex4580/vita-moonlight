@@ -872,6 +872,75 @@ def _check_host(root: Path, values: dict[str, Any]) -> None:
     for fragment in required_bridge_fragments:
         _require(fragment in bridge,
                  f"host authenticated stream boundary is missing: {fragment}")
+    schannel_loader = _extract_braced_block(
+        bridge,
+        r"internal\s+static\s+X509Certificate2\s+LoadFromPemFiles\s*\(",
+        "Schannel PEM certificate loader",
+    )
+    schannel_prepare = _extract_braced_block(
+        bridge,
+        r"private\s+static\s+X509Certificate2\s+PrepareForSchannel\s*\(",
+        "Schannel certificate preparation",
+    )
+    schannel_preflight = _extract_braced_block(
+        bridge,
+        r"private\s+static\s+async\s+Task\s+VerifyUsableForServerAuthenticationAsync\s*\(",
+        "Schannel server-credential preflight",
+    )
+    pre_tls_recovery = _extract_braced_block(
+        bridge,
+        r"private\s+static\s+void\s+ReconcileDisplayStateBeforeTlsReadiness\s*\(",
+        "pre-TLS display recovery",
+    )
+    bridge_constructor = _extract_braced_block(
+        bridge,
+        r"internal\s+StreamBoundaryBridgeServer\s*\(",
+        "stream-boundary bridge constructor",
+    )
+    recovery_position = bridge_constructor.find(
+        "ReconcileDisplayStateBeforeTlsReadiness()")
+    load_position = bridge_constructor.find(
+        "SchannelServerCertificate.LoadFromPemFiles(")
+    cleanup_try_position = bridge_constructor.find("try", load_position)
+    preflight_position = bridge_constructor.find(
+        "SchannelServerCertificate.VerifyUsableForServerAuthentication(")
+    firewall_position = bridge_constructor.find(
+        "ManagedStreamBridgeFirewall.RequireReady(")
+    listener_position = bridge_constructor.find("CreateStartedListener(")
+    cleanup_position = bridge_constructor.find(
+        "serverCertificate.Dispose();", preflight_position)
+    _require(
+        "X509Certificate2.CreateFromPemFile(" in schannel_loader and
+        "PrepareForSchannel(pemCertificate)" in schannel_loader and
+        "RandomNumberGenerator.Fill(passwordEntropy)" in schannel_prepare and
+        "X509KeyStorageFlags.UserKeySet" in schannel_prepare and
+        "CryptographicOperations.ZeroMemory(passwordEntropy)" in schannel_prepare and
+        "CryptographicOperations.ZeroMemory(pkcs12)" in schannel_prepare and
+        "PersistKeySet" not in schannel_prepare and
+        "EphemeralKeySet" not in schannel_prepare and
+        "TcpListener(IPAddress.Loopback, 0)" in schannel_preflight and
+        "AuthenticateAsServerAsync(" in schannel_preflight and
+        "AuthenticateAsClientAsync(" in schannel_preflight and
+        "CryptographicOperations.FixedTimeEquals(" in schannel_preflight and
+        "SchannelServerCertificate.VerifyRuntimeForSelfTest();" in program,
+        "the bridge must convert PEM into a disposable Schannel key and exercise a real loopback TLS handshake",
+    )
+    _require(
+        "ReadDurableRecoveryCapturedAt()" in pre_tls_recovery and
+        "StreamBoundaryLeaseJournal.Assess(" in pre_tls_recovery and
+        "assessment.AuthorizesActiveHandoff" in pre_tls_recovery and
+        "new SessionManager().RestoreIfPending(" in pre_tls_recovery and
+        "new SessionManager().RecoverToIdle()" in pre_tls_recovery and
+        "StreamBoundaryLeaseJournal.RemoveAssessed(" in pre_tls_recovery,
+        "bridge startup must restore every non-live display handoff before TLS credential loading",
+    )
+    _require(
+        -1 < recovery_position < load_position < cleanup_try_position <
+        preflight_position < firewall_position < listener_position <
+        cleanup_position and
+        "startedListener?.Stop();" in bridge_constructor,
+        "orphan display recovery must precede TLS loading, and all Schannel/firewall/listener setup must share cleanup before readiness",
+    )
     _require(
         "TcpListener(IPAddress.IPv6Any, port)" in bridge and
         "candidate.Server.DualMode = true" in bridge and

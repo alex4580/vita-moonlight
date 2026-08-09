@@ -145,6 +145,190 @@ internal sealed record SunshineStreamBridgeConfiguration(
     }
 }
 
+/// <summary>
+/// Loads Sunshine's PEM identity into a key representation that Windows
+/// Schannel can actually use for server authentication. CreateFromPemFile()
+/// attaches an ephemeral CNG key. Some supported Windows builds report
+/// HasPrivateKey for that certificate but reject it later from SslStream with
+/// SEC_E_NO_CREDENTIALS. A password-protected, in-memory PKCS#12 round trip
+/// without PersistKeySet gives Schannel a temporary current-user key container;
+/// disposing the returned certificate removes that container.
+/// </summary>
+internal static class SchannelServerCertificate
+{
+    private static readonly TimeSpan PreflightTimeout =
+        TimeSpan.FromSeconds(5);
+
+    internal static X509Certificate2 LoadFromPemFiles(
+        string certificatePath,
+        string privateKeyPath)
+    {
+        using var pemCertificate = X509Certificate2.CreateFromPemFile(
+            certificatePath,
+            privateKeyPath);
+        return PrepareForSchannel(pemCertificate);
+    }
+
+    private static X509Certificate2 PrepareForSchannel(
+        X509Certificate2 pemCertificate)
+    {
+        if (!pemCertificate.HasPrivateKey)
+        {
+            throw new InvalidDataException(
+                "Sunshine's server certificate has no matching private key.");
+        }
+
+        Span<byte> passwordEntropy = stackalloc byte[32];
+        RandomNumberGenerator.Fill(passwordEntropy);
+        var password = Convert.ToHexString(passwordEntropy);
+        CryptographicOperations.ZeroMemory(passwordEntropy);
+
+        byte[]? pkcs12 = null;
+        X509Certificate2? schannelCertificate = null;
+        try
+        {
+            pkcs12 = pemCertificate.Export(
+                X509ContentType.Pkcs12,
+                password);
+            schannelCertificate = new X509Certificate2(
+                pkcs12,
+                password,
+                X509KeyStorageFlags.UserKeySet);
+            if (!schannelCertificate.HasPrivateKey ||
+                !CryptographicOperations.FixedTimeEquals(
+                    pemCertificate.RawData,
+                    schannelCertificate.RawData))
+            {
+                throw new InvalidDataException(
+                    "Sunshine's server certificate could not be prepared for Windows TLS.");
+            }
+            var result = schannelCertificate;
+            schannelCertificate = null;
+            return result;
+        }
+        finally
+        {
+            schannelCertificate?.Dispose();
+            if (pkcs12 is not null)
+            {
+                CryptographicOperations.ZeroMemory(pkcs12);
+            }
+        }
+    }
+
+    internal static void VerifyRuntimeForSelfTest()
+    {
+        using var key = RSA.Create(2048);
+        var request = new CertificateRequest(
+            "CN=Vita Moonlight Schannel self-test",
+            key,
+            HashAlgorithmName.SHA256,
+            RSASignaturePadding.Pkcs1);
+        using var pemCertificate = request.CreateSelfSigned(
+            DateTimeOffset.UtcNow.AddMinutes(-1),
+            DateTimeOffset.UtcNow.AddMinutes(5));
+        using var schannelCertificate = PrepareForSchannel(pemCertificate);
+        VerifyUsableForServerAuthentication(schannelCertificate);
+    }
+
+    internal static void VerifyUsableForServerAuthentication(
+        X509Certificate2 certificate)
+    {
+        ArgumentNullException.ThrowIfNull(certificate);
+        using var timeout = new CancellationTokenSource(PreflightTimeout);
+        try
+        {
+            VerifyUsableForServerAuthenticationAsync(
+                    certificate,
+                    timeout.Token)
+                .GetAwaiter()
+                .GetResult();
+        }
+        catch (Exception error) when (
+            error is AuthenticationException or
+                IOException or
+                SocketException or
+                OperationCanceledException)
+        {
+            throw new InvalidOperationException(
+                "Sunshine's server certificate could not be activated by Windows TLS. Run Set up or repair this PC before streaming.",
+                error);
+        }
+    }
+
+    private static async Task VerifyUsableForServerAuthenticationAsync(
+        X509Certificate2 certificate,
+        CancellationToken token)
+    {
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start(backlog: 1);
+        try
+        {
+            var endpoint = (IPEndPoint)listener.LocalEndpoint;
+            var acceptTask = listener.AcceptTcpClientAsync(token).AsTask();
+            using var client = new TcpClient(AddressFamily.InterNetwork);
+            await client.ConnectAsync(
+                    IPAddress.Loopback,
+                    endpoint.Port,
+                    token)
+                .ConfigureAwait(false);
+            using var serverClient = await acceptTask.ConfigureAwait(false);
+            var expectedHash = SHA256.HashData(certificate.RawData);
+            var exactCertificateObserved = false;
+            using var serverTls = new SslStream(
+                serverClient.GetStream(),
+                leaveInnerStreamOpen: false);
+            using var clientTls = new SslStream(
+                client.GetStream(),
+                leaveInnerStreamOpen: false,
+                (_, presented, _, _) =>
+                {
+                    if (presented is null) return false;
+                    var presentedHash = SHA256.HashData(
+                        presented.GetRawCertData());
+                    exactCertificateObserved =
+                        CryptographicOperations.FixedTimeEquals(
+                            expectedHash,
+                            presentedHash);
+                    return exactCertificateObserved;
+                });
+            var protocols = SslProtocols.Tls12 | SslProtocols.Tls13;
+            var serverHandshake = serverTls.AuthenticateAsServerAsync(
+                new SslServerAuthenticationOptions
+                {
+                    ServerCertificate = certificate,
+                    ClientCertificateRequired = false,
+                    EnabledSslProtocols = protocols,
+                    CertificateRevocationCheckMode = X509RevocationMode.NoCheck,
+                },
+                token);
+            var clientHandshake = clientTls.AuthenticateAsClientAsync(
+                new SslClientAuthenticationOptions
+                {
+                    TargetHost = "localhost",
+                    EnabledSslProtocols = protocols,
+                    CertificateRevocationCheckMode = X509RevocationMode.NoCheck,
+                },
+                token);
+            await Task.WhenAll(serverHandshake, clientHandshake)
+                .ConfigureAwait(false);
+            if (!exactCertificateObserved ||
+                !serverTls.IsAuthenticated ||
+                !serverTls.IsServer ||
+                !clientTls.IsAuthenticated ||
+                clientTls.IsServer)
+            {
+                throw new AuthenticationException(
+                    "Windows TLS did not activate the exact Sunshine server identity.");
+            }
+        }
+        finally
+        {
+            listener.Stop();
+        }
+    }
+}
+
 internal static class SunshinePairedClientCertificates
 {
     private const int MaximumStateBytes = 4 * 1024 * 1024;
@@ -304,69 +488,66 @@ internal sealed class StreamBoundaryBridgeServer : IDisposable
         // Establish and verify the complete protected state container once.
         // Lease heartbeats thereafter use a narrow exact-file fast path.
         MachineStateSecurity.Secure();
+        ReconcileDisplayStateBeforeTlsReadiness();
         _ = SunshinePairedClientCertificates.LoadEnabledCertificateHashes(
             configuration.StatePath);
-        serverCertificate = X509Certificate2.CreateFromPemFile(
+        serverCertificate = SchannelServerCertificate.LoadFromPemFiles(
             configuration.CertificatePath,
             configuration.PrivateKeyPath);
-        if (!serverCertificate.HasPrivateKey)
+        TcpListener? startedListener = null;
+        try
         {
-            serverCertificate.Dispose();
-            throw new InvalidDataException(
-                "Sunshine's server certificate has no matching private key.");
+            SchannelServerCertificate.VerifyUsableForServerAuthentication(
+                serverCertificate);
+            var executable = Environment.ProcessPath ?? Path.Combine(
+                AppContext.BaseDirectory,
+                "VitaMoonlight.Host.exe");
+            ManagedStreamBridgeFirewall.RequireReady(
+                configuration.Port,
+                executable);
+            startedListener = CreateStartedListener(configuration.Port);
+            listener = startedListener;
+            acceptTask = Task.Run(
+                () => AcceptLoopAsync(cancellation.Token));
         }
+        catch
+        {
+            startedListener?.Stop();
+            serverCertificate.Dispose();
+            throw;
+        }
+    }
 
+    private static void ReconcileDisplayStateBeforeTlsReadiness()
+    {
         // A protected lease can safely survive an agent restart because it is
         // bound to the exact paired-client certificate, random generation,
         // and durable display-recovery CapturedAt. Preserve a live lease so a
-        // reconnecting Vita can resume heartbeats. Anything else is restored
-        // before the listener advertises readiness.
-        try
+        // reconnecting Vita can resume heartbeats. Anything else must be
+        // restored before external Sunshine state or TLS credentials are read:
+        // a malformed credential must never strand a virtual-only desktop by
+        // making every scheduled-agent restart fail before recovery.
+        var durableCapturedAt = ReadDurableRecoveryCapturedAt();
+        var assessment = StreamBoundaryLeaseJournal.Assess(
+            durableCapturedAt);
+        if (!assessment.AuthorizesActiveHandoff)
         {
-            var durableCapturedAt = ReadDurableRecoveryCapturedAt();
-            var assessment = StreamBoundaryLeaseJournal.Assess(
-                durableCapturedAt);
-            if (!assessment.AuthorizesActiveHandoff)
+            if (durableCapturedAt is { } expected)
             {
-                if (durableCapturedAt is { } expected)
-                {
-                    _ = new SessionManager().RestoreIfPending(expected);
-                }
-                _ = new SessionManager().RecoverToIdle();
-                if (assessment.CanDiscardLeaseAfterRecovery)
-                {
-                    _ = StreamBoundaryLeaseJournal.RemoveAssessed(
-                        assessment);
-                }
+                _ = new SessionManager().RestoreIfPending(expected);
             }
-            if (!assessment.AuthorizesActiveHandoff &&
-                File.Exists(HostStatePaths.RecoveryFile))
+            _ = new SessionManager().RecoverToIdle();
+            if (assessment.CanDiscardLeaseAfterRecovery)
             {
-                throw new InvalidOperationException(
-                    "An orphaned Vita display handoff could not be restored before bridge startup.");
+                _ = StreamBoundaryLeaseJournal.RemoveAssessed(
+                    assessment);
             }
         }
-        catch
+        if (!assessment.AuthorizesActiveHandoff &&
+            File.Exists(HostStatePaths.RecoveryFile))
         {
-            serverCertificate.Dispose();
-            throw;
-        }
-
-        var executable = Environment.ProcessPath ?? Path.Combine(
-            AppContext.BaseDirectory,
-            "VitaMoonlight.Host.exe");
-        ManagedStreamBridgeFirewall.RequireReady(
-            configuration.Port,
-            executable);
-        try
-        {
-            listener = CreateStartedListener(configuration.Port);
-            acceptTask = Task.Run(() => AcceptLoopAsync(cancellation.Token));
-        }
-        catch
-        {
-            serverCertificate.Dispose();
-            throw;
+            throw new InvalidOperationException(
+                "An orphaned Vita display handoff could not be restored before bridge startup.");
         }
     }
 

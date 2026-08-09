@@ -2038,6 +2038,7 @@ internal static class Program
         {
             ManagedStreamBridgeFirewall
                 .VerifyMissingRuleInteropForSelfTest();
+            SchannelServerCertificate.VerifyRuntimeForSelfTest();
         }
         RunOwnedStateCleanupSelfTest();
         Require(
