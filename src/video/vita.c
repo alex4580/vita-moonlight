@@ -26,12 +26,14 @@
 #include "../util.h"
 #include "../input/vita.h"
 #include "vita.h"
+#include "scaling.h"
 #include "sps.h"
 
 #include <Limelight.h>
 
 #include <pthread.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <psp2/kernel/sysmem.h>
 #include <psp2/kernel/threadmgr.h>
 #include <psp2/display.h>
@@ -81,6 +83,50 @@ enum {
 static char* decoder_buffer = NULL;
 
 static size_t decoder_buffer_size = 0;
+
+static bool decoder_buffer_requirement(PDECODE_UNIT decode_unit,
+                                       size_t* payload_size,
+                                       size_t* allocation_size) {
+  if (decode_unit == NULL || decode_unit->bufferList == NULL ||
+      decode_unit->fullLength <= 0 || payload_size == NULL ||
+      allocation_size == NULL) {
+    return false;
+  }
+
+  size_t source_size = 0;
+  size_t required_size = 0;
+  size_t entry_count = 0;
+  for (PLENTRY entry = decode_unit->bufferList;
+       entry != NULL; entry = entry->next) {
+    /* Each valid entry contains at least one source byte, so this also bounds
+     * traversal if a malformed list contains a cycle. */
+    entry_count++;
+    if (entry_count > (size_t)decode_unit->fullLength ||
+        entry->data == NULL || entry->length <= 0) {
+      return false;
+    }
+
+    size_t entry_source_size = (size_t)entry->length;
+    if (source_size > SIZE_MAX - entry_source_size) return false;
+    source_size += entry_source_size;
+
+    size_t entry_output_size = entry->bufferType == BUFFER_TYPE_SPS
+        ? (size_t)GS_SPS_MAX_REWRITTEN_SIZE
+        : entry_source_size;
+    if (required_size > SIZE_MAX - entry_output_size) return false;
+    required_size += entry_output_size;
+  }
+
+  if (source_size != (size_t)decode_unit->fullLength ||
+      required_size > UINT32_MAX ||
+      required_size > SIZE_MAX - AV_INPUT_BUFFER_PADDING_SIZE) {
+    return false;
+  }
+
+  *payload_size = required_size;
+  *allocation_size = required_size + AV_INPUT_BUFFER_PADDING_SIZE;
+  return true;
+}
 
 enum {
   SCREEN_WIDTH = 960,
@@ -136,7 +182,6 @@ static uint64_t last_decoder_error_log_us = 0;
 static uint32_t suppressed_decoder_errors = 0;
 
 static uint32_t frame_count = 0;
-static uint32_t need_drop = 0;
 static uint32_t fps_snapshot = 0;
 float carry = 0;
 
@@ -156,28 +201,13 @@ static void atomic_add_u32(uint32_t *value, uint32_t amount) {
   __atomic_fetch_add(value, amount, __ATOMIC_ACQ_REL);
 }
 
-static void atomic_sub_u32(uint32_t *value, uint32_t amount) {
-  __atomic_fetch_sub(value, amount, __ATOMIC_ACQ_REL);
-}
-
 static void atomic_store_fps(uint32_t rendered, uint32_t target) {
   /* One 32-bit publication keeps the rendered/target pair self-consistent. */
   uint32_t packed = (rendered & 0xffffU) | ((target & 0xffffU) << 16);
   atomic_store_u32(&fps_snapshot, packed);
 }
 
-typedef struct {
-  unsigned int texture_width;
-  unsigned int texture_height;
-  float origin_x;
-  float origin_y;
-  float region_x1;
-  float region_y1;
-  float region_x2;
-  float region_y2;
-} image_scaling_settings;
-
-static image_scaling_settings image_scaling = {0};
+static VitaScalingSettings image_scaling = {0};
 
 static void draw_stream_surface(bool count_video_frame) {
   uint32_t request_generation =
@@ -201,93 +231,83 @@ static void draw_stream_surface(bool count_video_frame) {
 
   last_render_us = sceKernelGetSystemTimeWide();
   atomic_store_u32(&rendered_redraw_generation, request_generation);
-  if (count_video_frame) {
+  if (count_video_frame && ui_diagnostics_fps_needed()) {
     atomic_add_u32(&frame_count, 1);
   }
 }
 
 void update_scaling_settings(int width, int height) {
-  image_scaling.texture_width = SCREEN_WIDTH;
-  image_scaling.texture_height = SCREEN_HEIGHT;
-  image_scaling.origin_x = 0;
-  image_scaling.origin_y = 0;
-  image_scaling.region_x1 = 0;
-  image_scaling.region_y1 = 0;
-  image_scaling.region_x2 = image_scaling.texture_width;
-  image_scaling.region_y2 = image_scaling.texture_height;
-
-  double scaled_width = (double) SCREEN_HEIGHT * width / height;
-  double scaled_height = (double) SCREEN_WIDTH * height / width;
-
-  if (SCREEN_WIDTH * height == SCREEN_HEIGHT * width) {
-    // streaming resolution ratio matches Vita's screen ratio
-    // use default setting
-  } else if (SCREEN_WIDTH * height > SCREEN_HEIGHT * width) {
-    // host ratio example: 4:3, 16:10
-    // Vita ratio range: 2:16 (64 x 544) - native (960 x 544)
-    if (config.center_region_only) {
-      image_scaling.texture_height = VITA_DECODER_RESOLUTION(scaled_height);
-      image_scaling.region_y1 = VITA_DECODER_RESOLUTION((scaled_height - SCREEN_HEIGHT) / 2);
-      image_scaling.region_y2 = VITA_DECODER_RESOLUTION((scaled_height + SCREEN_HEIGHT) / 2);
-    } else {
-      image_scaling.texture_width = VITA_DECODER_RESOLUTION(scaled_width);
-      image_scaling.region_x2 = VITA_DECODER_RESOLUTION(scaled_width);
-      image_scaling.origin_x = round((double) (SCREEN_WIDTH - image_scaling.texture_width) / 2);
-    }
-  } else {
-    // host ratio example: 16:9, 21:9, 32:9
-    // Vita ratio range: native (960 x 544) - 15:1 (960 x 64)
-    if (config.center_region_only) {
-      image_scaling.texture_width = VITA_DECODER_RESOLUTION(scaled_width);
-      image_scaling.region_x1 = VITA_DECODER_RESOLUTION((scaled_width - SCREEN_WIDTH) / 2);
-      image_scaling.region_x2 = VITA_DECODER_RESOLUTION((scaled_width + SCREEN_WIDTH) / 2);
-    } else {
-      image_scaling.texture_height = VITA_DECODER_RESOLUTION(scaled_height);
-      image_scaling.region_y2 = VITA_DECODER_RESOLUTION(scaled_height);
-      image_scaling.origin_y = round((double) (SCREEN_HEIGHT - image_scaling.texture_height) / 2);
-    }
+  if (!vita_scaling_calculate(
+          width, height, config.center_region_only, &image_scaling)) {
+    /* Moonlight never negotiates non-positive dimensions, but retain a safe
+     * native fallback so a malformed setup cannot create invalid Vita2D
+     * coordinates before the decoder reports its own setup error. */
+    (void)vita_scaling_calculate(
+        SCREEN_WIDTH, SCREEN_HEIGHT, false, &image_scaling);
+    vita_debug_event(
+        VITA_DEBUG_LEVEL_ERROR, "decoder.scaling",
+        "state=fallback source_width=%d source_height=%d", width, height);
   }
 
   printf("update_scaling_settings: width = %u\n", width);
   printf("update_scaling_settings: height = %u\n", height);
-  printf("update_scaling_settings: scaled_width = %f\n", scaled_width);
-  printf("update_scaling_settings: scaled_height = %f\n", scaled_height);
   printf("update_scaling_settings: image_scaling.texture_width = %u\n", image_scaling.texture_width);
   printf("update_scaling_settings: image_scaling.texture_height = %u\n", image_scaling.texture_height);
-  printf("update_scaling_settings: image_scaling.origin_x = %f\n", image_scaling.origin_x);
-  printf("update_scaling_settings: image_scaling.origin_y = %f\n", image_scaling.origin_y);
-  printf("update_scaling_settings: image_scaling.region_x1 = %f\n", image_scaling.region_x1);
-  printf("update_scaling_settings: image_scaling.region_y1 = %f\n", image_scaling.region_y1);
-  printf("update_scaling_settings: image_scaling.region_x2 = %f\n", image_scaling.region_x2);
-  printf("update_scaling_settings: image_scaling.region_y2 = %f\n", image_scaling.region_y2);
+  printf("update_scaling_settings: image_scaling.destination_x = %f\n", image_scaling.destination_x);
+  printf("update_scaling_settings: image_scaling.destination_y = %f\n", image_scaling.destination_y);
+  printf("update_scaling_settings: image_scaling.source_x = %f\n", image_scaling.source_x);
+  printf("update_scaling_settings: image_scaling.source_y = %f\n", image_scaling.source_y);
+  printf("update_scaling_settings: image_scaling.source_width = %f\n", image_scaling.source_width);
+  printf("update_scaling_settings: image_scaling.source_height = %f\n", image_scaling.source_height);
+  printf("update_scaling_settings: image_scaling.scale_x = %f\n", image_scaling.scale_x);
+  printf("update_scaling_settings: image_scaling.scale_y = %f\n", image_scaling.scale_y);
 }
 
 static int vita_pacer_thread_main(SceSize args, void *argp) {
   int max_fps = config.stream.fps;
   uint64_t last_check_time = sceKernelGetSystemTimeWide();
-  atomic_store_u32(&need_drop, 0);
+  bool fps_was_active = false;
   atomic_store_u32(&frame_count, 0);
 
   while (atomic_load_u32(&active_pacer_thread)) {
     uint64_t now = sceKernelGetSystemTimeWide();
+    /* Keep diagnostics honest during a total video freeze. This is a cheap
+     * no-op unless an overlay, the diagnostics screen, or logging is active. */
+    ui_diagnostics_tick(now);
 
-    if (now - last_check_time >= PACER_SAMPLE_INTERVAL_US) {
+    bool collect_fps = ui_diagnostics_fps_needed();
+    if (collect_fps && !fps_was_active) {
+      last_check_time = now;
+      atomic_store_u32(&frame_count, 0);
+      atomic_store_fps(0, (uint32_t)max_fps);
+    }
+    if (collect_fps && now - last_check_time >= PACER_SAMPLE_INTERVAL_US) {
+      uint64_t elapsed_us = now - last_check_time;
       uint32_t curr_frame_count =
           atomic_exchange_u32(&frame_count, 0);
-
-      if (atomic_load_u32(&active_video_thread) &&
-          config.enable_frame_pacer &&
-          curr_frame_count > max_fps) {
-        atomic_add_u32(&need_drop, curr_frame_count - max_fps);
-      }
-
-      atomic_store_fps(curr_frame_count, (uint32_t)max_fps);
+      uint64_t normalized_fps = elapsed_us == 0
+          ? 0
+          : ((uint64_t)curr_frame_count * PACER_SAMPLE_INTERVAL_US +
+             elapsed_us / 2) / elapsed_us;
+      atomic_store_fps(
+          normalized_fps > UINT16_MAX
+              ? UINT16_MAX
+              : (uint32_t)normalized_fps,
+          (uint32_t)max_fps);
       last_check_time = now;
+    } else if (!collect_fps && fps_was_active) {
+      /* Do not aggregate FPS in normal play. Reset the window so enabling an
+       * explicit consumer starts from a fresh, representative sample. */
+      last_check_time = now;
+      atomic_store_u32(&frame_count, 0);
+      atomic_store_fps(0, 0);
     }
+    fps_was_active = collect_fps;
 
     bool live_ui =
         stream_overlay_is_open() ||
-        ui_diagnostics_get_overlay_mode() != UI_DIAGNOSTICS_OVERLAY_OFF;
+        ui_diagnostics_get_overlay_mode() != UI_DIAGNOSTICS_OVERLAY_OFF ||
+        atomic_load_u32(&poor_net_indicator_requested) != 0;
     bool redraw_pending =
         atomic_load_u32(&redraw_request_generation) !=
         atomic_load_u32(&rendered_redraw_generation);
@@ -394,60 +414,53 @@ static void vita_cleanup() {
     return;
   }
 
-  if (video_status == INIT_AVC_DEC) {
+  /* video_status records completed platform stages, while the pointers and
+   * UIDs below may be acquired partway through the next stage. Release by
+   * ownership so every setup failure is retry-safe. */
+  if (video_status >= INIT_AVC_DEC && decoder != NULL) {
     sceAvcdecDeleteDecoder(decoder);
-    video_status--;
   }
 
-  if (video_status == INIT_DECODER_MEMBLOCK) {
-    if (decoderblock >= 0) {
-      sceKernelFreeMemBlock(decoderblock);
-      decoderblock = -1;
-    }
-    if (decoder != NULL) {
-      free(decoder);
-      decoder = NULL;
-    }
-    if (decoder_info != NULL) {
-      free(decoder_info);
-      decoder_info = NULL;
-    }
-    video_status--;
+  if (decoderblock >= 0) {
+    sceKernelFreeMemBlock(decoderblock);
+    decoderblock = -1;
+  }
+  if (decoder != NULL) {
+    free(decoder);
+    decoder = NULL;
+  }
+  if (decoder_info != NULL) {
+    free(decoder_info);
+    decoder_info = NULL;
   }
 
-  if (video_status == INIT_AVC_LIB) {
+  if (video_status >= INIT_AVC_LIB) {
     sceVideodecTermLibrary(SCE_VIDEODEC_TYPE_HW_AVCDEC);
-
-    if (init != NULL) {
-      free(init);
-      init = NULL;
-    }
-    video_status--;
+  }
+  if (init != NULL) {
+    free(init);
+    init = NULL;
   }
 
-  if (video_status == INIT_FRAMEBUFFER) {
-    if (frame_texture != NULL) {
-      vita2d_free_texture(frame_texture);
-      frame_texture = NULL;
-    }
-
-    if (decoder_buffer != NULL) {
-      free(decoder_buffer);
-      decoder_buffer = NULL;
-    }
-    video_status--;
+  if (frame_texture != NULL) {
+    vita2d_free_texture(frame_texture);
+    frame_texture = NULL;
   }
+  if (decoder_buffer != NULL) {
+    free(decoder_buffer);
+    decoder_buffer = NULL;
+  }
+  decoder_buffer_size = 0;
 
-  if (video_status == INIT_GS) {
+  if (video_status >= INIT_GS) {
     gs_sps_stop();
-    video_status--;
   }
+  video_status = NOT_INIT;
 
   decoded_frame_available = false;
   atomic_store_u32(&redraw_request_generation, 0);
   atomic_store_u32(&rendered_redraw_generation, 0);
   atomic_store_u32(&frame_count, 0);
-  atomic_store_u32(&need_drop, 0);
   atomic_store_fps(0, 0);
   atomic_store_u32(&poor_net_indicator_requested, 0);
   poor_net_indicator.alpha = 0;
@@ -512,7 +525,6 @@ static int vita_setup(int videoFormat, int width, int height, int redrawRate, vo
   atomic_store_u32(&redraw_request_generation, 0);
   atomic_store_u32(&rendered_redraw_generation, 0);
   atomic_store_u32(&frame_count, 0);
-  atomic_store_u32(&need_drop, 0);
   atomic_store_fps(0, 0);
   atomic_store_u32(&poor_net_indicator_requested, 0);
   poor_net_indicator.alpha = 0;
@@ -700,38 +712,66 @@ static int vita_submit_decode_unit(PDECODE_UNIT decodeUnit) {
   picture.frame.frameHeight = image_scaling.texture_height;
   picture.frame.pPicture[0] = vita2d_texture_get_datap(frame_texture);
 
-  //ensure_buf_size((void *)&decoder_buffer, &decoder_buffer_size, decodeUnit->fullLength + 64);
-
-  if (decoder_buffer_size < (decodeUnit->fullLength + AV_INPUT_BUFFER_PADDING_SIZE)) {
-    printf("Reallocating decoder buffer to %u bytes", (size_t)decodeUnit->fullLength + AV_INPUT_BUFFER_PADDING_SIZE);
-    decoder_buffer = realloc(decoder_buffer, decodeUnit->fullLength + AV_INPUT_BUFFER_PADDING_SIZE);
-    decoder_buffer_size = decodeUnit->fullLength+AV_INPUT_BUFFER_PADDING_SIZE;
-    if (decoder_buffer == NULL) {
-      printf("Out of memory! could not reallocate buffer!!");
-      exit(1);
-    }
+  size_t payload_capacity = 0;
+  size_t required_allocation = 0;
+  if (!decoder_buffer_requirement(
+          decodeUnit, &payload_capacity, &required_allocation)) {
+    vita_debug_event(
+        VITA_DEBUG_LEVEL_ERROR, "decoder.state",
+        "state=error phase=validate_input source_bytes=%d",
+        decodeUnit != NULL ? decodeUnit->fullLength : 0);
+    return DR_NEED_IDR;
   }
 
-
-/*   if (decodeUnit->fullLength >= DECODER_BUFFER_SIZE + 64) {
-    printf("Video decode buffer too small\n");
-    exit(1);
-  } */
+  if (decoder_buffer == NULL || decoder_buffer_size < required_allocation) {
+    printf("Reallocating decoder buffer to %u bytes",
+           (unsigned int)required_allocation);
+    char* resized_buffer = realloc(decoder_buffer, required_allocation);
+    if (resized_buffer == NULL) {
+      vita_debug_event(
+          VITA_DEBUG_LEVEL_ERROR, "decoder.state",
+          "state=error phase=grow_input_buffer requested_bytes=%u",
+          (unsigned int)required_allocation);
+      return DR_NEED_IDR;
+    }
+    decoder_buffer = resized_buffer;
+    decoder_buffer_size = required_allocation;
+  }
 
   PLENTRY entry = decodeUnit->bufferList;
   uint32_t length = 0;
   while (entry != NULL) {
     if (entry->bufferType == BUFFER_TYPE_SPS) {
-      gs_sps_fix(entry, GS_SPS_BITSTREAM_FIXUP, decoder_buffer, &length);
+      if (!gs_sps_fix(entry, GS_SPS_BITSTREAM_FIXUP,
+                      (uint8_t*)decoder_buffer, payload_capacity, &length)) {
+        vita_debug_event(
+            VITA_DEBUG_LEVEL_ERROR, "decoder.state",
+            "state=error phase=rewrite_sps source_bytes=%d",
+            decodeUnit->fullLength);
+        return DR_NEED_IDR;
+      }
     } else {
-      memcpy(decoder_buffer+length, entry->data, entry->length);
-      length += entry->length;
+      size_t entry_length = (size_t)entry->length;
+      if ((size_t)length > payload_capacity ||
+          entry_length > payload_capacity - (size_t)length) {
+        vita_debug_event(
+            VITA_DEBUG_LEVEL_ERROR, "decoder.state",
+            "state=error phase=copy_input source_bytes=%d output_bytes=%u",
+            decodeUnit->fullLength, (unsigned int)length);
+        return DR_NEED_IDR;
+      }
+      memcpy(decoder_buffer + length, entry->data, entry_length);
+      length += (uint32_t)entry_length;
     }
     entry = entry->next;
   }
 
+  /* Hardware decoders may read a small distance past the payload. Keep that
+   * region allocated and deterministic after both copies and SPS rewrites. */
+  memset(decoder_buffer + length, 0, AV_INPUT_BUFFER_PADDING_SIZE);
+
   au.es.pBuf = decoder_buffer;
-  au.es.size = decodeUnit->fullLength;
+  au.es.size = length;
   au.dts.lower = 0xFFFFFFFF;
   au.dts.upper = 0xFFFFFFFF;
   au.pts.lower = 0xFFFFFFFF;
@@ -752,22 +792,26 @@ static int vita_submit_decode_unit(PDECODE_UNIT decodeUnit) {
   if (ret < 0) {
     if (collect_diagnostics) {
       ui_diagnostics_record_video_frame(
-          decodeUnit->fullLength, decode_time_us, false);
+          length, decode_time_us, false);
     }
-    uint64_t now_us = sceKernelGetSystemTimeWide();
-    if (last_decoder_error_log_us == 0 ||
-        now_us - last_decoder_error_log_us >=
-            DECODER_ERROR_LOG_INTERVAL_US) {
-      vita_debug_event(
-          VITA_DEBUG_LEVEL_ERROR, "decoder.state",
-          "state=error phase=decode code=0x%08x unit_bytes=%u outputs=%d "
-          "repeats_suppressed=%u",
-          (unsigned int)ret, (unsigned int)decodeUnit->fullLength,
-          array_picture.numOfOutput, suppressed_decoder_errors);
-      last_decoder_error_log_us = now_us;
-      suppressed_decoder_errors = 0;
-    } else {
-      suppressed_decoder_errors++;
+    if (vita_debug_is_logging_enabled()) {
+      uint64_t now_us = sceKernelGetSystemTimeWide();
+      if (last_decoder_error_log_us == 0 ||
+          now_us - last_decoder_error_log_us >=
+              DECODER_ERROR_LOG_INTERVAL_US) {
+        vita_debug_event(
+            VITA_DEBUG_LEVEL_ERROR, "decoder.state",
+            "state=error phase=decode code=0x%08x source_bytes=%u "
+            "unit_bytes=%u outputs=%d "
+            "repeats_suppressed=%u",
+            (unsigned int)ret, (unsigned int)decodeUnit->fullLength,
+            (unsigned int)length, array_picture.numOfOutput,
+            suppressed_decoder_errors);
+        last_decoder_error_log_us = now_us;
+        suppressed_decoder_errors = 0;
+      } else {
+        suppressed_decoder_errors++;
+      }
     }
     pthread_mutex_unlock(&video_render_mutex);
     return DR_NEED_IDR;
@@ -776,7 +820,7 @@ static int vita_submit_decode_unit(PDECODE_UNIT decodeUnit) {
   if (array_picture.numOfOutput != 1) {
     if (collect_diagnostics) {
       ui_diagnostics_record_video_frame(
-          decodeUnit->fullLength, decode_time_us, false);
+          length, decode_time_us, false);
     }
     //printf("numOfOutput %d\n", array_picture.numOfOutput);
     pthread_mutex_unlock(&video_render_mutex);
@@ -787,22 +831,21 @@ static int vita_submit_decode_unit(PDECODE_UNIT decodeUnit) {
   last_video_activity_us = sceKernelGetSystemTimeWide();
   bool presented = false;
 
-  //TODO: Seems silly to decode the unit if we're going to drop the frame?
-  // Find out why we decode or if we even need to
   if (atomic_load_u32(&active_video_thread)) {
-    uint32_t frames_to_drop = atomic_load_u32(&need_drop);
-    if (frames_to_drop > 0) {
-      // skip
-      atomic_sub_u32(&need_drop, 1);
-    } else {
-      draw_stream_surface(true);
-      presented = true;
-    }
+    /* Present each completed hardware-decoded frame immediately. The former
+     * one-second counter dropped an equal number of future frames whenever a
+     * sampling window happened to observe 61+ frames. That was neither frame
+     * pacing nor latency control; it converted harmless timer jitter into
+     * visible stutter. Sunshine already negotiates the requested cadence, and
+     * optional Vita vblank synchronization remains available for users who
+     * prefer tear control over the lowest presentation latency. */
+    draw_stream_surface(true);
+    presented = true;
   }
 
   if (collect_diagnostics) {
     ui_diagnostics_record_video_frame(
-        decodeUnit->fullLength, decode_time_us, presented);
+        length, decode_time_us, presented);
   }
   pthread_mutex_unlock(&video_render_mutex);
 
@@ -815,18 +858,23 @@ static int vita_submit_decode_unit(PDECODE_UNIT decodeUnit) {
 void draw_streaming(vita2d_texture *frame_texture) {
   // ui is still rendering in the background, clear the screen first
   vita2d_clear_screen();
-  vita2d_draw_texture_part(frame_texture,
-                           image_scaling.origin_x,
-                           image_scaling.origin_y,
-                           image_scaling.region_x1,
-                           image_scaling.region_y1,
-                           image_scaling.region_x2,
-                           image_scaling.region_y2);
+  vita2d_draw_texture_part_scale(frame_texture,
+                                 image_scaling.destination_x,
+                                 image_scaling.destination_y,
+                                 image_scaling.source_x,
+                                 image_scaling.source_y,
+                                 image_scaling.source_width,
+                                 image_scaling.source_height,
+                                 image_scaling.scale_x,
+                                 image_scaling.scale_y);
 }
 
 void draw_indicators() {
   if (atomic_load_u32(&poor_net_indicator_requested)) {
-    vita2d_font_draw_text(font, 40, 500, RGBA8(0xFF, 0xFF, 0xFF, poor_net_indicator.alpha), 64, ICON_NETWORK);
+    vita2d_font_draw_text(
+        font, 40, 500,
+        RGBA8(0xFF, 0xFF, 0xFF, poor_net_indicator.alpha),
+        26, "NETWORK");
     poor_net_indicator.alpha += (0x4 * (poor_net_indicator.plus ? 1 : -1));
     if (poor_net_indicator.alpha == 0) {
       poor_net_indicator.plus = !poor_net_indicator.plus;
@@ -838,7 +886,8 @@ void draw_indicators() {
   }
 
   if (dc_tracker.currently_sprinting) {
-    vita2d_font_draw_text(font, 40, 50, RGBA8(0xFF, 0xFF, 0xFF, 0xAA), 48, ICON_SPRINTING);
+    vita2d_font_draw_text(
+        font, 40, 50, RGBA8(0xFF, 0xFF, 0xFF, 0xAA), 28, "RUN");
   }
 
 }
@@ -880,11 +929,15 @@ void vitavideo_request_redraw() {
 }
 
 void vitavideo_show_poor_net_indicator() {
-  atomic_store_u32(&poor_net_indicator_requested, 1);
+  if (atomic_exchange_u32(&poor_net_indicator_requested, 1) == 0) {
+    vitavideo_request_redraw();
+  }
 }
 
 void vitavideo_hide_poor_net_indicator() {
-  atomic_store_u32(&poor_net_indicator_requested, 0);
+  if (atomic_exchange_u32(&poor_net_indicator_requested, 0) != 0) {
+    vitavideo_request_redraw();
+  }
 }
 
 int vitavideo_initialized() {
@@ -895,5 +948,7 @@ DECODER_RENDERER_CALLBACKS decoder_callbacks_vita = {
   .setup = vita_setup,
   .cleanup = vita_cleanup,
   .submitDecodeUnit = vita_submit_decode_unit,
-  .capabilities = CAPABILITY_DIRECT_SUBMIT | CAPABILITY_SLICES_PER_FRAME(2)
+  /* Decode, draw, and buffer swap may block. Keep them off the receive thread
+   * and let moonlight-common's renderer queue absorb short scheduling jitter. */
+  .capabilities = CAPABILITY_SLICES_PER_FRAME(2)
 };

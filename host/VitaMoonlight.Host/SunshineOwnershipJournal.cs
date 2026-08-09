@@ -14,12 +14,24 @@ internal sealed record SunshineOwnedHook(
     string Undo,
     bool Elevated);
 
+internal sealed record SunshineOwnedGlobalHook(
+    string Do,
+    string Undo,
+    bool Elevated);
+
 internal sealed class SunshineOwnedLocation
 {
     public required string ConfigurationDirectory { get; init; }
+    // Older journals predate this discriminator. Their ordinary Program
+    // Files paths are inferred conservatively; the active HostSettings path
+    // is tagged explicitly before a host-mode migration or uninstall.
+    public string? HostMode { get; set; }
     public Dictionary<string, SunshineOwnedValue> Values { get; set; } =
         new(StringComparer.OrdinalIgnoreCase);
     public List<SunshineOwnedHook> Hooks { get; set; } = [];
+    public List<SunshineOwnedGlobalHook> GlobalHooks { get; set; } = [];
+    public bool? GlobalPrepCommandOriginallyPresent { get; set; }
+    public bool? LegacyDisplayOwnershipMigrationCompleted { get; set; }
     public List<string> CreatedApplications { get; set; } = [];
     public bool BackupOwned { get; set; }
     public string? BackupSha256 { get; set; }
@@ -27,12 +39,14 @@ internal sealed class SunshineOwnedLocation
 
 internal sealed class SunshineOwnershipState
 {
-    public int FormatVersion { get; init; } = 1;
+    public int FormatVersion { get; set; } = 2;
     public List<SunshineOwnedLocation> Locations { get; init; } = [];
 }
 
 internal static class SunshineOwnershipJournal
 {
+    internal const int CurrentFormatVersion = 2;
+    internal const int LegacyFormatVersion = 1;
     private const string RegistryPath = @"SOFTWARE\VitaMoonlight\Host";
     private const string RegistryValue = "SunshineOwnership";
     private static readonly JsonSerializerOptions JsonOptions = new()
@@ -64,7 +78,8 @@ internal static class SunshineOwnershipJournal
     {
         var state = JsonSerializer.Deserialize<SunshineOwnershipState>(json, JsonOptions)
             ?? throw new InvalidDataException("The Sunshine ownership journal is empty.");
-        if (state.FormatVersion != 1)
+        if (state.FormatVersion is not (
+                LegacyFormatVersion or CurrentFormatVersion))
         {
             throw new InvalidDataException(
                 $"Unsupported Sunshine ownership journal version {state.FormatVersion}.");
@@ -74,8 +89,19 @@ internal static class SunshineOwnershipJournal
             location.Values = new Dictionary<string, SunshineOwnedValue>(
                 location.Values,
                 StringComparer.OrdinalIgnoreCase);
+            location.Hooks ??= [];
+            location.GlobalHooks ??= [];
+            location.CreatedApplications ??= [];
         }
         return state;
+    }
+
+    internal static void UpgradeFormat(SunshineOwnershipState state)
+    {
+        if (state.FormatVersion == LegacyFormatVersion)
+        {
+            state.FormatVersion = CurrentFormatVersion;
+        }
     }
 
     internal static void Save(SunshineOwnershipState state)
@@ -98,6 +124,22 @@ internal static class SunshineOwnershipJournal
             RegistryValue,
             JsonSerializer.Serialize(state, JsonOptions),
             RegistryValueKind.String);
+    }
+
+    internal static SunshineOwnershipState Clone(
+        SunshineOwnershipState state) =>
+        Deserialize(JsonSerializer.Serialize(state, JsonOptions));
+
+    internal static void Replace(SunshineOwnershipState state)
+    {
+        if (state.Locations.Count == 0)
+        {
+            Delete();
+        }
+        else
+        {
+            Save(state);
+        }
     }
 
     internal static void Delete()
@@ -132,8 +174,10 @@ internal static class SunshineOwnershipJournal
 
     internal static SunshineOwnedLocation GetOrAddLocation(
         SunshineOwnershipState state,
-        string configurationDirectory)
+        string configurationDirectory,
+        string hostMode = "sunshine")
     {
+        hostMode = NormalizeHostMode(hostMode);
         var normalized = Path.GetFullPath(configurationDirectory)
             .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
         var existing = state.Locations.FirstOrDefault(location =>
@@ -142,13 +186,78 @@ internal static class SunshineOwnershipJournal
                     .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
                 normalized,
                 StringComparison.OrdinalIgnoreCase));
-        if (existing is not null) return existing;
+        if (existing is not null)
+        {
+            existing.HostMode = hostMode;
+            return existing;
+        }
         var created = new SunshineOwnedLocation
         {
             ConfigurationDirectory = normalized,
+            HostMode = hostMode,
+            LegacyDisplayOwnershipMigrationCompleted =
+                state.FormatVersion == CurrentFormatVersion
+                    ? true
+                    : null,
         };
         state.Locations.Add(created);
         return created;
+    }
+
+    internal static bool HasLocationForHost(
+        SunshineOwnershipState state,
+        string hostMode) =>
+        state.Locations.Any(location => LocationMatchesHost(location, hostMode));
+
+    internal static bool LocationMatchesHost(
+        SunshineOwnedLocation location,
+        string hostMode)
+    {
+        var expected = NormalizeHostMode(hostMode);
+        var recorded = string.IsNullOrWhiteSpace(location.HostMode)
+            ? InferLegacyHostMode(location.ConfigurationDirectory)
+            : NormalizeHostMode(location.HostMode);
+        return string.Equals(recorded, expected, StringComparison.Ordinal);
+    }
+
+    internal static bool TagExistingLocation(
+        SunshineOwnershipState state,
+        string configurationDirectory,
+        string hostMode)
+    {
+        var normalized = Path.GetFullPath(configurationDirectory)
+            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var location = state.Locations.FirstOrDefault(candidate =>
+            string.Equals(
+                Path.GetFullPath(candidate.ConfigurationDirectory)
+                    .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+                normalized,
+                StringComparison.OrdinalIgnoreCase));
+        if (location is null) return false;
+        location.HostMode = NormalizeHostMode(hostMode);
+        return true;
+    }
+
+    private static string InferLegacyHostMode(string configurationDirectory)
+    {
+        var components = Path.GetFullPath(configurationDirectory)
+            .Split(
+                [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
+                StringSplitOptions.RemoveEmptyEntries);
+        return components.Any(component => component.Equals(
+            "Apollo",
+            StringComparison.OrdinalIgnoreCase))
+            ? "apollo"
+            : "sunshine";
+    }
+
+    private static string NormalizeHostMode(string? hostMode)
+    {
+        var normalized = hostMode?.Trim().ToLowerInvariant();
+        return normalized is "sunshine" or "apollo"
+            ? normalized
+            : throw new InvalidDataException(
+                "Streaming-host ownership must identify Sunshine or Apollo.");
     }
 
     internal static string ValidateConfigurationDirectory(string path)

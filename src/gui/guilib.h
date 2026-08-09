@@ -7,11 +7,11 @@
 #define WIDTH 960
 #define HEIGHT 544
 
-#define ICON_LEFT_ARROW   "\xef\x95\x8c"
-#define ICON_RIGHT_ARROW  "\xef\x95\x93"
-#define ICON_LEFT_RIGHT_ARROWS ICON_LEFT_ARROW ICON_RIGHT_ARROW
-#define ICON_NETWORK      "\xef\xa6\x8c"
-#define ICON_SPRINTING    "\xeF\xa5\xaD"
+/* Keep UI affordances in ordinary ASCII so the app can use an unpatched,
+ * single-license font instead of a multi-source icon-font bundle. */
+#define ICON_LEFT_ARROW   "<"
+#define ICON_RIGHT_ARROW  ">"
+#define ICON_LEFT_RIGHT_ARROWS "< >"
 
 
 typedef struct menu_entry {

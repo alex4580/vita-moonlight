@@ -15,6 +15,22 @@ unless you are reproducing a problem. During a capture, entries are buffered
 and written in batches rather than forcing a storage write for every event. A
 capture never remains enabled across an app restart.
 
+With the performance overlay off, the diagnostics screen closed, and support
+capture stopped, the Vita also disables optional FPS aggregation, extended
+decode/transport counters, and diagnostic snapshots. It does not count gyro
+or controller reports. Gyro sampling itself still runs when the user selects a
+gyro-capable controller profile and the host requests motion reports, because
+those reports are game input rather than diagnostics.
+
+The supported Windows all-app handoff also does not force Sunshine to INFO,
+tail `sunshine.log`, or parse global client events. Its authenticated stream
+generation, sparse heartbeat lease, matching stop, and exact Sunshine-process
+exit are the recovery signals. Setup preserves the user's Sunshine log level;
+an upgrade from a release that previously owned `min_log_level = info` restores
+the exact recorded prior value. Sunshine logging can still be enabled manually
+for a specific Sunshine investigation, but it is not required for ordinary
+streaming or display recovery.
+
 ## Create a clean Vita log
 
 1. First write down:
@@ -151,6 +167,23 @@ decoder state, network aggregates, actions, warnings, errors, session
 boundaries, and malformed or missing records. It does not reproduce raw legacy
 messages, unknown values, arbitrary filenames, or local paths.
 
+Logs created by older beta builds did not contain `vita-support-v1` records.
+The same command also recognizes their exact `[PERF]` lines and known
+Moonlight network, audio, video, and recovery messages. Legacy results are a
+whole-file aggregate because those logs have no reliable session boundaries.
+They include FPS, bitrate, decode time, RTT, frame/packet totals, network-state
+counts, and fixed recovery-event counters. The parser accepts only complete,
+known line formats and fixed numeric fields. It discards the original text,
+suppresses known touch/input lines, and ignores every other legacy message;
+it never copies IP addresses, host names, paths, pairing material, typed text,
+or arbitrary event content into either summary format.
+
+`recognized_line_count` in the optional `legacy_summary` section is the number
+of old lines that contributed to safe aggregates. `suppressed_input_line_count`
+shows known noisy input lines that were deliberately not parsed, while
+`unrecognized_line_count` shows all other old free-form lines that were
+discarded. These counts do not mean the raw legacy file is safe to publish.
+
 Review either output before sharing. The summarizer reduces accidental
 disclosure; it cannot prove that every future value is harmless.
 
@@ -170,9 +203,88 @@ controller state, display inventory, SDR/display-lifecycle configuration,
 recovery status, rescue shortcuts, and the current recommendation. It is
 designed to be machine-readable across reports from many testers.
 
+For a Pause/Enable comparison, save one report before Pause, one after the
+paused PC restarts, and one after Enable. Compare these exact schema-version 3
+fields:
+
+| What to compare | JSON fields | Expected result |
+|---|---|---|
+| Requested lifecycle | `backendStatus`, `backendDesiredState`, `backendPreferencePersisted` | `Enabled` before, `Disabled` while paused, then `Enabled`; the preference is persisted after the first lifecycle choice. |
+| Recovery safeguards | `recoveryTaskStatus`, `rescueAgentTaskStatus`, `rescueAgentRunning` | Healthy Enabled reports use `Present`, `Present`, `true`; a complete Pause uses `Missing`, `Missing`, `false`; Enable restores the baseline. `Unknown` is a failed inspection, not the same as missing. |
+| Interactive task account | `scheduledTaskAccountReady` | `true` means the elevated process belongs to the interactive streaming account. `false` explains a setup/repair block caused by SYSTEM, a disconnected session, or different-account UAC without exposing either account name. |
+| Managed Vita display | `backendManagedVddDeviceCount`, `backendManagedVddEnabledCount`, `backendManagedVddActive` | Healthy Enabled + Idle and Paused both keep the installed device count, report enabled count `0`, and keep the exact device PnP-disabled. An authenticated Vita preflight enables it for launch or resume; the matching stop returns it to `0`. |
+| Physical safety | `backendActivePhysicalDisplayCount`, `recoveryPending` | At least one active physical display and no pending transaction are expected while idle or paused. |
+| Shared host identity | `hostMode`, `sunshineInstalled`, `sunshineVersion` | These values must not change across Pause/Enable. |
+
+The support report deliberately does not claim whether a shared Sunshine or
+Apollo service is currently running or how it starts with Windows. For a
+community Pause test, also note whether the already-open Sunshine web page was
+reachable before Pause and remains reachable afterward. Pause controls only
+Vita-owned host features; it is not a network-access control.
+
 When the control panel is still open, **Copy technical details** copies the
 most recent health or support output. Use that for a short issue description;
 prefer the saved JSON report when comparing multiple PCs.
+
+## Read the sparse Windows rescue records
+
+The Windows companion keeps a small action record for display rescue,
+emergency hotkeys, authenticated stream boundaries, and sleep/resume
+decisions. This is separate from the optional Vita support log. It does not
+sample input, continuously record a stream, or continuously tail Sunshine
+while Enabled + Idle. Sunshine lifecycle observation is a fallback only while
+a display transaction may need recovery after an abrupt disconnect or crash.
+
+Open it without a terminal:
+
+1. Open **Vita Moonlight Host**.
+2. Choose **Diagnostics & support > Open diagnostics folder**.
+3. Open `stream-rescue.log` in Notepad. Use the timestamp of the test to find
+   the relevant lines.
+
+The installed folder is normally:
+
+```text
+C:\Program Files\Vita Moonlight Host\state\Diagnostics
+```
+
+Each `stream-rescue.log` line has four tab-separated fields:
+
+```text
+UTC timestamp    action    True/False    summary
+```
+
+For a sleep/resume test, first confirm the physical monitor has its normal mode
+and window placement and the managed device is PnP-disabled. Expect a successful
+`power-suspend-display-prepare` line followed after wake by either a successful
+`resume-display-check:` decision or a successful `recover-display-host` action
+whose summary says it was triggered by resume. A `resume-display-check:`
+summary includes:
+
+- `physical=`: active physical display count;
+- `managed Vita VDD=`: active managed virtual-display count;
+- `restored physical modes=`: how many persisted physical modes were applied;
+- `mode-repair warnings=`: warning count and, when nonzero, bracketed warning
+  codes; and
+- `session pending=`: whether a display transaction still exists.
+
+A `recover-display-host` summary instead lists the recovery steps that ran,
+including the resume trigger, physical-display activation, VDD reload when
+needed, and shared-host restart when it was already running.
+
+`stream-rescue-status.json` is an overwrite-in-place snapshot of only the
+latest rescue result. Use `stream-rescue.log` when event order matters. The
+sparse log is capped at roughly 512 KiB and resets with a rotation record when
+that cap is reached.
+
+After wake, the physical layout and window sizes/positions should match the
+pre-sleep baseline, Windows should be normally responsive, no recovery
+transaction should remain, and the managed device should again be PnP-disabled.
+
+These files can contain display names and Windows error details. Review and
+redact them before sharing, just as you would a support report. Do not confuse
+their existence with Vita support logging: the Vita `moonlight.log` remains
+off unless the user explicitly starts a capture.
 
 ## Capture only what the issue needs
 

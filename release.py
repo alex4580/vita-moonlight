@@ -165,6 +165,11 @@ def main() -> int:
     )
     replace_required(
         "host/VitaMoonlight.Host/VitaMoonlight.Host.csproj",
+        r"<InformationalVersion>[^<]+</InformationalVersion>",
+        f"<InformationalVersion>{version}</InformationalVersion>",
+    )
+    replace_required(
+        "host/VitaMoonlight.Host/VitaMoonlight.Host.csproj",
         r"<AssemblyVersion>[^<]+</AssemblyVersion>",
         f"<AssemblyVersion>{assembly_version}</AssemblyVersion>",
     )

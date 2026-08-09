@@ -5,6 +5,18 @@ on:
     branches: [vita]
     paths:
       - "host/**"
+      - "protocol/**"
+      - "src/config.c"
+      - "src/gui/ui_connect.c"
+      - "src/gui/ui_settings.c"
+      - "src/gui/ui_stream_overlay.c"
+      - "libgamestream/client.c"
+      - "libgamestream/client.h"
+      - "libgamestream/http.c"
+      - "libgamestream/http.h"
+      - "libgamestream/bridge_protocol.c"
+      - "libgamestream/bridge_protocol.h"
+      - "tests/stream_boundary_protocol_test.c"
       - "CMakeLists.txt"
       - "CHANGELOG.md"
       - "README.md"
@@ -21,6 +33,9 @@ on:
       - "resources/changeinfo.xml"
       - "sce_sys/livearea/contents/template.xml"
       - "tools/check-version-consistency.py"
+      - "tools/check-release-contract.py"
+      - "tools/check-host-client-contract.py"
+      - "tools/check-windows-upgrade-contract.py"
       - "tools/summarize-vita-log.py"
       - ".github/workflows/release.yml"
       - ".github/workflows/windows-host.yml"
@@ -28,6 +43,18 @@ on:
     branches: [vita]
     paths:
       - "host/**"
+      - "protocol/**"
+      - "src/config.c"
+      - "src/gui/ui_connect.c"
+      - "src/gui/ui_settings.c"
+      - "src/gui/ui_stream_overlay.c"
+      - "libgamestream/client.c"
+      - "libgamestream/client.h"
+      - "libgamestream/http.c"
+      - "libgamestream/http.h"
+      - "libgamestream/bridge_protocol.c"
+      - "libgamestream/bridge_protocol.h"
+      - "tests/stream_boundary_protocol_test.c"
       - "CMakeLists.txt"
       - "CHANGELOG.md"
       - "README.md"
@@ -44,6 +71,9 @@ on:
       - "resources/changeinfo.xml"
       - "sce_sys/livearea/contents/template.xml"
       - "tools/check-version-consistency.py"
+      - "tools/check-release-contract.py"
+      - "tools/check-host-client-contract.py"
+      - "tools/check-windows-upgrade-contract.py"
       - "tools/summarize-vita-log.py"
       - ".github/workflows/release.yml"
       - ".github/workflows/windows-host.yml"
@@ -77,6 +107,12 @@ jobs:
           python-version: "3.x"
       - name: Verify release version consistency
         run: python tools/check-version-consistency.py
+      - name: Verify release packaging and policy contract
+        run: python tools/check-release-contract.py
+      - name: Verify Vita/host compatibility contract
+        run: python tools/check-host-client-contract.py
+      - name: Verify safe in-place upgrade contract
+        run: python tools/check-windows-upgrade-contract.py
       - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           dotnet-version: "8.0.423"
@@ -84,12 +120,14 @@ jobs:
         run: dotnet build host/VitaMoonlight.Host/VitaMoonlight.Host.csproj --configuration Release
       - name: Portable logic self-test
         run: dotnet run --project host/VitaMoonlight.Host/VitaMoonlight.Host.csproj --configuration Release --no-build -- self-test
+      - name: Install and upgrade cleanup contract tests
+        run: dotnet run --project host/VitaMoonlight.Host.ContractTests/VitaMoonlight.Host.ContractTests.csproj --configuration Release
 
   build:
     runs-on: windows-2025
     env:
       IS_TAGGED_RELEASE: ${{ startsWith(github.ref, 'refs/tags/v') }}
-      IS_UNSIGNED_BOOTSTRAP: ${{ github.repository == 'alex4580/vita-moonlight' && github.ref == 'refs/tags/v0.14.6-beta.1' }}
+      IS_UNSIGNED_BETA_PREVIEW: ${{ github.repository == 'alex4580/vita-moonlight' && github.ref == 'refs/tags/v0.14.8-beta.1' }}
       HAS_WINDOWS_CERTIFICATE_DATA: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 != '' }}
       HAS_WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD != '' }}
       HAS_WINDOWS_EXPECTED_SIGNER_SUBJECT: ${{ secrets.WINDOWS_EXPECTED_SIGNER_SUBJECT != '' }}
@@ -107,6 +145,12 @@ jobs:
           python-version: "3.x"
       - name: Verify release version consistency
         run: python tools/check-version-consistency.py
+      - name: Verify release packaging and policy contract
+        run: python tools/check-release-contract.py
+      - name: Verify Vita/host compatibility contract
+        run: python tools/check-host-client-contract.py
+      - name: Verify safe in-place upgrade contract
+        run: python tools/check-windows-upgrade-contract.py
       - name: Select Windows release signing mode
         if: env.IS_TAGGED_RELEASE == 'true'
         shell: pwsh
@@ -114,32 +158,32 @@ jobs:
           if ($env:HAS_WINDOWS_CERTIFICATE_DATA -ne $env:HAS_WINDOWS_CERTIFICATE_PASSWORD) {
             throw 'Windows signing configuration is incomplete: configure both certificate secrets or neither.'
           }
-          if ($env:IS_UNSIGNED_BOOTSTRAP -eq 'true') {
+          if ($env:IS_UNSIGNED_BETA_PREVIEW -eq 'true') {
             if ($env:GITHUB_REPOSITORY -ne 'alex4580/vita-moonlight' -or
-                $env:GITHUB_REF -ne 'refs/tags/v0.14.6-beta.1') {
-              throw 'Unsigned-bootstrap context validation failed.'
+                $env:GITHUB_REF -ne 'refs/tags/v0.14.8-beta.1') {
+              throw 'Unsigned beta-preview context validation failed.'
             }
             if ($env:HAS_WINDOWS_CERTIFICATE_DATA -eq 'true' -or
                 $env:HAS_WINDOWS_CERTIFICATE_PASSWORD -eq 'true' -or
                 $env:HAS_WINDOWS_EXPECTED_SIGNER_SUBJECT -eq 'true') {
-              throw 'The one-time unsigned bootstrap must not receive Windows signing secrets.'
+              throw 'The explicitly unsigned beta preview must not receive Windows signing secrets.'
             }
             $projectText = Get-Content -LiteralPath host/VitaMoonlight.Host/VitaMoonlight.Host.csproj -Raw
             $versionMatch = [regex]::Match($projectText, '<Version>([^<]+)</Version>')
-            if (-not $versionMatch.Success -or $versionMatch.Groups[1].Value -ne '0.14.6') {
-              throw 'The unsigned bootstrap is restricted to project version 0.14.6.'
+            if (-not $versionMatch.Success -or $versionMatch.Groups[1].Value -ne '0.14.8') {
+              throw 'The unsigned beta preview is restricted to project version 0.14.8.'
             }
-            Write-Warning 'v0.14.6-beta.1 will be published unsigned. Windows will identify it as an unknown publisher.'
+            Write-Warning 'v0.14.8-beta.1 will be published unsigned. Windows will identify it as an unknown publisher.'
             @(
               '## Windows signing mode'
               ''
-              'This one-time bootstrap beta is intentionally **unsigned**. The release'
+              'This exact beta preview is intentionally **unsigned**. The release'
               'workflow must add an Unknown publisher / SmartScreen warning and publish'
               'the signing-status manifest, checksums, and GitHub provenance attestations.'
             ) | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
           }
           elseif ($env:HAS_WINDOWS_SIGNING_CERTIFICATE -ne 'true') {
-            throw 'Every tagged release except v0.14.6-beta.1 requires both Windows signing certificate secrets.'
+            throw 'Every tagged release except v0.14.8-beta.1 requires both Windows signing certificate secrets.'
           }
           elseif ($env:HAS_WINDOWS_EXPECTED_SIGNER_SUBJECT -ne 'true') {
             throw 'Signed releases require WINDOWS_EXPECTED_SIGNER_SUBJECT.'
@@ -154,6 +198,8 @@ jobs:
         run: dotnet build host/VitaMoonlight.Host/VitaMoonlight.Host.csproj --configuration Release
       - name: Self-test
         run: dotnet run --project host/VitaMoonlight.Host/VitaMoonlight.Host.csproj --configuration Release --no-build -- self-test
+      - name: Install and upgrade cleanup contract tests
+        run: dotnet run --project host/VitaMoonlight.Host.ContractTests/VitaMoonlight.Host.ContractTests.csproj --configuration Release
       - name: Publish
         run: dotnet publish host/VitaMoonlight.Host/VitaMoonlight.Host.csproj --configuration Release --runtime win-x64 --self-contained true -p:PublishSingleFile=true -p:DebugType=None -p:DebugSymbols=false --output artifacts/host
       - name: Restore host signing certificate
@@ -417,8 +463,8 @@ jobs:
             }
             mode = if ($isSigned) {
               'signed-release'
-            } elseif ($env:IS_UNSIGNED_BOOTSTRAP -eq 'true') {
-              'unsigned-bootstrap'
+            } elseif ($env:IS_UNSIGNED_BETA_PREVIEW -eq 'true') {
+              'unsigned-beta-preview'
             } else {
               'development-build'
             }
@@ -436,14 +482,17 @@ jobs:
       - name: Build portable archive
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Path artifacts/portable/tools,artifacts/portable/host,artifacts/portable/docs -Force | Out-Null
+          New-Item -ItemType Directory -Path artifacts/portable/tools,artifacts/portable/host,artifacts/portable/docs,artifacts/portable/licenses/vita -Force | Out-Null
           Copy-Item artifacts/host/* artifacts/portable -Recurse -Force
           Copy-Item artifacts/displaywizard artifacts/portable/tools/DisplayWizard -Recurse -Force
           Copy-Item artifacts/vigembus artifacts/portable/tools/ViGEmBus -Recurse -Force
           Copy-Item artifacts/sunshine artifacts/portable/tools/Sunshine -Recurse -Force
           New-Item -ItemType Directory -Path artifacts/portable/tools/SupportLog -Force | Out-Null
           Copy-Item tools/summarize-vita-log.py artifacts/portable/tools/SupportLog -Force
-          Copy-Item README.md,PRIVACY.md,LICENSE artifacts/portable -Force
+          Copy-Item README.md,PRIVACY.md,LICENSE,THIRD_PARTY_NOTICES.txt artifacts/portable -Force
+          Copy-Item licenses/vita/* artifacts/portable/licenses/vita -Force
+          Copy-Item third_party/h264bitstream/LICENSE artifacts/portable/licenses/vita/LGPL-2.1-h264bitstream.txt -Force
+          Copy-Item assets/LICENSE-Mononoki.txt artifacts/portable/licenses/vita/OFL-Mononoki.txt -Force
           Copy-Item artifacts/installer/windows-signing-status.json artifacts/portable -Force
           Copy-Item host/README.md,host/BETA_SMOKE_TEST.md,host/END_TO_END_TEST.md,host/FINAL_RELEASE_CHECKLIST.md,host/COMPATIBILITY.md,host/THIRD_PARTY_NOTICES.md artifacts/portable/host -Force
           Copy-Item docs/BUILDING.md,docs/COMMUNITY_TESTING.md,docs/LOGGING_AND_SUPPORT.md,docs/RELEASING.md,docs/CODE_SIGNING_POLICY.md,docs/VITA_SETTINGS_GUIDE.md artifacts/portable/docs -Force

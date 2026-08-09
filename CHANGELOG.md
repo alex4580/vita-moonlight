@@ -1,3 +1,195 @@
+## 0.14.8
+
+* Fixed the Windows TLS representation of Sunshine's PEM private key. On
+  affected Windows 11 builds the certificate reported a private key but
+  Schannel rejected every bridge handshake with `SEC_E_NO_CREDENTIALS`. The
+  rescue agent now uses a disposable current-user key container and completes
+  a bounded loopback TLS handshake before it reports ready.
+* Fixed in-place repair of older hosts whose missing managed firewall rule was
+  surfaced by Windows as `FileNotFoundException` (`0x80070002`). Pre-copy
+  safeguard shutdown and cancel rollback now run through the current host
+  embedded in Setup, never the executable being replaced, while remaining
+  bound to the live maintenance owner, exact Program Files path, scheduled-task
+  principal, and owned firewall rule.
+* Replaced front-corner hit-test buttons with deterministic tap gestures. A
+  mapped action now requires one short stationary touch; swipes, drags, holds,
+  and multitouch pass through to relative mouse, absolute mouse, DS4 touchpad,
+  or Sunshine tablet mode until all fingers lift. The graphical tap-zone
+  mapper is now the single enable/configuration authority.
+* Moved local stream-menu and keyboard chords to SELECT-led sequences. START
+  is no longer buffered by local shortcut detection and reaches the streamed
+  controller immediately; holding SELECT first keeps every member of a
+  completed SELECT+L+R or SELECT+Left chord local.
+* Ordered stream teardown behind Moonlight's media-worker completion barrier,
+  fixing the crash that could occur when Sunshine ended an application while
+  the Vita UI was returning to its menus.
+* The host now records the exact pre-stream Windows default render endpoints.
+  After restoring the physical display it waits boundedly for those same
+  endpoints, reapplies only them, and keeps a protected retry record across
+  monitor sleep when DisplayPort/HDMI audio is not available yet.
+* Fixed the idle virtual display remaining PnP-available after a stream. When a
+  physical monitor entered standby before Windows sleep, Windows could promote
+  the 960x544 target, resize or relocate open windows, and leave DWM/display
+  recovery sluggish after wake. Enabled + Idle now means the exact physical
+  layout is active and the managed display device is stopped; startup, normal
+  disconnect, abrupt loss, suspend, upgrade, Pause, and uninstall all reconcile
+  that invariant with bounded recovery.
+* Added a mutually authenticated Vita-to-companion stream boundary. The paired
+  Vita arms the exact display before both Sunshine launch and resume, receives
+  an unguessable generation token, starts a short certificate-bound heartbeat
+  lease after Sunshine accepts the app, and uses that token to restore the
+  saved layout. Other Moonlight clients cannot arm or retain the Vita display
+  by merely using the same resolution or sharing Sunshine. Exact lease expiry
+  is the abrupt-loss authority; Sunshine exit and a proven zero-session event
+  can only accelerate recovery.
+* Made repair normalize existing VDD installations instead of assuming a clean
+  PC: one virtual monitor is retained and driver logging/debug logging are off.
+  Upgrade and uninstall also remove only exact obsolete Vita-owned payload and
+  legacy state names while preserving unknown user files and shared software.
+* Kept a saved computer visible when Sunshine revokes or forgets the Vita.
+  The pinned HTTPS probe now treats Sunshine's exact unauthorised response as
+  **Pairing required**, falls back only to public discovery metadata, and
+  preserves every other certificate or transport failure as a hard error.
+* Fixed the Vita pairing retry path that could authorize the client in
+  Sunshine but leave the real saved-computer entry unpaired or hidden until a
+  restart. Failed and cancelled attempts now remain visible as **Pairing
+  required**, successful pairing is committed before the app continues, and
+  journaled device storage survives an interrupted write.
+* Fixed upgrades that could create a new empty data folder before checking the
+  Vita's historical storage locations, making existing computers appear to
+  disappear. Startup now inventories every supported legacy/current root
+  first, reuses one authoritative writable store, and refuses to merge
+  ambiguous pairing identities.
+* Fixed the in-stream Vita keyboard to read `UPDATE_TEXT` from the correct IME
+  union member, reserve its terminator, and return directly to live video.
+  Native event vectors now cover characters, Backspace, arrows, Enter, close,
+  and the initial sentinel update without logging typed text.
+* Corrected native-aspect rendering so 960x544 fills the Vita panel, 960x540
+  produces only the expected two-pixel top and bottom bars, and crop/fill never
+  samples outside the hardware decoder texture.
+* Isolated every PIN attempt with a fresh Sunshine pairing session identity and
+  kept the final certificate-pinned pairing challenge authoritative. Aborted
+  attempts can be retried without inheriting stale Sunshine session state.
+* Reworked discovery and saved-host health checks around one owned worker,
+  bounded probes, offline backoff, and stable saved identities. Idle or
+  unpaired entries no longer create a permanent polling load, and worker
+  shutdown is joined before pairing, suspension, or exit.
+* Hardened Vita configuration, connection, input, motion, and power lifecycles
+  so partial startup and reconnect failures clean up in reverse order,
+  shortcuts remain local, released inputs cannot stick, and optional support
+  logging remains off until the user starts a capture.
+* Removed the legacy one-second "frame pacer" that converted harmless timer
+  jitter into drops of future decoded frames. Completed frames now present
+  immediately for lower latency and smoother motion; optional Vita vblank
+  synchronization remains available for tear control.
+* Restored the Vita network pool to 4 MiB so Moonlight's 2.13 MiB video receive
+  buffer fits without silently stepping down, while retaining nearly 2 MiB for
+  audio, control, discovery, and allocator overhead. No bitrate, resolution,
+  packet-size, FEC, or image-quality reduction was made.
+* Made the authenticated Vita preflight authoritative for managed Sunshine
+  sessions and removed the misleading client switch that could leave the
+  physical desktop selected after choosing a Vita resolution.
+* Made in-stream display changes reconnect through the ordinary GameStream
+  launch-mode contract without sending F8-F10 or adding a pre-disconnect delay.
+  The host now registers and requires those legacy mode keys only for an
+  explicitly selected single-application fallback; default installs reserve
+  only the F11 physical-display recovery chord.
+* Fixed discovery-menu refresh bookkeeping for an empty result list and when
+  the newest discovered computer is already paired.
+* Made Vita packages optimized Release builds by default while preserving the
+  Vita platform definition across every bundled dependency.
+* Tightened Windows virtual-display selection and recovery. Automatic setup
+  selects exactly one managed MTT display, rejects legacy or duplicate device
+  ambiguity, preserves the exact physical baseline, and returns the device to
+  PnP-disabled idle after any verification or recovery attempt.
+* Added a fail-closed installer and emergency bootstrap for a broken older
+  installation that exposes only one active managed MTT display. It rescans
+  first, may restart only that exact enabled device while backend features are
+  enabled, and refuses to replace files or clear safeguards until Windows
+  proves a physical-only layout.
+* Made the public Windows path unambiguous: Sunshine always installs with the
+  required managed Vita display. Apollo is preserved but removed from the
+  installer and GUI until separately qualified; its retained experimental CLI
+  path requires an explicit display match.
+* Removed the host-side F12 foreground-process termination shortcut. A Vita can
+  now open Windows Task Manager through ordinary Moonlight input, while ending
+  a Sunshine application continues to use GameStream's authenticated quit-app
+  request.
+* Bound recovery tasks to the actual interactive streaming account. Setup,
+  repair, and Enable reject different-account UAC before mutation, task
+  definitions are verified as interactive/highest after creation, and
+  uninstall remains available to another Administrator after exact action
+  ownership checks.
+* Made Sunshine application/configuration updates rollback together on normal
+  failure and restart safely after interruption. Backup ownership is published
+  before file creation, and legacy Apollo hooks are removed only when unchanged
+  and after Apollo has exited.
+* Expanded release-contract checks and first-time community instructions for
+  clean install, in-place upgrade, same-version repair, Vita reinstall,
+  interrupted pairing retry, Pause/Enable, and safe shared-component retention
+  or exact-device release during uninstall.
+* Replaced the unlicensed mDNS submodule and opaque Vita dependency packages
+  with project-owned, hash-locked clean-room/source recipes and corresponding-
+  source packaging. Vita discovery, TLS, media, font, compression, and audio
+  dependencies are now reproducible from reviewed upstream source inputs.
+* Moved the deliberately unsigned Windows preview exception to the exact
+  `v0.14.8-beta.1` tag. The workflow verifies its Unknown-publisher status,
+  paired artifact identity, SHA-256 manifest, and GitHub provenance; every
+  other public tag remains signing-required.
+
+## 0.14.7
+
+* Fixed Vita connections to current Sunshine builds whose bounded `appversion`
+  contains the legitimate signed build sentinel used by `7.1.431.-1`. Invalid
+  server numeric data now identifies the exact field instead of reporting a
+  generic numeric-field error.
+* Restored Sunshine PIN pairing on Vita by replacing the embedded-runtime-
+  dependent `%hhx` certificate conversion with a strict ASCII hex decoder.
+  The decoder accepts only exact upper- or lowercase hex and permanently tests
+  Sunshine's PEM certificate envelope while rejecting odd or decorated input.
+* Added a machine-checked Vita/host compatibility contract. Vita requests are
+  limited to 960x544, 960x540, or 1280x720 at 24/30/40/50/60 FPS while the
+  Windows virtual desktop remains at a driver-safe 60 Hz. Native Sunshine
+  display management covers all apps; the tolerant hook remains only for the
+  legacy single-application fallback.
+* Secured Vita-to-Sunshine HTTPS with a certificate pin established by the PIN
+  exchange. Upgrades preserve valid unique client identities; the historical
+  shared identity is replaced only during the required one-time migration when
+  no authenticated host pin exists. Fresh installs generate a unique identity,
+  all cryptographic randomness is checked, and optional HTTP diagnostics no
+  longer print pairing secrets or response bodies.
+* Removed blocking direct-submit audio/video callbacks from Moonlight's network
+  receive path, bounded SPS rewriting, disabled incompatible H.264 reference-
+  frame invalidation, and pinned the Vita-tested Moonlight common transport
+  fixes at `07c32c80f98bb0d7214c577bd080eea3ce64a856`.
+* Bounded untrusted Sunshine XML, App lists, mode lists, and UI strings; fixed
+  empty-list menu indexing and optional legacy-host fields; and made failed
+  decoder, audio, motion, pairing, and reconnect lifecycles safe to retry.
+* Made gyro sampling lazy and host-driven. No motion worker runs outside a
+  compatible PS/DS4 stream, one 64 KiB event-driven worker replaces two
+  permanent polling workers, and sensor setup failures no longer trap startup.
+* Added a durable, reversible **Pause Vita host features** lifecycle that restores
+  the physical desktop, disables Vita background tasks and the managed VDD,
+  while leaving shared Sunshine/Apollo installed and reachable. Clients pinned
+  to the paused Vita VDD may need a physical host output. Enable restores only
+  the previously present Vita safeguards, and upgrades preserve pause.
+* Added pre-sleep physical-display preparation and bounded post-resume
+  topology/mode recovery so interrupted streams cannot strand Windows on a
+  Vita-only, physical-plus-VDD, 800x600, or Vita-sized layout after wake.
+* Made clean installs, upgrades, and repairs exclusive and crash-resumable.
+  Setup preserves the original paused/enabled intent and exact recovery-task
+  obligations across a killed installer, then restores them before clearing
+  its protected maintenance fence.
+* Fixed in-place upgrades from older beta hosts that predate the
+  `uninstall prepare` command. The installer now relies on its embedded current
+  maintenance helper's already-completed physical-display safety check instead
+  of asking the legacy installed executable to run a command it does not have.
+* Hardened uninstall with exact Task Scheduler COM verification, a second
+  physical-display safety gate, rollback of recovery safeguards on failure,
+  and allowlisted cleanup of current and legacy Vita-owned state.
+* Expanded privacy-safe support reports with backend issue categories, exact
+  task states, managed-VDD state, and active display resolution/refresh data.
+
 ## 0.14.6
 
 * Removed obsolete Circle/O transition counters from real-time diagnostics.
@@ -43,8 +235,8 @@
   support report, and packaged the matching user, testing, logging, build, and
   release documentation with both Windows distributions.
 * **Code signing policy:** see the
-  [public policy](https://github.com/alex4580/vita-moonlight/blob/vita/docs/CODE_SIGNING_POLICY.md)
-  and [privacy disclosure](https://github.com/alex4580/vita-moonlight/blob/vita/PRIVACY.md).
+  [public policy](docs/CODE_SIGNING_POLICY.md)
+  and [privacy disclosure](PRIVACY.md).
 
 ## 0.14.5
 

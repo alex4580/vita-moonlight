@@ -21,6 +21,8 @@
 
 #include "h264_stream.h"
 
+#include <string.h>
+
 static h264_stream_t* h264_stream;
 static int initial_width, initial_height;
 
@@ -37,10 +39,34 @@ void gs_sps_stop() {
   }
 }
 
-void gs_sps_fix(PLENTRY sps, int flags, uint8_t* out_buf, uint32_t* out_offset) {
-  int start_len = sps->data[2] == 0x01 ? 3 : 4;
+bool gs_sps_fix(PLENTRY sps, int flags, uint8_t* out_buf,
+                size_t out_capacity, uint32_t* out_offset) {
+  if (h264_stream == NULL || sps == NULL || sps->data == NULL ||
+      out_buf == NULL || out_offset == NULL || sps->length < 4) {
+    return false;
+  }
 
-  read_nal_unit(h264_stream, sps->data+start_len, sps->length-start_len);
+  int start_len;
+  if (sps->data[0] == 0 && sps->data[1] == 0 && sps->data[2] == 1) {
+    start_len = 3;
+  } else if (sps->length >= 5 && sps->data[0] == 0 &&
+             sps->data[1] == 0 && sps->data[2] == 0 &&
+             sps->data[3] == 1) {
+    start_len = 4;
+  } else {
+    return false;
+  }
+
+  size_t initial_offset = *out_offset;
+  if (initial_offset > out_capacity ||
+      GS_SPS_MAX_REWRITTEN_SIZE > out_capacity - initial_offset) {
+    return false;
+  }
+
+  if (read_nal_unit(h264_stream, (uint8_t*)sps->data + start_len,
+                    sps->length - start_len) <= 0) {
+    return false;
+  }
 
   // Some decoders rely on H264 level to decide how many buffers are needed
   // Since we only need one frame buffered, we'll set level as low as we can
@@ -71,10 +97,15 @@ void gs_sps_fix(PLENTRY sps, int flags, uint8_t* out_buf, uint32_t* out_offset) 
       h264_stream->sps->vui.max_bits_per_mb_denom = 1;
       h264_stream->sps->vui.log2_max_mv_length_horizontal = 16;
       h264_stream->sps->vui.log2_max_mv_length_vertical = 16;
-      h264_stream->sps->vui.num_reorder_frames = 0;
     }
 
-    // Some devices throw errors if max_dec_frame_buffering < num_ref_frames
+    // The Vita decoder is configured for a one-frame reference window. Force
+    // zero reordered frames even when the incoming SPS already carries a
+    // bitstream restriction; otherwise max_dec_frame_buffering=1 can still
+    // retain one frame and add avoidable latency.
+    h264_stream->sps->vui.num_reorder_frames = 0;
+
+    // Some devices throw errors if max_dec_frame_buffering < num_ref_frames.
     h264_stream->sps->vui.max_dec_frame_buffering = 1;
 
     // These values are the default for the fields, but they are more aggressive
@@ -83,8 +114,20 @@ void gs_sps_fix(PLENTRY sps, int flags, uint8_t* out_buf, uint32_t* out_offset) 
     h264_stream->sps->vui.max_bits_per_mb_denom = 1;
   }
 
-  memcpy(out_buf+*out_offset, sps->data, start_len);
-  *out_offset += start_len;
+  memcpy(out_buf + initial_offset, sps->data, (size_t)start_len);
 
-  *out_offset += write_nal_unit(h264_stream, out_buf+*out_offset, 128);
+  int rewritten_length = write_nal_unit(
+      h264_stream, out_buf + initial_offset + (size_t)start_len, 128);
+  if (rewritten_length <= 0 || rewritten_length > 128) {
+    return false;
+  }
+
+  size_t final_offset =
+      initial_offset + (size_t)start_len + (size_t)rewritten_length;
+  if (final_offset > UINT32_MAX) {
+    return false;
+  }
+
+  *out_offset = (uint32_t)final_offset;
+  return true;
 }

@@ -17,8 +17,8 @@
 [Setup]
 AppId={{D88FE6B4-D767-4A27-B192-E1DB4F6E835C}
 AppName=Vita Moonlight Host
-AppVersion=0.14.6
-VersionInfoVersion=0.14.6.0
+AppVersion=0.14.8
+VersionInfoVersion=0.14.8.0
 AppPublisher=Vita Moonlight contributors
 AppPublisherURL=https://github.com/alex4580/vita-moonlight
 DefaultDirName={autopf}\Vita Moonlight Host
@@ -31,6 +31,7 @@ ArchitecturesAllowed=x64os
 ArchitecturesInstallIn64BitMode=x64os
 MinVersion=10.0.19041
 PrivilegesRequired=admin
+SetupMutex=VitaMoonlightHostSetup,Global\VitaMoonlightHostSetup
 RedirectionGuard=yes
 Compression=lzma2/ultra64
 SolidCompression=yes
@@ -48,9 +49,7 @@ SignedUninstaller=no
 [Tasks]
 Name: "gamepaddriver"; Description: "Controller support (recommended for Xbox, DS4, and Steam Input)"; GroupDescription: "Choose what setup should prepare:"
 Name: "host"; Description: "Configure this PC for Vita streaming now (recommended)"; GroupDescription: "Choose what setup should prepare:"
-Name: "host\sunshine"; Description: "Sunshine - recommended for most users"; Flags: exclusive
-Name: "host\sunshine\virtualdriver"; Description: "Vita-sized virtual display (recommended with Sunshine)"
-Name: "host\apollo"; Description: "Apollo - select only if this PC already uses Apollo"; Flags: exclusive unchecked
+Name: "host\sunshine"; Description: "Sunshine and the required Vita-sized virtual display (setup asks before adopting an existing MTT display and restores its original enabled state on uninstall)"
 
 [Dirs]
 Name: "{app}\state"
@@ -60,13 +59,30 @@ Name: "{app}\state\Diagnostics"
 Root: HKLM64; Subkey: "SOFTWARE\VitaMoonlight\Host"; Flags: uninsdeletekey
 
 [Files]
-Source: "{#PublishDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#PublishDir}\*"; Excludes: "VitaMoonlight.Host.exe"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; Keep the primary host past ordinary payload deletion. The uninstaller
+; verifies an exact finalized transaction, deletes this file explicitly after
+; the child exits, and only then removes the durable finalized guard.
+Source: "{#PublishDir}\VitaMoonlight.Host.exe"; DestDir: "{app}"; Flags: ignoreversion uninsneveruninstall
+; The current host is also embedded as an installer-owned maintenance helper.
+; It establishes the protected upgrade fence before the installed payload is
+; replaced, including when repairing an older host which predates the fence.
+Source: "{#PublishDir}\VitaMoonlight.Host.exe"; DestDir: "{tmp}"; DestName: "VitaMoonlight.Host.Maintenance.exe"; Flags: dontcopy
+Source: "{#PublishDir}\D3DCompiler_47_cor3.dll"; DestDir: "{tmp}"; Flags: dontcopy
+Source: "{#PublishDir}\PenImc_cor3.dll"; DestDir: "{tmp}"; Flags: dontcopy
+Source: "{#PublishDir}\PresentationNative_cor3.dll"; DestDir: "{tmp}"; Flags: dontcopy
+Source: "{#PublishDir}\vcruntime140_cor3.dll"; DestDir: "{tmp}"; Flags: dontcopy
+Source: "{#PublishDir}\wpfgfx_cor3.dll"; DestDir: "{tmp}"; Flags: dontcopy
 Source: "{#DisplayWizardDir}\*"; DestDir: "{app}\tools\DisplayWizard"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#ViGEmBusDir}\*"; DestDir: "{app}\tools\ViGEmBus"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#SunshineDir}\*"; DestDir: "{app}\tools\Sunshine"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "..\..\tools\summarize-vita-log.py"; DestDir: "{app}\tools\SupportLog"; Flags: ignoreversion
 Source: "..\..\README.md"; DestDir: "{app}"; DestName: "README.md"; Flags: ignoreversion
 Source: "..\..\PRIVACY.md"; DestDir: "{app}"; DestName: "PRIVACY.md"; Flags: ignoreversion
+Source: "..\..\THIRD_PARTY_NOTICES.txt"; DestDir: "{app}"; DestName: "THIRD_PARTY_NOTICES.txt"; Flags: ignoreversion
+Source: "..\..\licenses\vita\*"; DestDir: "{app}\licenses\vita"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\..\third_party\h264bitstream\LICENSE"; DestDir: "{app}\licenses\vita"; DestName: "LGPL-2.1-h264bitstream.txt"; Flags: ignoreversion
+Source: "..\..\assets\LICENSE-Mononoki.txt"; DestDir: "{app}\licenses\vita"; DestName: "OFL-Mononoki.txt"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}\host"; Flags: ignoreversion
 Source: "..\BETA_SMOKE_TEST.md"; DestDir: "{app}\host"; Flags: ignoreversion
 Source: "..\END_TO_END_TEST.md"; DestDir: "{app}\host"; Flags: ignoreversion
@@ -81,6 +97,52 @@ Source: "..\..\docs\CODE_SIGNING_POLICY.md"; DestDir: "{app}\docs"; Flags: ignor
 Source: "..\..\docs\VITA_SETTINGS_GUIDE.md"; DestDir: "{app}\docs"; Flags: ignoreversion
 Source: "..\..\LICENSE"; DestDir: "{app}"; DestName: "LICENSE-VitaMoonlight.txt"; Flags: ignoreversion
 
+[UninstallDelete]
+; The host finalizer performs a no-follow, best-effort cleanup while it is
+; still running. Repeat only this exact allowlist after every host child and
+; lock handle has exited. Unknown files are deliberately never traversed or
+; deleted. Keep the transaction fence as the final exact file deletion.
+Type: files; Name: "{app}\state\Diagnostics\stream-rescue-status.json"
+Type: files; Name: "{app}\state\Diagnostics\stream-rescue.log"
+Type: dirifempty; Name: "{app}\state\Diagnostics"
+Type: files; Name: "{app}\state\display-recovery.json"
+Type: files; Name: "{app}\state\audio-recovery.json"
+Type: files; Name: "{app}\state\audio-recovery.backup.json"
+Type: files; Name: "{app}\state\audio-recovery.lock"
+Type: files; Name: "{app}\state\host-settings.json"
+Type: files; Name: "{app}\state\session.lock"
+Type: files; Name: "{app}\state\last-command-error.txt"
+Type: files; Name: "{app}\state\display-driver-verification.json"
+Type: files; Name: "{app}\state\display-driver-directory-identity.json"
+; Keep exact VDD authority through the host finalizer's durable commit. This
+; post-child pass removes its released tombstone only after rollback is no
+; longer possible.
+Type: files; Name: "{app}\state\managed-vdd-ownership.json"
+Type: files; Name: "{app}\state\stream-boundary-lease.json"
+Type: files; Name: "{app}\state\stream-boundary-lease.backup.json"
+Type: files; Name: "{app}\state\stream-boundary-lease.lock"
+Type: files; Name: "{app}\state\backend-lifecycle.json"
+Type: files; Name: "{app}\state\backend-lifecycle.backup.json"
+Type: files; Name: "{app}\state\backend-lifecycle.lock"
+Type: files; Name: "{app}\state\backend-disabled.intent"
+Type: files; Name: "{app}\state\deferred-host-setup.json"
+Type: files; Name: "{app}\state\display-suspend.intent"
+Type: files; Name: "{app}\state\display-suspend.lock"
+Type: files; Name: "{app}\state\installer-maintenance.json"
+Type: files; Name: "{app}\state\installer-maintenance.backup.json"
+Type: files; Name: "{app}\state\installer-maintenance.lock"
+; Exact documentation names shipped at the root by releases through 0.14.6.
+; The host removes these under a pinned directory identity; this final Inno
+; pass handles an ordinary transient file lock after every child has exited.
+Type: files; Name: "{app}\COMPATIBILITY.md"
+Type: files; Name: "{app}\END_TO_END_TEST.md"
+Type: files; Name: "{app}\FINAL_RELEASE_CHECKLIST.md"
+Type: files; Name: "{app}\THIRD_PARTY_NOTICES.md"
+Type: files; Name: "{app}\VITA_SETTINGS_GUIDE.md"
+Type: files; Name: "{app}\VitaMoonlight.Host.exe"
+Type: files; Name: "{app}\state\uninstall-in-progress.intent"
+Type: dirifempty; Name: "{app}\state"
+
 [Icons]
 Name: "{group}\Vita Moonlight Host Control Panel"; Filename: "{app}\VitaMoonlight.Host.exe"; WorkingDir: "{app}"
 Name: "{group}\Quick start and help"; Filename: "{sys}\notepad.exe"; Parameters: """{app}\README.md"""
@@ -90,20 +152,68 @@ Name: "{group}\Uninstall Vita Moonlight Host"; Filename: "{uninstallexe}"
 Filename: "{app}\VitaMoonlight.Host.exe"; Description: "Open the Vita Moonlight Host Control Panel"; Check: CanLaunchControlPanel; Flags: postinstall skipifsilent nowait
 
 [Code]
+const
+  { Inno reserves 0-8 for its own documented setup results. A post-copy host
+    configuration failure is an intentional, incomplete setup result rather
+    than a Pascal-script exception, so use a stable product-specific code. }
+  SetupHostConfigurationFailedExitCode = 10;
+
 var
   DriverReadinessChecked: Boolean;
   DriverReady: Boolean;
   DriverNeedsAttention: Boolean;
   RestartRequiredByPrerequisite: Boolean;
   ConfigurationDeferredForRestart: Boolean;
-  RemoveVirtualDisplayOnUninstall: Boolean;
   RemoveSunshineOnUninstall: Boolean;
   RemoveViGEmBusOnUninstall: Boolean;
   PreserveDiagnosticsOnUninstall: Boolean;
   RestartRequiredByUninstall: Boolean;
   PreservedRescueLogPath: String;
+  CompletedExplicitRemovalActions: String;
   ExistingInstallDetected: Boolean;
   PreviousInstalledVersion: String;
+  BackendRemainsPausedAfterSetup: Boolean;
+  UpgradeBackendWasEnabled: Boolean;
+  UpgradeBackendWasDisabled: Boolean;
+  UpgradeAgentWasStopped: Boolean;
+  UpgradeRecoveryTaskWasRemoved: Boolean;
+  UpgradeSafeguardsRestored: Boolean;
+  MaintenanceFenceActive: Boolean;
+  MaintenanceHelperExtracted: Boolean;
+  MaintenanceOwnerPid: Integer;
+  AdoptExistingVddApproved: Boolean;
+  SetupFailureRecorded: Boolean;
+  SetupFailureText: String;
+  SetupFailurePage: TOutputMsgMemoWizardPage;
+
+function GetCurrentProcessId: Integer;
+  external 'GetCurrentProcessId@kernel32.dll stdcall';
+
+function WithMaintenanceBypass(const Parameters: String): String;
+begin
+  Result := Parameters;
+  if MaintenanceFenceActive then
+  begin
+    Result := Result + ' --maintenance-owner-pid ' +
+      IntToStr(MaintenanceOwnerPid);
+  end;
+end;
+
+procedure RecordSetupFailure(const ErrorText: String); forward;
+
+procedure InitializeWizard;
+begin
+  { Host configuration runs after Inno has copied and finalized the new
+    payload. A conditional page is therefore the supported way to explain an
+    incomplete post-copy setup; GetCustomSetupExitCode supplies the nonzero
+    process result without exposing an internal "Runtime error" dialog. }
+  SetupFailurePage := CreateOutputMsgMemoPage(
+    wpInstalling,
+    'Setup could not complete',
+    'Vita Moonlight Host stopped safely.',
+    'Review the details below. Your physical display remains the priority.',
+    '');
+end;
 
 function InitializeSetup: Boolean;
 var
@@ -152,13 +262,15 @@ begin
   WizardForm.StatusLabel.Update;
   if not Exec(
     ExpandConstant('{app}\VitaMoonlight.Host.exe'),
-    Parameters,
+    WithMaintenanceBypass(Parameters),
     ExpandConstant('{app}'),
     SW_HIDE,
     ewWaitUntilTerminated,
     ResultCode) then
   begin
-    RaiseException(Description + ' could not be started.');
+    RecordSetupFailure(Description + ' could not be started.');
+    Result := False;
+    exit;
   end;
 
   if ResultCode = 4 then
@@ -187,17 +299,17 @@ begin
       ErrorText := Trim(ErrorDetails);
     if ErrorText <> '' then
     begin
-      RaiseException(
+      RecordSetupFailure(
         Description + ' failed with exit code ' + IntToStr(ResultCode) + '.' + #13#10 + #13#10 +
-        ErrorText + #13#10 + #13#10 +
-        'No later host-configuration steps were run.');
+        ErrorText);
     end
     else
     begin
-      RaiseException(
-        Description + ' failed with exit code ' + IntToStr(ResultCode) + '.' + #13#10 +
-        'No later host-configuration steps were run.');
+      RecordSetupFailure(
+        Description + ' failed with exit code ' + IntToStr(ResultCode) + '.');
     end;
+    Result := False;
+    exit;
   end;
   Result := True;
 end;
@@ -211,6 +323,556 @@ begin
   Result := RunHostCommand(Description, Parameters, ResultCode);
 end;
 
+function ReadSetupHostCommandError: String;
+var
+  ErrorDetails: AnsiString;
+begin
+  Result := '';
+  if LoadStringFromFile(
+    ExpandConstant('{app}\state\last-command-error.txt'),
+    ErrorDetails) then
+  begin
+    Result := Trim(ErrorDetails);
+  end;
+end;
+
+function ReadMaintenanceHelperError: String;
+var
+  ErrorDetails: AnsiString;
+begin
+  Result := '';
+  if LoadStringFromFile(
+    ExpandConstant('{tmp}\VitaMoonlight.Host.Maintenance.error.txt'),
+    ErrorDetails) then
+  begin
+    Result := Trim(ErrorDetails);
+  end;
+end;
+
+function ExtractMaintenanceHelper(var ErrorText: String): Boolean;
+begin
+  Result := False;
+  ErrorText := '';
+  if MaintenanceHelperExtracted then
+  begin
+    Result := True;
+    exit;
+  end;
+  try
+    ExtractTemporaryFile('VitaMoonlight.Host.Maintenance.exe');
+    ExtractTemporaryFile('D3DCompiler_47_cor3.dll');
+    ExtractTemporaryFile('PenImc_cor3.dll');
+    ExtractTemporaryFile('PresentationNative_cor3.dll');
+    ExtractTemporaryFile('vcruntime140_cor3.dll');
+    ExtractTemporaryFile('wpfgfx_cor3.dll');
+    MaintenanceHelperExtracted := True;
+    Result := True;
+  except
+    ErrorText :=
+      'Setup could not extract its protected maintenance helper. No installed ' +
+      'host process or recovery safeguard was changed.';
+  end;
+end;
+
+function BeginUpgradeMaintenance(var ErrorText: String): Boolean;
+var
+  HostError: String;
+  Parameters: String;
+  ResultCode: Integer;
+begin
+  Result := False;
+  ErrorText := '';
+  if MaintenanceFenceActive then
+  begin
+    Result := True;
+    exit;
+  end;
+  if not ExtractMaintenanceHelper(ErrorText) then
+    exit;
+
+  WizardForm.StatusLabel.Caption :=
+    'Restoring and verifying the physical display before installation';
+  WizardForm.StatusLabel.Update;
+  MaintenanceOwnerPid := GetCurrentProcessId;
+  ResultCode := -1;
+  DeleteFile(ExpandConstant(
+    '{tmp}\VitaMoonlight.Host.Maintenance.error.txt'));
+  Parameters :=
+    'maintenance begin --owner-pid ' + IntToStr(MaintenanceOwnerPid);
+  if not Exec(
+    ExpandConstant('{tmp}\VitaMoonlight.Host.Maintenance.exe'),
+    Parameters,
+    ExpandConstant('{tmp}'),
+    SW_HIDE,
+    ewWaitUntilTerminated,
+    ResultCode) then
+  begin
+    ErrorText :=
+      'Setup could not start its protected maintenance helper. No installed ' +
+      'host process or recovery safeguard was changed.';
+    exit;
+  end;
+  if ResultCode = 4 then
+  begin
+    RestartRequiredByPrerequisite := True;
+    HostError := ReadMaintenanceHelperError;
+    if HostError <> '' then
+      HostError := #13#10 + #13#10 + HostError;
+    ErrorText :=
+      'Windows requires a restart before Vita Moonlight can safely recover ' +
+      'the physical display for setup or repair.' + HostError + #13#10 + #13#10 +
+      'No application files or recovery safeguards were replaced. Restart ' +
+      'Windows, confirm the physical monitor is visible, then run this installer again.';
+    exit;
+  end;
+  if ResultCode <> 0 then
+  begin
+    HostError := ReadMaintenanceHelperError;
+    if HostError <> '' then
+      HostError := #13#10 + #13#10 + HostError;
+    ErrorText :=
+      'Setup could not begin exclusive Vita Moonlight maintenance (exit code ' +
+      IntToStr(ResultCode) + ').' + HostError + #13#10 + #13#10 +
+      'Finish any other setup or host change, then run this installer again.';
+    exit;
+  end;
+  DeleteFile(ExpandConstant(
+    '{tmp}\VitaMoonlight.Host.Maintenance.error.txt'));
+
+  MaintenanceFenceActive := True;
+  Log(
+    'Protected installer maintenance began under owner process ' +
+    IntToStr(MaintenanceOwnerPid) + '.');
+  Result := True;
+end;
+
+function HasCommandLineSwitch(const Name: String): Boolean;
+var
+  Index: Integer;
+  Value: String;
+begin
+  Result := False;
+  for Index := 1 to ParamCount do
+  begin
+    Value := ParamStr(Index);
+    if (CompareText(Value, '/' + Name) = 0) or
+      (CompareText(Value, '-' + Name) = 0) then
+    begin
+      Result := True;
+      exit;
+    end;
+  end;
+end;
+
+function QueryManagedVddAdoptionRequired(
+  var AdoptionRequired: Boolean;
+  var ErrorText: String): Boolean;
+var
+  HostError: String;
+  ResultCode: Integer;
+begin
+  Result := False;
+  AdoptionRequired := False;
+  ErrorText := '';
+  if not WizardIsTaskSelected('host\sunshine') then
+  begin
+    Result := True;
+    exit;
+  end;
+
+  WizardForm.StatusLabel.Caption :=
+    'Checking whether an existing virtual display needs your permission';
+  WizardForm.StatusLabel.Update;
+  ResultCode := -1;
+  DeleteFile(ExpandConstant(
+    '{tmp}\VitaMoonlight.Host.Maintenance.error.txt'));
+  if not Exec(
+    ExpandConstant('{tmp}\VitaMoonlight.Host.Maintenance.exe'),
+    'maintenance vdd-adoption-required --owner-pid ' +
+      IntToStr(MaintenanceOwnerPid),
+    ExpandConstant('{tmp}'),
+    SW_HIDE,
+    ewWaitUntilTerminated,
+    ResultCode) then
+  begin
+    ErrorText :=
+      'Setup could not inspect the existing virtual-display device. No device ' +
+      'was adopted or changed.';
+    exit;
+  end;
+
+  if ResultCode = 0 then
+  begin
+    AdoptionRequired := True;
+    Result := True;
+    exit;
+  end;
+  if ResultCode = 3 then
+  begin
+    Result := True;
+    exit;
+  end;
+
+  HostError := ReadMaintenanceHelperError;
+  if HostError <> '' then
+    HostError := #13#10 + #13#10 + HostError;
+  ErrorText :=
+    'Setup could not safely identify one virtual-display device it is allowed ' +
+    'to manage (exit code ' + IntToStr(ResultCode) + '). No device was adopted ' +
+    'or changed.' + HostError;
+end;
+
+function ConfirmManagedVddAdoption(var ErrorText: String): Boolean;
+var
+  AdoptionRequired: Boolean;
+begin
+  Result := False;
+  AdoptExistingVddApproved := False;
+  if not QueryManagedVddAdoptionRequired(AdoptionRequired, ErrorText) then
+    exit;
+  if not AdoptionRequired then
+  begin
+    Result := True;
+    exit;
+  end;
+
+  if HasCommandLineSwitch('ADOPTEXISTINGVDD') then
+  begin
+    AdoptExistingVddApproved := True;
+    Log(
+      'Explicit /ADOPTEXISTINGVDD approval was supplied for the one ' +
+      'unambiguous existing MTT device.');
+    Result := True;
+    exit;
+  end;
+
+  if WizardSilent then
+  begin
+    ErrorText :=
+      'Windows already has one unowned MTT virtual-display device. Silent ' +
+      'setup will not adopt it implicitly. Confirm that this installation may ' +
+      'manage that device and rerun setup with /ADOPTEXISTINGVDD, or remove ' +
+      'the Sunshine/display task. No device was changed.';
+    exit;
+  end;
+
+  if MsgBox(
+    'Windows already has one MTT virtual-display device that is not owned by ' +
+    'this Vita Moonlight installation. It may be left by an earlier Vita ' +
+    'Moonlight version, DisplayWizard, or another application.' + #13#10 + #13#10 +
+    'Allow Vita Moonlight to adopt this one device?' + #13#10 + #13#10 +
+    'Setup will record whether it is currently enabled or disabled before ' +
+    'changing it. If Vita Moonlight is later uninstalled, that exact original ' +
+    'enabled state will be restored. Choosing No leaves the device unchanged.',
+    mbConfirmation,
+    MB_YESNO) <> IDYES then
+  begin
+    ErrorText :=
+      'Setup did not adopt or change the existing MTT virtual display. Click ' +
+      'Back and clear the Sunshine/display task to continue without Vita ' +
+      'virtual-display integration, or cancel setup.';
+    exit;
+  end;
+
+  AdoptExistingVddApproved := True;
+  Log(
+    'The user explicitly approved adoption of the one unambiguous existing ' +
+    'MTT device. Its live enabled state will be recorded by the post-copy driver transaction.');
+  Result := True;
+end;
+
+function EndUpgradeMaintenance: Boolean;
+var
+  ResultCode: Integer;
+begin
+  Result := True;
+  if not MaintenanceFenceActive then
+    exit;
+  ResultCode := -1;
+  if not Exec(
+    ExpandConstant('{tmp}\VitaMoonlight.Host.Maintenance.exe'),
+    'maintenance end --owner-pid ' + IntToStr(MaintenanceOwnerPid),
+    ExpandConstant('{tmp}'),
+    SW_HIDE,
+    ewWaitUntilTerminated,
+    ResultCode) then
+  begin
+    Log(
+      'ERROR: Setup could not start the helper which ends protected installer maintenance. ' +
+      'The fence was kept for a safe installer retry.');
+    Result := False;
+    exit;
+  end;
+  if ResultCode <> 0 then
+  begin
+    Log(
+      'ERROR: Setup could not end protected installer maintenance. Exit code: ' +
+      IntToStr(ResultCode) +
+      '. The fence was kept for a safe installer retry.');
+    Result := False;
+    exit;
+  end;
+  MaintenanceFenceActive := False;
+  Log('Protected installer maintenance ended.');
+end;
+
+function QueryMaintenanceSnapshotState(
+  const Description: String;
+  const Action: String;
+  var WasPresent: Boolean;
+  var ErrorText: String): Boolean;
+var
+  ResultCode: Integer;
+begin
+  WasPresent := False;
+  ErrorText := '';
+  WizardForm.StatusLabel.Caption := Description;
+  WizardForm.StatusLabel.Update;
+  ResultCode := -1;
+  if not Exec(
+    ExpandConstant('{tmp}\VitaMoonlight.Host.Maintenance.exe'),
+    'maintenance ' + Action + ' --owner-pid ' +
+      IntToStr(MaintenanceOwnerPid),
+    ExpandConstant('{tmp}'),
+    SW_HIDE,
+    ewWaitUntilTerminated,
+    ResultCode) then
+  begin
+    ErrorText := Description + ' could not be started.';
+    Result := False;
+    exit;
+  end;
+  if ResultCode = 0 then
+  begin
+    WasPresent := True;
+    Result := True;
+    exit;
+  end;
+  if ResultCode = 3 then
+  begin
+    WasPresent := False;
+    Result := True;
+    exit;
+  end;
+  ErrorText := Description + ' failed with exit code ' +
+    IntToStr(ResultCode) + '. The protected maintenance snapshot was kept.';
+  Result := False;
+end;
+
+function RunMaintenanceSafeguardCommand(
+  const Description: String;
+  const Action: String;
+  var ResultCode: Integer;
+  var ErrorText: String): Boolean;
+begin
+  WizardForm.StatusLabel.Caption := Description;
+  WizardForm.StatusLabel.Update;
+  ErrorText := '';
+  ResultCode := -1;
+  Result := Exec(
+    ExpandConstant('{tmp}\VitaMoonlight.Host.Maintenance.exe'),
+    'maintenance ' + Action + ' --owner-pid ' +
+      IntToStr(MaintenanceOwnerPid),
+    ExpandConstant('{tmp}'),
+    SW_HIDE,
+    ewWaitUntilTerminated,
+    ResultCode);
+  if not Result then
+  begin
+    ErrorText := Description + ' could not be started.';
+    exit;
+  end;
+  if ResultCode <> 0 then
+  begin
+    ErrorText := ReadMaintenanceHelperError;
+    if ErrorText <> '' then
+      ErrorText := #13#10 + ErrorText;
+    ErrorText := Description + ' failed with exit code ' +
+      IntToStr(ResultCode) + '.' + ErrorText;
+    Result := False;
+  end;
+end;
+
+procedure TryRestoreUpgradeSafeguards;
+var
+  ResultCode: Integer;
+  ErrorText: String;
+begin
+  if not MaintenanceFenceActive then
+    exit;
+
+  if RunMaintenanceSafeguardCommand(
+    'Restoring the exact Vita recovery safeguards after setup',
+    'restore-safeguards',
+    ResultCode,
+    ErrorText) then
+  begin
+    UpgradeAgentWasStopped := False;
+    UpgradeRecoveryTaskWasRemoved := False;
+    UpgradeSafeguardsRestored := True;
+    Log(
+      'The current maintenance helper restored the protected safeguard ' +
+      'snapshot for the exact Program Files host.');
+  end
+  else
+    Log(
+      'ERROR: Setup could not restore the exact Vita recovery safeguards. ' +
+      ErrorText + ' The maintenance fence will be kept for retry.');
+end;
+
+procedure RecordSetupFailure(const ErrorText: String);
+begin
+  if SetupFailureRecorded then
+    exit;
+
+  SetupFailureRecorded := True;
+  SetupFailureText :=
+    'Setup installed or updated the application files, but could not finish ' +
+    'configuring this PC.' + #13#10 + #13#10 +
+    ErrorText + #13#10 + #13#10 +
+    'No later host-configuration steps were run. Close Setup, correct the ' +
+    'reported problem, and run this installer again. Setup will return a ' +
+    'nonzero result so deployment tools cannot mistake this for success.';
+  ConfigurationDeferredForRestart := True;
+  Log('ERROR: ' + SetupFailureText);
+
+  { Restore safeguards removed during upgrade preflight immediately. The
+    maintenance fence remains active until DeinitializeSetup verifies this
+    rollback and closes the exact transaction. }
+  TryRestoreUpgradeSafeguards;
+
+  if SetupFailurePage <> nil then
+    SetupFailurePage.RichEditViewer.Lines.Text := SetupFailureText;
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  ResultCode: Integer;
+  ErrorText: String;
+  AgentTaskWasInstalled: Boolean;
+  RecoveryTaskWasInstalled: Boolean;
+begin
+  Result := '';
+  NeedsRestart := False;
+  if not BeginUpgradeMaintenance(ErrorText) then
+  begin
+    Result := ErrorText;
+    exit;
+  end;
+
+  { Read the original, durable pre-mutation snapshot from the maintenance
+    helper. A setup process killed after deleting either exact task can then be
+    retried without mistaking the current Missing state for the old baseline. }
+  if not QueryMaintenanceSnapshotState(
+    'Reading the saved Vita host-feature preference for upgrade or repair',
+    'backend-was-enabled',
+    UpgradeBackendWasEnabled,
+    ErrorText) then
+  begin
+    Result := ErrorText;
+    exit;
+  end;
+  UpgradeBackendWasDisabled := not UpgradeBackendWasEnabled;
+  if not QueryMaintenanceSnapshotState(
+    'Reading the saved stream-rescue rollback obligation',
+    'rescue-task-was-present',
+    AgentTaskWasInstalled,
+    ErrorText) then
+  begin
+    Result := ErrorText;
+    exit;
+  end;
+  if not QueryMaintenanceSnapshotState(
+    'Reading the saved display-recovery rollback obligation',
+    'recovery-task-was-present',
+    RecoveryTaskWasInstalled,
+    ErrorText) then
+  begin
+    Result := ErrorText;
+    exit;
+  end;
+  if UpgradeBackendWasEnabled then
+  begin
+    { Establish both rollback flags before any installed child can mutate a
+      task. These flags are reconstructed from the durable snapshot on every
+      dead-owner retry. }
+    UpgradeAgentWasStopped := AgentTaskWasInstalled;
+    UpgradeRecoveryTaskWasRemoved := RecoveryTaskWasInstalled;
+  end;
+
+  { Reconstruct every rollback obligation before any later prompt or return.
+    Maintenance deliberately leaves an unproven pre-existing MTT node
+    untouched. The helper stages its exact instance identity in the protected
+    live-owner fence; Yes approves only that identity, and the post-copy
+    transaction fails rather than following a replacement device. }
+  if not ConfirmManagedVddAdoption(ErrorText) then
+  begin
+    Result := ErrorText;
+    exit;
+  end;
+
+  { The embedded current maintenance helper already restored and verified a
+    physical-only topology before it published the maintenance snapshot. It
+    also owns the narrowly scoped task/firewall shutdown below. Never delegate
+    this upgrade-critical action to the executable being replaced: an older
+    installed build may contain the exact integration bug this repair fixes. }
+  Log(
+    'Protected installer maintenance already restored and verified the ' +
+    'physical display before upgrade or repair.');
+
+  if not RunMaintenanceSafeguardCommand(
+    'Suspending the exact Vita recovery safeguards for upgrade or repair',
+    'suspend-safeguards',
+    ResultCode,
+    ErrorText) then
+  begin
+    Result := ErrorText + #13#10 + #13#10 +
+      'The physical display is safe, but setup stopped before replacing files.';
+    exit;
+  end;
+  if UpgradeBackendWasDisabled then
+  begin
+    Log(
+      'Existing Vita host features are intentionally paused; setup will ' +
+      'update product files without re-enabling shared components or safeguards.');
+  end;
+end;
+
+procedure DeinitializeSetup;
+begin
+  { The durable snapshot records what must exist at handoff, not necessarily
+    what this setup instance removed. On a fresh cancel before preflight (or a
+    repair whose old executable is missing), first let the helper verify that
+    the original tasks are already present and end the fence. A dead-owner
+    takeover with genuinely missing tasks fails that proof, then uses the new
+    installed host to restore the exact obligations below. }
+  if MaintenanceFenceActive and
+    (UpgradeAgentWasStopped or UpgradeRecoveryTaskWasRemoved) and
+    EndUpgradeMaintenance then
+  begin
+    UpgradeAgentWasStopped := False;
+    UpgradeRecoveryTaskWasRemoved := False;
+    UpgradeSafeguardsRestored := True;
+  end;
+  if MaintenanceFenceActive and not UpgradeSafeguardsRestored then
+    TryRestoreUpgradeSafeguards;
+  if MaintenanceFenceActive then
+  begin
+    if UpgradeAgentWasStopped or UpgradeRecoveryTaskWasRemoved then
+    begin
+      Log(
+        'ERROR: Setup kept the installer-maintenance fence because one or more ' +
+        'pre-existing recovery safeguards could not be restored. Run setup again.');
+    end
+    else if not EndUpgradeMaintenance then
+    begin
+      Log(
+        'ERROR: Setup finished without clearing its exact maintenance fence. ' +
+        'Run this installer again before using Vita host features.');
+    end;
+  end;
+end;
+
 function DriverReadyForConfiguration: Boolean;
 var
   ResultCode: Integer;
@@ -221,7 +883,7 @@ begin
     DriverReady :=
       Exec(
         ExpandConstant('{app}\VitaMoonlight.Host.exe'),
-        'driver status',
+        WithMaintenanceBypass('driver status'),
         ExpandConstant('{app}'),
         SW_HIDE,
         ewWaitUntilTerminated,
@@ -234,7 +896,7 @@ end;
 
 function CanLaunchControlPanel: Boolean;
 begin
-  Result := not ConfigurationDeferredForRestart;
+  Result := not ConfigurationDeferredForRestart and not SetupFailureRecorded;
 end;
 
 function NeedRestart: Boolean;
@@ -242,7 +904,46 @@ begin
   Result := RestartRequiredByPrerequisite;
 end;
 
+function TryGetBackendSetupIntent(var BackendIntent: Integer): Boolean;
+var
+  ErrorText: String;
+begin
+  Result := False;
+  BackendIntent := -1;
+  if not Exec(
+    ExpandConstant('{app}\VitaMoonlight.Host.exe'),
+    WithMaintenanceBypass('backend status --intent-exit-code'),
+    ExpandConstant('{app}'),
+    SW_HIDE,
+    ewWaitUntilTerminated,
+    BackendIntent) then
+  begin
+    RecordSetupFailure(
+      'Setup could not read the saved Vita host-feature preference. ' +
+      'No Vita host configuration was changed.');
+    exit;
+  end;
+
+  if (BackendIntent <> 0) and (BackendIntent <> 5) and
+    (BackendIntent <> 6) then
+  begin
+    ErrorText := ReadSetupHostCommandError;
+    if ErrorText <> '' then
+      ErrorText := #13#10 + #13#10 + ErrorText;
+    RecordSetupFailure(
+      'Setup could not safely classify the saved Vita host-feature preference ' +
+      '(exit code ' + IntToStr(BackendIntent) + '). No Vita host configuration was changed.' +
+      ErrorText);
+    exit;
+  end;
+  Result := True;
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
+var
+  BackendIntent: Integer;
+  DeferredSetupParameters: String;
+  DriverInstallParameters: String;
 begin
   if CurStep <> ssPostInstall then
     exit;
@@ -256,6 +957,87 @@ begin
     'Securing machine recovery state',
     'state secure') then
     exit;
+
+  { A deliberate pause is a durable user preference, not a failed setup.
+    Update product files and safe shared prerequisites, preserve the
+    physical-safe paused state established by maintenance, and defer driver
+    installation, Sunshine configuration, and background tasks until explicit
+    Enable. If the user approved one existing device, acquire only its staged
+    identity after files are installed and immediately put it in the safe idle
+    state; this prevents a PnP-enabled fallback display during sleep without
+    running the generic legacy device-list pause path. }
+  if not TryGetBackendSetupIntent(BackendIntent) then
+    exit;
+  if BackendIntent = 6 then
+  begin
+    RecordSetupFailure(
+      'The protected Vita host-feature record is unreadable. Setup kept ' +
+      'the physical desktop and ran no Vita host-configuration steps. Open the ' +
+      'Vita Moonlight Host control panel as Administrator for recovery details.');
+    exit;
+  end;
+  if BackendIntent = 5 then
+  begin
+    { Repairs which cannot activate a Vita-owned task or display are safe to
+      apply immediately. Host/VDD work is stored as a protected plan and is
+      completed transactionally only after the user later chooses Enable. }
+    if WizardIsTaskSelected('gamepaddriver') then
+    begin
+      if not RunRequiredHostCommand(
+        'Installing or repairing ViGEmBus while Vita host features remain paused',
+        'gamepad ensure-compatible --installer "' +
+        ExpandConstant('{app}\tools\ViGEmBus\ViGEmBus_1.22.0_x64_x86_arm64.exe') +
+        '"') then
+        exit;
+    end;
+
+    if WizardIsTaskSelected('host\sunshine') then
+    begin
+      if not RunRequiredHostCommand(
+        'Checking the virtual display runtime while Vita host features remain paused',
+        'runtime ensure-compatible --installer "' +
+        ExpandConstant('{app}\tools\DisplayWizard\VC_redist.x64.exe') +
+        '"') then
+        exit;
+    end;
+
+    if WizardIsTaskSelected('host\sunshine') then
+    begin
+      if AdoptExistingVddApproved then
+      begin
+        if not RunRequiredHostCommand(
+          'Recording and safely pausing the approved existing virtual display',
+          'driver adopt-idle --adoption-owner-pid ' +
+            IntToStr(MaintenanceOwnerPid)) then
+          exit;
+      end;
+
+      DeferredSetupParameters :=
+        'deferred-setup save --host sunshine --virtual-driver true';
+      if AdoptExistingVddApproved then
+        DeferredSetupParameters := DeferredSetupParameters +
+          ' --adoption-owner-pid ' + IntToStr(MaintenanceOwnerPid);
+      if not RunRequiredHostCommand(
+        'Saving Sunshine setup until Vita host features are enabled',
+        DeferredSetupParameters) then
+        exit;
+    end
+    else
+    begin
+      if not RunRequiredHostCommand(
+        'Clearing deferred host setup because no streaming host was selected',
+        'deferred-setup clear') then
+        exit;
+    end;
+
+    Log(
+      'The protected Disabled preference, physical-only maintenance result, ' +
+      'and removed recovery tasks establish the paused state. Any explicitly ' +
+      'approved existing display is now exact-journal-owned and disabled; no ' +
+      'unowned or missing virtual-display instance was changed.');
+    BackendRemainsPausedAfterSetup := True;
+    exit;
+  end;
 
   if WizardIsTaskSelected('gamepaddriver') then
   begin
@@ -277,7 +1059,7 @@ begin
       exit;
   end;
 
-  if WizardIsTaskSelected('host\sunshine\virtualdriver') then
+  if WizardIsTaskSelected('host\sunshine') then
   begin
     if not RunRequiredHostCommand(
       'Checking and repairing the virtual display runtime',
@@ -286,9 +1068,13 @@ begin
       '"') then
       exit;
 
+    DriverInstallParameters := 'driver install';
+    if AdoptExistingVddApproved then
+      DriverInstallParameters := DriverInstallParameters +
+        ' --adoption-owner-pid ' + IntToStr(MaintenanceOwnerPid);
     if not RunRequiredHostCommand(
       'Installing and verifying the virtual display driver',
-      'driver install') then
+      DriverInstallParameters) then
       exit;
     DriverReadinessChecked := False;
   end;
@@ -298,9 +1084,10 @@ begin
     if not DriverReadyForConfiguration then
     begin
       DriverNeedsAttention := True;
-      RaiseException(
+      RecordSetupFailure(
         'The virtual display did not pass its native 960x544 readiness check. ' +
         'No Sunshine display configuration was written.');
+      exit;
     end;
     if not RunRequiredHostCommand(
       'Refreshing Sunshine display detection',
@@ -316,27 +1103,67 @@ begin
       exit;
   end;
 
-  if WizardIsTaskSelected('host\apollo') then
+  { The selected non-paused setup path has now superseded any plan left by an
+    earlier interrupted paused upgrade. }
+  if not RunRequiredHostCommand(
+    'Clearing completed deferred host setup',
+    'deferred-setup clear') then
+    exit;
+
+  if WizardIsTaskSelected('host') then
   begin
     if not RunRequiredHostCommand(
-      'Configuring Apollo',
-      'configure --host apollo') then
+      'Installing the automatic display-recovery safeguard',
+      'recovery install') then
       exit;
+    if not RunRequiredHostCommand(
+      'Installing the in-stream rescue agent',
+      'agent install') then
+      exit;
+  end
+  else
+  begin
+    { A controller-only clean install must not create Vita background tasks.
+      During an in-place repair, however, deselecting "configure now" must not
+      silently remove safeguards which belonged to the enabled installation. }
+    TryRestoreUpgradeSafeguards;
+    if UpgradeAgentWasStopped or UpgradeRecoveryTaskWasRemoved then
+    begin
+      RecordSetupFailure(
+        'Setup updated the selected components, but could not restore the ' +
+        'pre-existing Vita display safeguards. Run setup again before streaming.');
+      exit;
+    end;
   end;
+  UpgradeSafeguardsRestored := True;
+  UpgradeAgentWasStopped := False;
+  UpgradeRecoveryTaskWasRemoved := False;
+end;
 
-  if not RunRequiredHostCommand(
-    'Installing the automatic display-recovery safeguard',
-    'recovery install') then
-    exit;
-  if not RunRequiredHostCommand(
-    'Installing the in-stream rescue agent',
-    'agent install') then
-    exit;
+function ShouldSkipPage(PageID: Integer): Boolean;
+begin
+  Result :=
+    ((SetupFailurePage <> nil) and
+      (PageID = SetupFailurePage.ID) and not SetupFailureRecorded) or
+    ((PageID = wpFinished) and SetupFailureRecorded);
+end;
+
+function GetCustomSetupExitCode: Integer;
+begin
+  if SetupFailureRecorded then
+    Result := SetupHostConfigurationFailedExitCode
+  else
+    Result := 0;
 end;
 
 procedure CurPageChanged(CurPageID: Integer);
 begin
-  if CurPageID = wpWelcome then
+  if (SetupFailurePage <> nil) and (CurPageID = SetupFailurePage.ID) then
+  begin
+    SetupFailurePage.RichEditViewer.Lines.Text := SetupFailureText;
+    WizardForm.NextButton.Caption := SetupMessage(msgButtonFinish);
+  end
+  else if CurPageID = wpWelcome then
   begin
     if ExistingInstallDetected then
     begin
@@ -351,7 +1178,7 @@ begin
       WizardForm.WelcomeLabel2.Caption :=
         'This all-in-one setup prepares Sunshine, controller support, a Vita-sized ' +
         'virtual display, and automatic display recovery.' + #13#10 + #13#10 +
-        'Accept the recommended choices unless this PC already uses Apollo. Save open ' +
+        'Accept the recommended choices. Save open ' +
         'work first because connected displays may briefly blink during verification.';
     end;
   end
@@ -363,6 +1190,19 @@ begin
       'Restart Windows. Then open Vita Moonlight Host as Administrator, click ' +
       '"Repair Vita display driver" under Display & recovery, and then click ' +
       '"Set up or repair this PC" under Get started.',
+      mbInformation,
+      MB_OK,
+      IDOK);
+  end;
+  if (CurPageID = wpFinished) and BackendRemainsPausedAfterSetup then
+  begin
+    SuppressibleMsgBox(
+      'The update or repair is installed, and Vita host features remain paused ' +
+      'as requested.' + #13#10 + #13#10 +
+      'Open Vita Moonlight Host as Administrator and choose "Enable Vita ' +
+      'host features" when you want to use it again. Any selected host/display ' +
+      'repair will finish during that Enable action; a failed or restart-gated ' +
+      'repair safely returns the features to Paused. Pairing and settings were kept.',
       mbInformation,
       MB_OK,
       IDOK);
@@ -395,16 +1235,39 @@ begin
 end;
 
 procedure ReportUninstallError(const MessageText: String);
+var
+  FullMessage: String;
 begin
-  Log('ERROR: ' + MessageText);
+  FullMessage := MessageText;
+  if CompletedExplicitRemovalActions <> '' then
+  begin
+    FullMessage := FullMessage + #13#10 + #13#10 +
+      'Completed explicit shared-component requests before this failure: ' +
+      CompletedExplicitRemovalActions + '.' + #13#10 +
+      'Those selected component changes are not rolled back; Vita Moonlight ' +
+      'kept its own host and recovery safeguards for a safe retry.';
+  end;
+  Log('ERROR: ' + FullMessage);
   if not IsSilentUninstall then
   begin
     SuppressibleMsgBox(
-      MessageText,
+      FullMessage,
       mbError,
       MB_OK,
       IDOK);
   end;
+end;
+
+procedure RecordCompletedExplicitRemoval(const DisplayName: String);
+begin
+  if CompletedExplicitRemovalActions = '' then
+    CompletedExplicitRemovalActions := DisplayName
+  else
+    CompletedExplicitRemovalActions :=
+      CompletedExplicitRemovalActions + ', ' + DisplayName;
+  Log(
+    'Completed explicit shared-component removal request: ' +
+    DisplayName);
 end;
 
 function InitializeUninstall: Boolean;
@@ -413,17 +1276,16 @@ var
   HeadingLabel: TNewStaticText;
   ExplanationLabel: TNewStaticText;
   SafetyLabel: TNewStaticText;
-  RemoveVirtualDisplayCheck: TNewCheckBox;
   RemoveSunshineCheck: TNewCheckBox;
   RemoveViGEmBusCheck: TNewCheckBox;
   PreserveDiagnosticsCheck: TNewCheckBox;
   ContinueButton: TNewButton;
   CancelButton: TNewButton;
 begin
-  RemoveVirtualDisplayOnUninstall := HasUninstallSwitch('REMOVEVDD');
   RemoveSunshineOnUninstall := HasUninstallSwitch('REMOVESUNSHINE');
   RemoveViGEmBusOnUninstall := HasUninstallSwitch('REMOVEVIGEMBUS');
   PreserveDiagnosticsOnUninstall := HasUninstallSwitch('KEEPDIAGNOSTICS');
+  CompletedExplicitRemovalActions := '';
   Result := True;
 
   { Silent automation removes only this product unless a dependency switch was
@@ -456,24 +1318,16 @@ begin
     ExplanationLabel.AutoSize := False;
     ExplanationLabel.WordWrap := True;
     ExplanationLabel.Caption :=
-      'Sunshine, ViGEmBus, and the virtual display driver can be shared with ' +
-      'other streaming or controller software. They are kept by default. ' +
-      'Select a dependency only when you want it removed from this PC.';
-
-    RemoveVirtualDisplayCheck := TNewCheckBox.Create(OptionsForm);
-    RemoveVirtualDisplayCheck.Parent := OptionsForm;
-    RemoveVirtualDisplayCheck.Left := ScaleX(36);
-    RemoveVirtualDisplayCheck.Top := ScaleY(123);
-    RemoveVirtualDisplayCheck.Width := ScaleX(520);
-    RemoveVirtualDisplayCheck.Height := ScaleY(28);
-    RemoveVirtualDisplayCheck.Caption :=
-      'Remove the MTT virtual display driver and its managed display configuration';
-    RemoveVirtualDisplayCheck.Checked := RemoveVirtualDisplayOnUninstall;
+      'Sunshine and ViGEmBus can be shared with other streaming or controller ' +
+      'software and are kept by default. The shared MTT driver package is also ' +
+      'kept. Vita Moonlight always releases only its exact managed display: a ' +
+      'device it created is removed, while an adopted device is restored to ' +
+      'its recorded enabled state. An unproven device is never changed.';
 
     RemoveSunshineCheck := TNewCheckBox.Create(OptionsForm);
     RemoveSunshineCheck.Parent := OptionsForm;
     RemoveSunshineCheck.Left := ScaleX(36);
-    RemoveSunshineCheck.Top := ScaleY(166);
+    RemoveSunshineCheck.Top := ScaleY(135);
     RemoveSunshineCheck.Width := ScaleX(520);
     RemoveSunshineCheck.Height := ScaleY(28);
     RemoveSunshineCheck.Caption := 'Remove Sunshine';
@@ -482,7 +1336,7 @@ begin
     RemoveViGEmBusCheck := TNewCheckBox.Create(OptionsForm);
     RemoveViGEmBusCheck.Parent := OptionsForm;
     RemoveViGEmBusCheck.Left := ScaleX(36);
-    RemoveViGEmBusCheck.Top := ScaleY(201);
+    RemoveViGEmBusCheck.Top := ScaleY(178);
     RemoveViGEmBusCheck.Width := ScaleX(520);
     RemoveViGEmBusCheck.Height := ScaleY(28);
     RemoveViGEmBusCheck.Caption := 'Remove ViGEmBus controller emulation';
@@ -491,7 +1345,7 @@ begin
     PreserveDiagnosticsCheck := TNewCheckBox.Create(OptionsForm);
     PreserveDiagnosticsCheck.Parent := OptionsForm;
     PreserveDiagnosticsCheck.Left := ScaleX(36);
-    PreserveDiagnosticsCheck.Top := ScaleY(246);
+    PreserveDiagnosticsCheck.Top := ScaleY(226);
     PreserveDiagnosticsCheck.Width := ScaleX(520);
     PreserveDiagnosticsCheck.Height := ScaleY(28);
     PreserveDiagnosticsCheck.Caption :=
@@ -534,7 +1388,6 @@ begin
     Result := OptionsForm.ShowModal = mrOk;
     if Result then
     begin
-      RemoveVirtualDisplayOnUninstall := RemoveVirtualDisplayCheck.Checked;
       RemoveSunshineOnUninstall := RemoveSunshineCheck.Checked;
       RemoveViGEmBusOnUninstall := RemoveViGEmBusCheck.Checked;
       PreserveDiagnosticsOnUninstall := PreserveDiagnosticsCheck.Checked;
@@ -609,10 +1462,11 @@ begin
   Result := True;
 end;
 
-procedure PreserveRescueLog;
+function PreserveRescueLog: Boolean;
 var
   SourcePath: String;
 begin
+  Result := True;
   PreservedRescueLogPath := '';
   if not PreserveDiagnosticsOnUninstall then
     exit;
@@ -628,81 +1482,142 @@ begin
   if not RenameFile(SourcePath, PreservedRescueLogPath) then
   begin
     ReportUninstallError(
-      'Windows could not preserve the requested stream-rescue log at:' +
-      '' + #13#10 + PreservedRescueLogPath);
+      'Windows could not preserve the requested stream-rescue log at:' + #13#10 +
+      PreservedRescueLogPath + #13#10 + #13#10 +
+      'Uninstall stopped without deleting the original log or the recovery safeguards.');
     PreservedRescueLogPath := '';
+    Result := False;
   end;
 end;
 
-procedure RemoveHostState;
+function UninstallFinalizationCommitted: Boolean;
 var
-  StateDirectory: String;
+  MarkerText: AnsiString;
 begin
-  StateDirectory := ExpandConstant('{app}\state');
-  if not DelTree(StateDirectory, True, True, True) then
+  Result :=
+    LoadStringFromFile(
+      ExpandConstant('{app}\state\uninstall-in-progress.intent'),
+      MarkerText) and
+    (CompareStr(
+      String(MarkerText),
+      'vita-moonlight-uninstall-finalized-v1') = 0);
+end;
+
+function DeleteFinalizedHostExecutable: Boolean;
+var
+  HostPath: String;
+begin
+  HostPath := ExpandConstant('{app}\VitaMoonlight.Host.exe');
+  Result := True;
+  if not FileExists(HostPath) then
+    exit;
+  if not DeleteFile(HostPath) then
   begin
     ReportUninstallError(
-      'Vita Moonlight Host was removed, but Windows could not delete all files under:' + #13#10 +
-      StateDirectory + #13#10 + #13#10 +
-      'No recovery task or background agent remains. You may delete that folder after restarting Windows.');
+      'Vita Moonlight finalization committed safely, but Windows could not ' +
+      'delete the stopped host executable:' + #13#10 + HostPath + #13#10 + #13#10 +
+      'The finalized transaction guard was kept. Close any process using the ' +
+      'file, then run uninstall again.');
+    Result := False;
   end;
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  FinalizeParameters: String;
 begin
   if CurUninstallStep = usUninstall then
   begin
+    { A crash after host finalization may leave only the uninstaller and the
+      finalized guard. If the host still exists, reverify the physical desktop
+      with it. If it was already deleted, the exact finalized stage is the
+      durable authority to resume file-only cleanup. Any missing/torn stage
+      fails closed. }
+    if UninstallFinalizationCommitted then
+    begin
+      if FileExists(ExpandConstant('{app}\VitaMoonlight.Host.exe')) then
+      begin
+        if not RunCheckedUninstallHostCommand(
+          'Reverifying the finalized physical display cleanup',
+          'uninstall prepare --begin',
+          False) then
+          Abort;
+      end;
+      if not DeleteFinalizedHostExecutable then
+        Abort;
+      Log(
+        'Resuming exact file-only cleanup from the durable finalized uninstall stage.');
+      exit;
+    end;
+    if not FileExists(ExpandConstant('{app}\VitaMoonlight.Host.exe')) then
+    begin
+      ReportUninstallError(
+        'The Vita Moonlight host executable is missing, but Windows does not ' +
+        'contain a valid finalized uninstall transaction.' + #13#10 + #13#10 +
+        'Restore VitaMoonlight.Host.exe from your security-software quarantine, ' +
+        'or copy the same-version file from the portable release into the Vita ' +
+        'Moonlight Host install folder, then retry uninstall. Do not start a ' +
+        'new install while this protected uninstall transaction remains. ' +
+        'The transaction guard and recovery state were kept.');
+      Abort;
+    end;
+
     { No product or safeguard is removed until Windows confirms that at least
       one physical monitor is active and the managed VDD is inactive. }
     if not RunCheckedUninstallHostCommand(
       'Restoring and verifying the physical display',
-      'uninstall prepare',
+      'uninstall prepare --begin',
       False) then
       Abort;
 
+    if RemoveSunshineOnUninstall then
+    begin
+      if not RunCheckedUninstallHostCommand(
+        'Removing shared Sunshine installation',
+        'dependency uninstall sunshine',
+        True) then
+        Abort;
+      RecordCompletedExplicitRemoval('Sunshine');
+    end;
+
+    if RemoveViGEmBusOnUninstall then
+    begin
+      if not RunCheckedUninstallHostCommand(
+        'Removing shared ViGEmBus installation',
+        'dependency uninstall vigembus',
+        True) then
+        Abort;
+      RecordCompletedExplicitRemoval('ViGEmBus');
+    end;
+
+    if not PreserveRescueLog then
+      Abort;
+
+    { Finalization performs another physical-only recovery after any lengthy
+      optional dependency removals. It removes and verifies both exact tasks,
+      stops the agent, restores Vita-owned Sunshine configuration only after
+      all earlier fallible work passes, and cleans exact state. Safeguards are
+      rolled back if a pre-commit operation fails. }
+    FinalizeParameters := 'uninstall finalize-owned';
+    if RemoveSunshineOnUninstall then
+      FinalizeParameters := FinalizeParameters + ' --sunshine-removed';
     if not RunCheckedUninstallHostCommand(
-      'Restoring Vita-owned Sunshine configuration',
-      'uninstall cleanup-integration',
+      'Removing Vita Moonlight background functions and owned state',
+      FinalizeParameters,
       False) then
       Abort;
-
-    if RemoveVirtualDisplayOnUninstall and
-       not RunCheckedUninstallHostCommand(
-         'Removing the shared virtual display driver',
-         'driver uninstall',
-         True) then
+    if not UninstallFinalizationCommitted then
+    begin
+      ReportUninstallError(
+        'Vita Moonlight Host returned success without publishing its exact ' +
+        'finalized uninstall transaction. The host and guard were kept for retry.');
       Abort;
-
-    if RemoveSunshineOnUninstall and
-       not RunCheckedUninstallHostCommand(
-         'Removing shared Sunshine installation',
-         'dependency uninstall sunshine',
-         True) then
+    end;
+    if not DeleteFinalizedHostExecutable then
       Abort;
-
-    if RemoveViGEmBusOnUninstall and
-       not RunCheckedUninstallHostCommand(
-         'Removing shared ViGEmBus installation',
-         'dependency uninstall vigembus',
-         True) then
-      Abort;
-
-    if not RunCheckedUninstallHostCommand(
-      'Removing the in-stream rescue agent',
-      'agent uninstall',
-      False) then
-      Abort;
-    if not RunCheckedUninstallHostCommand(
-      'Removing the automatic display-recovery safeguard',
-      'recovery uninstall',
-      False) then
-      Abort;
-
-    PreserveRescueLog;
   end
   else if CurUninstallStep = usPostUninstall then
   begin
-    RemoveHostState;
     if (PreservedRescueLogPath <> '') and not IsSilentUninstall then
     begin
       SuppressibleMsgBox(

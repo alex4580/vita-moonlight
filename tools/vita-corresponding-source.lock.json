@@ -1,0 +1,378 @@
+{
+  "archive_inputs": [
+    {
+      "component": "zlib",
+      "license_expression": "Zlib",
+      "name": "zlib-1.3.2.tar.xz",
+      "sha256": "d7a0654783a4da529d1bb793b7ad9c3318020af77667bcae35f95d0e42a792f3",
+      "size": 1320064,
+      "url": "https://github.com/madler/zlib/releases/download/v1.3.2/zlib-1.3.2.tar.xz",
+      "version": "1.3.2"
+    },
+    {
+      "component": "bzip2",
+      "license_expression": "bzip2-1.0.6",
+      "name": "bzip2-1.0.8.tar.gz",
+      "sha256": "ab5a03176ee106d3f0fa90e381da478ddae405918153cca248e682cd0c4a2269",
+      "size": 810029,
+      "url": "https://sourceware.org/pub/bzip2/bzip2-1.0.8.tar.gz",
+      "version": "1.0.8"
+    },
+    {
+      "component": "zstd",
+      "license_expression": "BSD-3-Clause OR GPL-2.0-only",
+      "name": "zstd-1.5.7.tar.gz",
+      "sha256": "eb33e51f49a15e023950cd7825ca74a4a2b43db8354825ac24fc1b7ee09e6fa3",
+      "size": 2434947,
+      "url": "https://github.com/facebook/zstd/releases/download/v1.5.7/zstd-1.5.7.tar.gz",
+      "version": "1.5.7"
+    },
+    {
+      "component": "libjpeg-turbo",
+      "license_expression": "BSD-3-Clause AND IJG AND Zlib",
+      "name": "libjpeg-turbo-3.2.0.tar.gz",
+      "sha256": "6f30092cef9fb839779646608f4ee14ae3cbac989c47fa05e841b0841f09878e",
+      "size": 2537858,
+      "url": "https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/3.2.0/libjpeg-turbo-3.2.0.tar.gz",
+      "version": "3.2.0"
+    },
+    {
+      "component": "FreeType",
+      "license_expression": "FTL OR GPL-2.0-or-later",
+      "name": "freetype-2.14.3.tar.xz",
+      "sha256": "36bc4f1cc413335368ee656c42afca65c5a3987e8768cc28cf11ba775e785a5f",
+      "size": 2670220,
+      "url": "https://download-mirror.savannah.gnu.org/releases/freetype/freetype-2.14.3.tar.xz",
+      "version": "2.14.3"
+    },
+    {
+      "component": "curl",
+      "license_expression": "curl",
+      "name": "curl-8.21.0.tar.xz",
+      "sha256": "aa1b66a70eace83dc624508745646c08ae561de512ab403adffb93ac87fc72e6",
+      "size": 2882336,
+      "url": "https://github.com/curl/curl/releases/download/curl-8_21_0/curl-8.21.0.tar.xz",
+      "version": "8.21.0"
+    },
+    {
+      "component": "Expat",
+      "license_expression": "MIT",
+      "name": "expat-2.8.2.tar.xz",
+      "sha256": "3ad89b8588e6644bd4e49981480d48b21289eebbcd4f0a1a4afb1c29f99b6ab4",
+      "size": 515504,
+      "url": "https://github.com/libexpat/libexpat/releases/download/R_2_8_2/expat-2.8.2.tar.xz",
+      "version": "2.8.2"
+    },
+    {
+      "component": "Opus",
+      "license_expression": "BSD-3-Clause",
+      "name": "opus-1.6.1.tar.gz",
+      "sha256": "6ffcb593207be92584df15b32466ed64bbec99109f007c82205f0194572411a1",
+      "size": 10472813,
+      "url": "https://downloads.xiph.org/releases/opus/opus-1.6.1.tar.gz",
+      "version": "1.6.1"
+    },
+    {
+      "component": "GCC runtime libraries",
+      "license_expression": "GPL-3.0-or-later WITH GCC-exception-3.1",
+      "name": "gcc-15.2.0.tar.xz",
+      "sha256": "438fd996826b0c82485a29da03a72d71d6e3541a83ec702df4271f6fe025d24e",
+      "size": 101056276,
+      "url": "https://ftp.gnu.org/gnu/gcc/gcc-15.2.0/gcc-15.2.0.tar.xz",
+      "version": "15.2.0"
+    }
+  ],
+  "dependency_source_build": {
+    "build_order": [
+      "zlib",
+      "bzip2",
+      "zstd",
+      "libpng",
+      "libjpeg-turbo",
+      "FreeType",
+      "libvita2d",
+      "Expat",
+      "Opus",
+      "Mbed TLS",
+      "curl"
+    ],
+    "license_expression": "GPL-3.0-or-later",
+    "mbedtls_source_lock_sha256": "cd570763281ba2d51e317f465c2493634ac99f18228c0928136b8ef79561c91a",
+    "patches": [
+      {
+        "component": "zstd",
+        "path": "patches/vita-dependencies/zstd-1.5.7-vita.patch",
+        "sha256": "96bbd7a721bd54a1fab5fd9717172e436b17b1517f783298cc7e0b6be1cb00ee",
+        "size": 734
+      },
+      {
+        "component": "libpng",
+        "path": "patches/vita-dependencies/libpng-1.6.58-vita.patch",
+        "sha256": "d3672fc205947b327329cbefd3496e40a104708617a2fbfe12c0ffcc2c7f9749",
+        "size": 715
+      },
+      {
+        "component": "libvita2d",
+        "path": "patches/vita-dependencies/libvita2d-a8f15ab-vita.patch",
+        "sha256": "8676c08adf95f78bd6293983fd805570216fd200b8123b56aa9b55b935ac104f",
+        "size": 633
+      },
+      {
+        "component": "Opus",
+        "path": "patches/vita-dependencies/opus-1.6.1-vita.patch",
+        "sha256": "c76e331309372882293dc7b9ef1b92e0c4ed65d4f76168e372604ec62a277c01",
+        "size": 1049
+      }
+    ],
+    "recipe": "tools/build-vita-dependencies.sh",
+    "recipe_sha256": "31586d6c1605bf637cf3b318a21f801d70e97f428949706872e030ae66cbb8b3",
+    "required_outputs": [
+      "arm-vita-eabi/lib/libz.a",
+      "arm-vita-eabi/lib/libbz2.a",
+      "arm-vita-eabi/lib/libzstd.a",
+      "arm-vita-eabi/lib/libpng16.a",
+      "arm-vita-eabi/lib/libjpeg.a",
+      "arm-vita-eabi/lib/libfreetype.a",
+      "arm-vita-eabi/lib/libvita2d.a",
+      "arm-vita-eabi/lib/libexpat.a",
+      "arm-vita-eabi/lib/libopus.a",
+      "arm-vita-eabi/lib/libmbedcrypto.a",
+      "arm-vita-eabi/lib/libmbedx509.a",
+      "arm-vita-eabi/lib/libmbedtls.a",
+      "arm-vita-eabi/lib/libcurl.a"
+    ],
+    "source_directories": [
+      {
+        "component": "zlib",
+        "directory": "zlib-1.3.2",
+        "kind": "archive",
+        "source": "zlib-1.3.2.tar.xz"
+      },
+      {
+        "component": "bzip2",
+        "directory": "bzip2-1.0.8",
+        "kind": "archive",
+        "source": "bzip2-1.0.8.tar.gz"
+      },
+      {
+        "component": "zstd",
+        "directory": "zstd-1.5.7",
+        "kind": "archive",
+        "source": "zstd-1.5.7.tar.gz"
+      },
+      {
+        "component": "libpng",
+        "directory": "libpng-1.6.58",
+        "kind": "git",
+        "source": "upstream-git/libpng-1.6.58"
+      },
+      {
+        "component": "libjpeg-turbo",
+        "directory": "libjpeg-turbo-3.2.0",
+        "kind": "archive",
+        "source": "libjpeg-turbo-3.2.0.tar.gz"
+      },
+      {
+        "component": "FreeType",
+        "directory": "freetype-2.14.3",
+        "kind": "archive",
+        "source": "freetype-2.14.3.tar.xz"
+      },
+      {
+        "component": "libvita2d",
+        "directory": "libvita2d-a8f15ab",
+        "kind": "git",
+        "source": "upstream-git/libvita2d-a8f15ab09d5233f0a4e4ad0e8f6ade0da888cbed"
+      },
+      {
+        "component": "Expat",
+        "directory": "expat-2.8.2",
+        "kind": "archive",
+        "source": "expat-2.8.2.tar.xz"
+      },
+      {
+        "component": "Opus",
+        "directory": "opus-1.6.1",
+        "kind": "archive",
+        "source": "opus-1.6.1.tar.gz"
+      },
+      {
+        "component": "Mbed TLS",
+        "directory": "mbedtls-3.6.7-vita",
+        "kind": "vendored-mbedtls",
+        "source": "tools/vita-mbedtls-source.lock.json"
+      },
+      {
+        "component": "curl",
+        "directory": "curl-8.21.0",
+        "kind": "archive",
+        "source": "curl-8.21.0.tar.xz"
+      }
+    ],
+    "stager": "tools/stage-vita-dependency-sources.py",
+    "stager_sha256": "32c721b015fc0c56f42fe779a67c6cebd91ae658561a24f4718acb4118288cb6"
+  },
+  "compiled_component_coverage": [
+    {
+      "component": "project client, clean-room mDNS, h264bitstream, libuuid and PSPSDK debug font",
+      "sources": [
+        "release-tagged repository tree"
+      ]
+    },
+    {
+      "component": "moonlight-common-c, ENet and inih",
+      "sources": [
+        "pinned submodule trees"
+      ]
+    },
+    {
+      "component": "zlib, bzip2, zstd, libpng, libjpeg-turbo, FreeType, libvita2d, curl, Expat and Opus",
+      "sources": [
+        "hash-verified upstream archives or pinned git trees",
+        "tools/stage-vita-dependency-sources.py",
+        "tools/build-vita-dependencies.sh",
+        "project-owned GPL-3.0-or-later Vita compatibility patches"
+      ]
+    },
+    {
+      "component": "Mbed TLS",
+      "sources": [
+        "tools/vita-mbedtls-source.lock.json",
+        "vendor/vita-source"
+      ]
+    },
+    {
+      "component": "libc, libm, pthread, libgcc, startup objects and Vita import stubs",
+      "sources": [
+        "GCC 15.2.0 archive",
+        "pinned newlib and pthread-embedded trees",
+        "pinned vita-headers and vita-toolchain trees",
+        "pinned licensed VitaSDK buildscripts tree"
+      ]
+    }
+  ],
+  "git_inputs": [
+    {
+      "commit": "3061454d980de7d53608f594194cfac722721d2a",
+      "component": "libpng",
+      "destination": "upstream-git/libpng-1.6.58",
+      "license_expression": "Libpng-2.0",
+      "repository": "https://github.com/pnggroup/libpng.git"
+    },
+    {
+      "commit": "a8f15ab09d5233f0a4e4ad0e8f6ade0da888cbed",
+      "component": "libvita2d",
+      "destination": "upstream-git/libvita2d-a8f15ab09d5233f0a4e4ad0e8f6ade0da888cbed",
+      "license_expression": "MIT",
+      "repository": "https://github.com/xerpi/libvita2d.git"
+    },
+    {
+      "commit": "366f4140fb89193c55b2e115652da7dc28e3f7b4",
+      "component": "VitaSDK buildscripts",
+      "destination": "build-recipes/vitasdk-buildscripts",
+      "license_expression": "MIT",
+      "repository": "https://github.com/vitasdk/buildscripts.git"
+    },
+    {
+      "commit": "fbb8375870d799758e0b4358d2f1708781aa26a6",
+      "component": "newlib (libc and libm)",
+      "destination": "upstream-git/vitasdk-newlib-fbb8375870d799758e0b4358d2f1708781aa26a6",
+      "license_expression": "LicenseRef-Newlib-collection",
+      "repository": "https://github.com/vitasdk/newlib.git"
+    },
+    {
+      "commit": "63e1cd9152082d9ccb1b38d67a4caf975562fbeb",
+      "component": "pthread-embedded",
+      "destination": "upstream-git/pthread-embedded-63e1cd9152082d9ccb1b38d67a4caf975562fbeb",
+      "license_expression": "LGPL-2.1-only AND MIT",
+      "repository": "https://github.com/vitasdk/pthread-embedded.git"
+    },
+    {
+      "commit": "e37621bf80f5140b567c96782f8dc369e1108e0f",
+      "component": "Vita import definitions and headers",
+      "destination": "upstream-git/vita-headers-e37621bf80f5140b567c96782f8dc369e1108e0f",
+      "license_expression": "MIT",
+      "repository": "https://github.com/vitasdk/vita-headers.git"
+    },
+    {
+      "commit": "71f3789342f610a4eb3ba50fc33292c4900c6666",
+      "component": "Vita toolchain and startup support",
+      "destination": "upstream-git/vita-toolchain-71f3789342f610a4eb3ba50fc33292c4900c6666",
+      "license_expression": "MIT",
+      "repository": "https://github.com/vitasdk/vita-toolchain.git"
+    }
+  ],
+  "known_distribution_blockers": [],
+  "excluded_nonessential_inputs": [
+    {
+      "component": "VitaSDK autobuild orchestration",
+      "detail": "The pinned vitasdk/autobuilds repository has no license. Its runner workflow is not linked and is not required to rebuild the VPK once the licensed vitasdk/buildscripts tree and exact SDK version_info revisions are provided, so it is referenced but not redistributed.",
+      "immutable_reference": "bd937b76bb1e931533f5becb291bbf30b3b18940 (tag master-linux-v2.540)"
+    }
+  ],
+  "in_tree_components": [
+    {
+      "component": "h264bitstream",
+      "license_expression": "LGPL-2.1-or-later",
+      "path": "third_party/h264bitstream"
+    },
+    {
+      "component": "libuuid",
+      "license_expression": "BSD-3-Clause",
+      "path": "third_party/libuuid"
+    },
+    {
+      "component": "clean-room Vita mDNS client",
+      "license_expression": "GPL-3.0-only",
+      "path": "third_party/mdnsniff"
+    },
+    {
+      "component": "PSPSDK debug font",
+      "license_expression": "BSD-3-Clause",
+      "path": "src/font.c",
+      "upstream_revision": "8a3bef901248232063fe82ec1bbe6d46108d4961"
+    },
+    {
+      "component": "Mononoki Regular font 1.6",
+      "license_expression": "OFL-1.1-RFN",
+      "path": "assets/mononoki-Regular.ttf",
+      "sha256": "ecefad2b6deec9ba448ba4635c4a596091b515b5b6e67e67bc0bec0b487868bd"
+    }
+  ],
+  "locked_at_utc": "2026-08-08T12:30:06Z",
+  "mbedtls_source_lock": "tools/vita-mbedtls-source.lock.json",
+  "schema": "vita-moonlight/vita-corresponding-source-lock/v1",
+  "submodules": [
+    {
+      "commit": "07c32c80f98bb0d7214c577bd080eea3ce64a856",
+      "license_expression": "GPL-3.0-only",
+      "path": "third_party/moonlight-common-c",
+      "repository": "https://github.com/moonlight-stream/moonlight-common-c.git"
+    },
+    {
+      "commit": "dea6fb5414b180908b58c0293c831105b5d124dd",
+      "license_expression": "MIT",
+      "path": "third_party/enet",
+      "repository": "https://github.com/cgutman/enet.git"
+    },
+    {
+      "commit": "8e06f6b77b5d4471bdc6d85ada81b67d37354a5c",
+      "license_expression": "BSD-3-Clause",
+      "path": "third_party/inih",
+      "repository": "https://github.com/benhoyt/inih.git"
+    }
+  ],
+  "vitasdk_archive": {
+    "buildscripts_commit": "366f4140fb89193c55b2e115652da7dc28e3f7b4",
+    "filename": "vitasdk-x86_64-linux-gnu-2026-05-24_12-05-02.tar.bz2",
+    "newlib_commit": "fbb8375870d799758e0b4358d2f1708781aa26a6",
+    "pthread_commit": "63e1cd9152082d9ccb1b38d67a4caf975562fbeb",
+    "release_tag": "master-linux-v2.540",
+    "sha256": "b1a8f4d6e41460c9ecf2c3c4590eb7eb3ea6b690767f508bd5696dbc77a4272e",
+    "size": 109682633,
+    "url": "https://github.com/vitasdk/autobuilds/releases/download/master-linux-v2.540/vitasdk-x86_64-linux-gnu-2026-05-24_12-05-02.tar.bz2",
+    "version_info_built_at": "2026-05-24 12:26:53",
+    "vita_headers_commit": "e37621bf80f5140b567c96782f8dc369e1108e0f",
+    "vita_toolchain_commit": "71f3789342f610a4eb3ba50fc33292c4900c6666"
+  }
+}

@@ -819,7 +819,7 @@ void drw() {
 void guilib_init(gui_loop_callback global_loop_cb, gui_draw_callback global_draw_cb) {
   vita2d_init();
   vita2d_set_clear_color(0xff000000);
-  font = vita2d_load_font_file("app0:assets/nerdfont.ttf");
+  font = vita2d_load_font_file("app0:assets/mononoki-Regular.ttf");
 
   gui_global_draw_callback = global_draw_cb;
   gui_global_loop_callback = global_loop_cb;

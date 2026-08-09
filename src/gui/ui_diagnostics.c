@@ -6,6 +6,7 @@
 #include "../debug.h"
 #include "../input/motion.h"
 #include "../video/vita.h"
+#include "../../libgamestream/video_diagnostics.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -45,12 +46,10 @@ typedef struct UiDiagnosticsMetrics {
   uint32_t sample_consumer_generation;
   uint32_t estimated_rtt_ms;
   uint32_t estimated_rtt_variance_ms;
-  uint32_t sampled_recovered_packets;
-  uint32_t sampled_failed_fec_packets;
-  uint32_t sampled_out_of_sequence_packets;
-  uint32_t last_recovered_packets;
-  uint32_t last_failed_fec_packets;
-  uint32_t last_out_of_sequence_packets;
+  VideoStreamDiagnostics sampled_transport;
+  VideoStreamDiagnostics last_transport;
+  VideoStreamDiagnostics session_transport_base;
+  VideoStreamDiagnostics total_transport;
   UiDiagnosticsNetworkState network_state;
   uint64_t last_log_summary_us;
   uint64_t log_video_bytes;
@@ -59,15 +58,14 @@ typedef struct UiDiagnosticsMetrics {
   uint32_t log_presented_frames;
   uint32_t log_dropped_frames;
   uint32_t log_max_decode_us;
-  uint32_t log_recovered_packets;
-  uint32_t log_failed_fec_packets;
-  uint32_t log_out_of_sequence_packets;
+  VideoStreamDiagnostics log_transport;
 } UiDiagnosticsMetrics;
 
 static UiDiagnosticsMetrics metrics;
 static pthread_mutex_t metrics_mutex = PTHREAD_MUTEX_INITIALIZER;
 static uint32_t metrics_consumer_mask = 0;
 static uint32_t metrics_consumer_generation = 1;
+static uint32_t fps_consumer_mask = 0;
 static uint32_t diagnostics_screen_open = 0;
 static uint32_t diagnostics_overlay_mode = UI_DIAGNOSTICS_OVERLAY_OFF;
 
@@ -81,6 +79,18 @@ static void atomic_store_u32(uint32_t *value, uint32_t next) {
 
 bool ui_diagnostics_metrics_needed(void) {
   return atomic_load_u32(&metrics_consumer_mask) != 0;
+}
+
+bool ui_diagnostics_fps_needed(void) {
+  return atomic_load_u32(&fps_consumer_mask) != 0;
+}
+
+static void set_fps_consumer(uint32_t consumer, bool enabled) {
+  if (enabled) {
+    __atomic_fetch_or(&fps_consumer_mask, consumer, __ATOMIC_RELEASE);
+  } else {
+    __atomic_fetch_and(&fps_consumer_mask, ~consumer, __ATOMIC_RELEASE);
+  }
 }
 
 static UiDiagnosticsOverlayMode sanitize_overlay_mode(int mode) {
@@ -113,6 +123,40 @@ static const char *network_state_token(UiDiagnosticsNetworkState state) {
   }
 }
 
+static void subtract_transport_counters(
+    VideoStreamDiagnostics *result,
+    const VideoStreamDiagnostics *current,
+    const VideoStreamDiagnostics *previous) {
+  result->rtpPacketsOutOfSequence =
+      current->rtpPacketsOutOfSequence - previous->rtpPacketsOutOfSequence;
+  result->fecDataPacketsRecovered =
+      current->fecDataPacketsRecovered - previous->fecDataPacketsRecovered;
+  result->fecBlocksFailed =
+      current->fecBlocksFailed - previous->fecBlocksFailed;
+  result->networkFramesLost =
+      current->networkFramesLost - previous->networkFramesLost;
+  result->depacketizerCorruptFrames =
+      current->depacketizerCorruptFrames -
+      previous->depacketizerCorruptFrames;
+  result->decodeUnitQueueOverflows =
+      current->decodeUnitQueueOverflows -
+      previous->decodeUnitQueueOverflows;
+  result->idrRequestsSent =
+      current->idrRequestsSent - previous->idrRequestsSent;
+}
+
+static void add_transport_counters(
+    VideoStreamDiagnostics *total,
+    const VideoStreamDiagnostics *amount) {
+  total->rtpPacketsOutOfSequence += amount->rtpPacketsOutOfSequence;
+  total->fecDataPacketsRecovered += amount->fecDataPacketsRecovered;
+  total->fecBlocksFailed += amount->fecBlocksFailed;
+  total->networkFramesLost += amount->networkFramesLost;
+  total->depacketizerCorruptFrames += amount->depacketizerCorruptFrames;
+  total->decodeUnitQueueOverflows += amount->decodeUnitQueueOverflows;
+  total->idrRequestsSent += amount->idrRequestsSent;
+}
+
 static void clear_sampling_locked(void) {
   metrics.window_started_us = 0;
   metrics.window_video_bytes = 0;
@@ -130,12 +174,11 @@ static void clear_sampling_locked(void) {
   metrics.total_dropped_frames = 0;
   metrics.estimated_rtt_ms = 0;
   metrics.estimated_rtt_variance_ms = 0;
-  metrics.sampled_recovered_packets = 0;
-  metrics.sampled_failed_fec_packets = 0;
-  metrics.sampled_out_of_sequence_packets = 0;
-  metrics.last_recovered_packets = 0;
-  metrics.last_failed_fec_packets = 0;
-  metrics.last_out_of_sequence_packets = 0;
+  memset(&metrics.sampled_transport, 0, sizeof(metrics.sampled_transport));
+  memset(&metrics.last_transport, 0, sizeof(metrics.last_transport));
+  memset(&metrics.session_transport_base, 0,
+         sizeof(metrics.session_transport_base));
+  memset(&metrics.total_transport, 0, sizeof(metrics.total_transport));
   metrics.sample_consumer_generation = 0;
   metrics.log_video_bytes = 0;
   metrics.log_decode_us = 0;
@@ -143,9 +186,7 @@ static void clear_sampling_locked(void) {
   metrics.log_presented_frames = 0;
   metrics.log_dropped_frames = 0;
   metrics.log_max_decode_us = 0;
-  metrics.log_recovered_packets = 0;
-  metrics.log_failed_fec_packets = 0;
-  metrics.log_out_of_sequence_packets = 0;
+  memset(&metrics.log_transport, 0, sizeof(metrics.log_transport));
 }
 
 static void set_metrics_consumer(uint32_t consumer, bool enabled) {
@@ -156,6 +197,9 @@ static void set_metrics_consumer(uint32_t consumer, bool enabled) {
     bool was_active = old_mask != 0;
     bool is_active = new_mask != 0;
     if (was_active != is_active) {
+      if (is_active) {
+        LiSetVideoStreamDiagnosticsEnabled(true);
+      }
       metrics_consumer_generation++;
       if (metrics_consumer_generation == 0) {
         metrics_consumer_generation = 1;
@@ -169,6 +213,9 @@ static void set_metrics_consumer(uint32_t consumer, bool enabled) {
       }
     }
     atomic_store_u32(&metrics_consumer_mask, new_mask);
+    if (was_active && !is_active) {
+      LiSetVideoStreamDiagnosticsEnabled(false);
+    }
   }
   pthread_mutex_unlock(&metrics_mutex);
 }
@@ -181,12 +228,8 @@ static bool prepare_sample_locked(uint64_t now_us) {
 
   clear_sampling_locked();
   metrics.window_started_us = now_us;
-  const RTP_VIDEO_STATS *video_stats = LiGetRTPVideoStats();
-  if (video_stats) {
-    metrics.last_recovered_packets = video_stats->packetCountFecRecovered;
-    metrics.last_failed_fec_packets = video_stats->packetCountFecFailed;
-    metrics.last_out_of_sequence_packets = video_stats->packetCountOOS;
-  }
+  LiGetVideoStreamDiagnosticsSnapshot(&metrics.last_transport);
+  metrics.session_transport_base = metrics.last_transport;
   metrics.sample_consumer_generation = metrics_consumer_generation;
   return true;
 }
@@ -233,20 +276,18 @@ static void finish_sample(uint64_t now_us) {
     metrics.estimated_rtt_variance_ms = 0;
   }
 
-  const RTP_VIDEO_STATS *video_stats = LiGetRTPVideoStats();
-  metrics.sampled_recovered_packets = 0;
-  metrics.sampled_failed_fec_packets = 0;
-  metrics.sampled_out_of_sequence_packets = 0;
-  if (video_stats) {
-    metrics.sampled_recovered_packets =
-        video_stats->packetCountFecRecovered - metrics.last_recovered_packets;
-    metrics.sampled_failed_fec_packets =
-        video_stats->packetCountFecFailed - metrics.last_failed_fec_packets;
-    metrics.sampled_out_of_sequence_packets =
-        video_stats->packetCountOOS - metrics.last_out_of_sequence_packets;
-    metrics.last_recovered_packets = video_stats->packetCountFecRecovered;
-    metrics.last_failed_fec_packets = video_stats->packetCountFecFailed;
-    metrics.last_out_of_sequence_packets = video_stats->packetCountOOS;
+  VideoStreamDiagnostics current_transport = {0};
+  if (LiGetVideoStreamDiagnosticsSnapshot(&current_transport)) {
+    subtract_transport_counters(
+        &metrics.sampled_transport, &current_transport,
+        &metrics.last_transport);
+    subtract_transport_counters(
+        &metrics.total_transport, &current_transport,
+        &metrics.session_transport_base);
+    metrics.last_transport = current_transport;
+  } else {
+    memset(&metrics.sampled_transport, 0,
+           sizeof(metrics.sampled_transport));
   }
 
   if (vita_debug_is_logging_enabled() &&
@@ -259,10 +300,8 @@ static void finish_sample(uint64_t now_us) {
     if (metrics.window_max_decode_us > metrics.log_max_decode_us) {
       metrics.log_max_decode_us = metrics.window_max_decode_us;
     }
-    metrics.log_recovered_packets += metrics.sampled_recovered_packets;
-    metrics.log_failed_fec_packets += metrics.sampled_failed_fec_packets;
-    metrics.log_out_of_sequence_packets +=
-        metrics.sampled_out_of_sequence_packets;
+    add_transport_counters(
+        &metrics.log_transport, &metrics.sampled_transport);
 
     uint64_t log_elapsed_us = now_us - metrics.last_log_summary_us;
     if (log_elapsed_us >= DIAGNOSTICS_LOG_INTERVAL_US) {
@@ -295,7 +334,10 @@ static void finish_sample(uint64_t now_us) {
       VitaDebugLevel level =
           metrics.network_state == UI_DIAGNOSTICS_NETWORK_DEGRADED ||
                   metrics.log_dropped_frames > 0 ||
-                  metrics.log_failed_fec_packets > 0
+                  metrics.log_transport.fecBlocksFailed > 0 ||
+                  metrics.log_transport.networkFramesLost > 0 ||
+                  metrics.log_transport.depacketizerCorruptFrames > 0 ||
+                  metrics.log_transport.decodeUnitQueueOverflows > 0
               ? VITA_DEBUG_LEVEL_WARNING
               : VITA_DEBUG_LEVEL_INFO;
       vita_debug_event(
@@ -304,9 +346,11 @@ static void finish_sample(uint64_t now_us) {
           "video_kbps=%u configured_kbps=%d decoded_frames=%u "
           "dropped_frames=%u dropped_fps=%u decode_avg_us=%u "
           "decode_max_us=%u "
-          "rtt_ms=%u rtt_variance_ms=%u fec_recovered=%u "
-          "fec_failed=%u out_of_sequence=%u total_frames=%u "
-          "total_dropped=%u",
+          "rtt_ms=%u rtt_variance_ms=%u fec_recovered_packets=%u "
+          "fec_failed_blocks=%u rtp_oos_packets=%u "
+          "network_lost_frames=%u depacketizer_corrupt_frames=%u "
+          "decode_queue_overflows=%u idr_requests_sent=%u "
+          "total_frames=%u total_dropped=%u",
           (unsigned long long)(log_elapsed_us / 1000ULL),
           network_state_token(metrics.network_state),
           log_rendered_fps,
@@ -320,9 +364,13 @@ static void finish_sample(uint64_t now_us) {
           metrics.log_max_decode_us,
           metrics.estimated_rtt_ms,
           metrics.estimated_rtt_variance_ms,
-          metrics.log_recovered_packets,
-          metrics.log_failed_fec_packets,
-          metrics.log_out_of_sequence_packets,
+          metrics.log_transport.fecDataPacketsRecovered,
+          metrics.log_transport.fecBlocksFailed,
+          metrics.log_transport.rtpPacketsOutOfSequence,
+          metrics.log_transport.networkFramesLost,
+          metrics.log_transport.depacketizerCorruptFrames,
+          metrics.log_transport.decodeUnitQueueOverflows,
+          metrics.log_transport.idrRequestsSent,
           metrics.total_video_frames,
           metrics.total_dropped_frames);
       metrics.last_log_summary_us = now_us;
@@ -332,9 +380,7 @@ static void finish_sample(uint64_t now_us) {
       metrics.log_presented_frames = 0;
       metrics.log_dropped_frames = 0;
       metrics.log_max_decode_us = 0;
-      metrics.log_recovered_packets = 0;
-      metrics.log_failed_fec_packets = 0;
-      metrics.log_out_of_sequence_packets = 0;
+      memset(&metrics.log_transport, 0, sizeof(metrics.log_transport));
     }
   }
 
@@ -362,17 +408,28 @@ void ui_diagnostics_init(void) {
   memset(&metrics, 0, sizeof(metrics));
   metrics.network_state = UI_DIAGNOSTICS_NETWORK_UNKNOWN;
   metrics_consumer_generation = 1;
+  LiSetVideoStreamDiagnosticsEnabled(initial_consumers != 0);
   atomic_store_u32(&metrics_consumer_mask, initial_consumers);
   pthread_mutex_unlock(&metrics_mutex);
   atomic_store_u32(&diagnostics_screen_open, 0);
   atomic_store_u32(&diagnostics_overlay_mode, (uint32_t)mode);
+  atomic_store_u32(
+      &fps_consumer_mask,
+      (mode != UI_DIAGNOSTICS_OVERLAY_OFF
+           ? UI_DIAGNOSTICS_CONSUMER_OVERLAY
+           : 0) |
+          (vita_debug_is_logging_enabled()
+               ? UI_DIAGNOSTICS_CONSUMER_LOGGING
+               : 0));
 }
 
 void ui_diagnostics_shutdown(void) {
   atomic_store_u32(&diagnostics_screen_open, 0);
+  atomic_store_u32(&fps_consumer_mask, 0);
   pthread_mutex_lock(&metrics_mutex);
   metrics_consumer_generation++;
   atomic_store_u32(&metrics_consumer_mask, 0);
+  LiSetVideoStreamDiagnosticsEnabled(false);
   pthread_mutex_unlock(&metrics_mutex);
 }
 
@@ -474,6 +531,9 @@ void ui_diagnostics_set_overlay_mode(UiDiagnosticsOverlayMode mode) {
   set_metrics_consumer(
       UI_DIAGNOSTICS_CONSUMER_OVERLAY,
       sanitized >= UI_DIAGNOSTICS_OVERLAY_FPS_NETWORK);
+  set_fps_consumer(
+      UI_DIAGNOSTICS_CONSUMER_OVERLAY,
+      sanitized != UI_DIAGNOSTICS_OVERLAY_OFF);
   atomic_store_u32(&diagnostics_overlay_mode, (uint32_t)sanitized);
   config.performance_overlay_mode = sanitized;
 
@@ -527,6 +587,7 @@ void ui_diagnostics_set_network_state(UiDiagnosticsNetworkState state) {
 
 void ui_diagnostics_set_logging_consumer(bool enabled) {
   set_metrics_consumer(UI_DIAGNOSTICS_CONSUMER_LOGGING, enabled);
+  set_fps_consumer(UI_DIAGNOSTICS_CONSUMER_LOGGING, enabled);
   UiDiagnosticsReconnectSettings active;
   bool active_valid = false;
   pthread_mutex_lock(&metrics_mutex);
@@ -598,6 +659,17 @@ void ui_diagnostics_record_frame_drop(void) {
   metrics.window_dropped_frames++;
   metrics.total_dropped_frames++;
   finish_sample(now_us);
+  pthread_mutex_unlock(&metrics_mutex);
+}
+
+void ui_diagnostics_tick(uint64_t now_us) {
+  if (!ui_diagnostics_metrics_needed()) return;
+  if (now_us == 0) now_us = sceKernelGetSystemTimeWide();
+
+  pthread_mutex_lock(&metrics_mutex);
+  if (prepare_sample_locked(now_us)) {
+    finish_sample(now_us);
+  }
   pthread_mutex_unlock(&metrics_mutex);
 }
 
@@ -697,12 +769,34 @@ void ui_diagnostics_get_snapshot(UiDiagnosticsSnapshot *snapshot) {
   snapshot->estimated_rtt_ms = metrics.estimated_rtt_ms;
   snapshot->estimated_rtt_variance_ms =
       metrics.estimated_rtt_variance_ms;
-  snapshot->recovered_packets_in_window =
-      metrics.sampled_recovered_packets;
-  snapshot->failed_fec_packets_in_window =
-      metrics.sampled_failed_fec_packets;
-  snapshot->out_of_sequence_packets_in_window =
-      metrics.sampled_out_of_sequence_packets;
+  snapshot->fec_recovered_packets_in_window =
+      metrics.sampled_transport.fecDataPacketsRecovered;
+  snapshot->fec_failed_blocks_in_window =
+      metrics.sampled_transport.fecBlocksFailed;
+  snapshot->rtp_oos_packets_in_window =
+      metrics.sampled_transport.rtpPacketsOutOfSequence;
+  snapshot->network_lost_frames_in_window =
+      metrics.sampled_transport.networkFramesLost;
+  snapshot->depacketizer_corrupt_frames_in_window =
+      metrics.sampled_transport.depacketizerCorruptFrames;
+  snapshot->decode_queue_overflows_in_window =
+      metrics.sampled_transport.decodeUnitQueueOverflows;
+  snapshot->idr_requests_sent_in_window =
+      metrics.sampled_transport.idrRequestsSent;
+  snapshot->total_fec_recovered_packets =
+      metrics.total_transport.fecDataPacketsRecovered;
+  snapshot->total_fec_failed_blocks =
+      metrics.total_transport.fecBlocksFailed;
+  snapshot->total_rtp_oos_packets =
+      metrics.total_transport.rtpPacketsOutOfSequence;
+  snapshot->total_network_lost_frames =
+      metrics.total_transport.networkFramesLost;
+  snapshot->total_depacketizer_corrupt_frames =
+      metrics.total_transport.depacketizerCorruptFrames;
+  snapshot->total_decode_queue_overflows =
+      metrics.total_transport.decodeUnitQueueOverflows;
+  snapshot->total_idr_requests_sent =
+      metrics.total_transport.idrRequestsSent;
   snapshot->network_state = metrics.network_state;
 
   snapshot->stream_connected = connected;
@@ -747,7 +841,6 @@ void ui_diagnostics_get_snapshot(UiDiagnosticsSnapshot *snapshot) {
   vita_motion_get_status(&motion);
   snapshot->gyro_requested = motion.gyro_requested;
   snapshot->gyro_report_rate = motion.gyro_report_rate;
-  snapshot->gyro_events_sent = motion.gyro_events_sent;
   snapshot->motion_sensor_error = motion.last_sensor_error;
 
 }
@@ -775,8 +868,8 @@ void ui_diagnostics_draw_overlay(void) {
     width = 310;
     height = 58;
   } else if (advanced) {
-    width = snapshot.stream_settings_pending ? 390 : 360;
-    height = snapshot.stream_settings_pending ? 176 : 153;
+    width = 470;
+    height = snapshot.stream_settings_pending ? 199 : 176;
   }
 
   const int x = WIDTH - width - 12;
@@ -813,11 +906,19 @@ void ui_diagnostics_draw_overlay(void) {
              snapshot.dropped_frames_in_window,
              snapshot.total_dropped_frames);
     draw_overlay_text(x + 10, y + 114, line);
-    snprintf(line, sizeof(line), "Packets  recovered %u  failed %u  OOS %u",
-             snapshot.recovered_packets_in_window,
-             snapshot.failed_fec_packets_in_window,
-             snapshot.out_of_sequence_packets_in_window);
+    snprintf(line, sizeof(line),
+             "RTP/s  OOS %u  FEC recovered %u pkt  failed %u blk",
+             snapshot.rtp_oos_packets_in_window,
+             snapshot.fec_recovered_packets_in_window,
+             snapshot.fec_failed_blocks_in_window);
     draw_overlay_text(x + 10, y + 137, line);
+    snprintf(line, sizeof(line),
+             "Recovery/s  lost %u  corrupt %u  queue %u  IDR %u",
+             snapshot.network_lost_frames_in_window,
+             snapshot.depacketizer_corrupt_frames_in_window,
+             snapshot.decode_queue_overflows_in_window,
+             snapshot.idr_requests_sent_in_window);
+    draw_overlay_text(x + 10, y + 160, line);
     if (snapshot.stream_settings_pending) {
       if (snapshot.stream_format_settings_pending) {
         snprintf(
@@ -833,7 +934,7 @@ void ui_diagnostics_draw_overlay(void) {
         snprintf(line, sizeof(line),
                  "Next reconnect  stream options changed");
       }
-      draw_overlay_text(x + 10, y + 160, line);
+      draw_overlay_text(x + 10, y + 183, line);
     }
   }
 }
@@ -844,12 +945,14 @@ bool ui_diagnostics_screen_is_open(void) {
 
 void ui_diagnostics_screen_open(void) {
   set_metrics_consumer(UI_DIAGNOSTICS_CONSUMER_SCREEN, true);
+  set_fps_consumer(UI_DIAGNOSTICS_CONSUMER_SCREEN, true);
   atomic_store_u32(&diagnostics_screen_open, 1);
 }
 
 void ui_diagnostics_screen_close(void) {
   atomic_store_u32(&diagnostics_screen_open, 0);
   set_metrics_consumer(UI_DIAGNOSTICS_CONSUMER_SCREEN, false);
+  set_fps_consumer(UI_DIAGNOSTICS_CONSUMER_SCREEN, false);
 }
 
 static bool pressed(const SceCtrlData *pad,
@@ -866,7 +969,7 @@ void ui_diagnostics_screen_handle_input(const SceCtrlData *pad,
   if (pressed(pad, previous, SCE_CTRL_TRIANGLE)) {
     bool enabled = !vita_debug_is_logging_enabled();
     vita_debug_set_logging_enabled(enabled);
-    if (config_path) config_save(config_path, &config);
+    /* Support capture is intentionally per-run and never persisted. */
     return;
   }
   if (pressed(pad, previous, config.btn_cancel) ||
@@ -909,13 +1012,13 @@ void ui_diagnostics_screen_draw(void) {
 
   snprintf(value, sizeof(value), "%u / %u", snapshot.rendered_fps,
            snapshot.target_fps);
-  draw_screen_row(151, "Rendered FPS", value, RGBA8(235, 240, 250, 255));
+  draw_screen_row(149, "Rendered FPS", value, RGBA8(235, 240, 250, 255));
 
   snprintf(value, sizeof(value), "%s, %u +/- %u ms",
            network_state_name(snapshot.network_state),
            snapshot.estimated_rtt_ms,
            snapshot.estimated_rtt_variance_ms);
-  draw_screen_row(174, "Network state", value,
+  draw_screen_row(170, "Network state", value,
                   snapshot.network_state == UI_DIAGNOSTICS_NETWORK_DEGRADED
                       ? RGBA8(255, 154, 132, 255)
                       : RGBA8(235, 240, 250, 255));
@@ -923,14 +1026,14 @@ void ui_diagnostics_screen_draw(void) {
   snprintf(value, sizeof(value), "%u / %u kbps",
            snapshot.measured_video_kbps,
            snapshot.configured_bitrate_kbps);
-  draw_screen_row(197, "Video rate (measured / active)", value,
+  draw_screen_row(191, "Video rate (measured / active)", value,
                   RGBA8(235, 240, 250, 255));
 
   snprintf(value, sizeof(value), "%dx%d @ %d, %u kbps, packet %d",
            snapshot.stream_width, snapshot.stream_height,
            snapshot.stream_fps, snapshot.configured_bitrate_kbps,
            snapshot.packet_size);
-  draw_screen_row(220, "Active stream", value,
+  draw_screen_row(212, "Active stream", value,
                    RGBA8(235, 240, 250, 255));
 
   if (snapshot.stream_format_settings_pending) {
@@ -948,7 +1051,7 @@ void ui_diagnostics_screen_draw(void) {
     snprintf(value, sizeof(value), "Same as active");
   }
   draw_screen_row(
-      243, "Next reconnect", value,
+      233, "Next reconnect", value,
       snapshot.stream_settings_pending
           ? RGBA8(255, 194, 112, 255)
           : RGBA8(170, 184, 207, 255));
@@ -956,16 +1059,40 @@ void ui_diagnostics_screen_draw(void) {
   snprintf(value, sizeof(value), "%.2f / %.2f ms",
            snapshot.average_decode_us / 1000.0f,
            snapshot.maximum_decode_us / 1000.0f);
-  draw_screen_row(266, "Decode time (avg / max)", value,
+  draw_screen_row(254, "Decode time (avg / max)", value,
                    RGBA8(235, 240, 250, 255));
 
   snprintf(value, sizeof(value), "%u current, %u total",
            snapshot.dropped_frames_in_window,
            snapshot.total_dropped_frames);
-  draw_screen_row(289, "Dropped frames", value,
+  draw_screen_row(275, "Decoder output misses", value,
                    snapshot.dropped_frames_in_window
                        ? RGBA8(255, 194, 112, 255)
                        : RGBA8(235, 240, 250, 255));
+
+  snprintf(value, sizeof(value), "FEC +%u pkt, -%u blk; OOS %u pkt",
+           snapshot.fec_recovered_packets_in_window,
+           snapshot.fec_failed_blocks_in_window,
+           snapshot.rtp_oos_packets_in_window);
+  draw_screen_row(
+      296, "RTP delivery / second", value,
+      snapshot.fec_failed_blocks_in_window ||
+              snapshot.rtp_oos_packets_in_window
+          ? RGBA8(255, 194, 112, 255)
+          : RGBA8(235, 240, 250, 255));
+
+  snprintf(value, sizeof(value), "lost %u, corrupt %u, queue %u, IDR %u",
+           snapshot.network_lost_frames_in_window,
+           snapshot.depacketizer_corrupt_frames_in_window,
+           snapshot.decode_queue_overflows_in_window,
+           snapshot.idr_requests_sent_in_window);
+  draw_screen_row(
+      317, "Recovery / second", value,
+      snapshot.network_lost_frames_in_window ||
+              snapshot.depacketizer_corrupt_frames_in_window ||
+              snapshot.decode_queue_overflows_in_window
+          ? RGBA8(255, 154, 132, 255)
+          : RGBA8(235, 240, 250, 255));
 
   const char *active_controller =
       snapshot.controller_type == 2 ? "DualShock 4" : "Xbox";
@@ -983,7 +1110,7 @@ void ui_diagnostics_screen_draw(void) {
   } else {
     snprintf(value, sizeof(value), "%s", active_controller);
   }
-  draw_screen_row(312, "Controller profile", value,
+  draw_screen_row(338, "Controller profile", value,
                    snapshot.controller_settings_pending
                        ? RGBA8(255, 194, 112, 255)
                        : RGBA8(235, 240, 250, 255));
@@ -996,17 +1123,17 @@ void ui_diagnostics_screen_draw(void) {
   } else if (!snapshot.gyro_requested) {
     snprintf(value, sizeof(value), "Awaiting host request");
   } else {
-    snprintf(value, sizeof(value), "%u Hz, reporting",
+    snprintf(value, sizeof(value), "Reporting at %u Hz",
              (unsigned int)snapshot.gyro_report_rate);
   }
-  draw_screen_row(335, "Gyroscope", value,
+  draw_screen_row(359, "Gyroscope", value,
                    snapshot.motion_sensor_error < 0
                        ? RGBA8(255, 154, 132, 255)
                        : RGBA8(235, 240, 250, 255));
 
   snprintf(value, sizeof(value), "%s",
            snapshot.file_logging_enabled ? "Capturing" : "Not capturing");
-  draw_screen_row(358, "Support log", value,
+  draw_screen_row(380, "Support log", value,
                    snapshot.file_logging_enabled
                        ? RGBA8(116, 230, 160, 255)
                        : RGBA8(235, 240, 250, 255));
@@ -1014,12 +1141,12 @@ void ui_diagnostics_screen_draw(void) {
   snprintf(value, sizeof(value), "%s",
            ui_diagnostics_overlay_mode_name(
                ui_diagnostics_get_overlay_mode()));
-  draw_screen_row(381, "Performance overlay", value,
+  draw_screen_row(401, "Performance overlay", value,
                    RGBA8(235, 240, 250, 255));
 
   char log_path[96] = "Unavailable";
   vita_debug_get_log_path(log_path, sizeof(log_path));
-  draw_screen_row(404, "Support log file", log_path,
+  draw_screen_row(422, "Support log file", log_path,
                    RGBA8(235, 240, 250, 255));
 
   char footer[160];

@@ -1,0 +1,20 @@
+Vita Moonlight zstd 1.5.7 compatibility patch
+Copyright (C) 2026 Vita Moonlight contributors
+SPDX-License-Identifier: GPL-3.0-or-later
+
+The Vita target consumes a static archive and does not support the upstream
+target's forced position-independent-code setting.
+
+diff --git a/build/cmake/lib/CMakeLists.txt b/build/cmake/lib/CMakeLists.txt
+index 42c5a3c..99f1a07 100644
+--- a/build/cmake/lib/CMakeLists.txt
++++ b/build/cmake/lib/CMakeLists.txt
+@@ -233,7 +233,7 @@ if (ZSTD_BUILD_STATIC)
+     set_target_properties(
+             libzstd_static
+             PROPERTIES
+-            POSITION_INDEPENDENT_CODE On
++            POSITION_INDEPENDENT_CODE Off
+             OUTPUT_NAME ${STATIC_LIBRARY_BASE_NAME})
+ 
+     if (ZSTD_FRAMEWORK)

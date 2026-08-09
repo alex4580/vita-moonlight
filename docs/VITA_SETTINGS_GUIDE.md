@@ -6,6 +6,8 @@ The first-run configuration is designed to work without tuning:
 - **Maximum compatibility** controller: Xbox/XInput, relative-mouse touch,
   local PS button, gyro off.
 - Performance overlay Off and support log Not capturing.
+- **Keep Vita awake while streaming** On to prevent a hands-off stream from
+  dimming or suspending. It has no worker outside an active stream.
 
 The Vita's panel is 960x544. Matching the Windows virtual display, Sunshine
 encoder, decoder, and panel avoids the 4:3 fallback and unnecessary scaling
@@ -22,11 +24,10 @@ Presets are full configurations, not bitrate shortcuts. All four set:
 - stereo audio with PC-local audio disabled;
 - 60 Hz Vita client timing;
 - host game optimization enabled;
-- H.264 reference-frame invalidation enabled for packet-loss recovery;
-- Vita frame pacing enabled;
+- automatic clean-keyframe (IDR) recovery compatible with the Vita decoder;
+- immediate presentation without artificial future-frame drops;
 - Vita vblank wait disabled;
 - fit-entire-frame scaling instead of crop/fill;
-- Vita power-save suppression enabled.
 
 They differ only where the use case calls for it:
 
@@ -39,11 +40,12 @@ They differ only where the use case calls for it:
 
 Changing any owned stream value changes the displayed preset to **Custom**;
 your custom values remain saved. Selecting a named preset restores every owned
-value listed above. It does not change controller/touch settings.
+value listed above. It does not change controller, touch, or Vita power
+settings.
 
 **Restore recommended defaults** is broader than selecting the Recommended stream
 preset. It also selects Maximum compatibility input, turns the performance
-overlay off, and stops any support-log capture.
+overlay off, stops any support-log capture, and enables stream-only keep-awake.
 
 ## Resolution and the Windows virtual display
 
@@ -61,14 +63,22 @@ already running.
 
 To change it remotely:
 
-1. Hold **START**, then press **L + R** to open the stream menu.
+1. Hold **SELECT first**, then press **L + R** within one second to open the
+   stream menu. That documented SELECT-led sequence is consumed locally
+   instead of being sent to the PC. START remains an ordinary immediate
+   Menu/Start button for the streamed application.
 2. Open **Stream & virtual display**.
 3. Select **Stream + virtual display** and choose 960x544, 960x540, or
    1280x720.
 4. Select **Apply resolution + reconnect**.
 
-Moonlight tells the host agent to change the active VDD, disconnects only the
-video session, and resumes the same Sunshine application. The Windows game
+Moonlight saves the selection and performs a controlled reconnect to the same
+Sunshine application. Before both the initial launch and the resume request,
+the paired Vita authenticates to the Windows companion and asks it to arm the
+dedicated display at the requested resolution. The matching stop restores the
+physical layout before the new generation begins; an old delayed stop cannot
+tear down the newer generation. The client does not send a display-mode hotkey
+and the user does not select a Windows output by hand. The Windows game
 continues running. The reconnect renegotiates resolution, FPS, bitrate,
 network mode, and other stream-start settings with Sunshine's encoder. Expect
 a brief black screen while this happens.
@@ -84,13 +94,13 @@ Vita-display switching and Force SDR are enabled under **Streaming**, and use
 The pre-stream Settings screen and in-stream menu use the same saved
 configuration.
 
-| Settings category | Available before a stream | Matching in-stream access |
+| Settings category | Available before a stream | In-stream access |
 |---|---|---|
 | **Stream quality** | Preset, managed resolution, FPS, and bitrate | **Stream & virtual display**, plus Apply resolution + reconnect |
-| **Advanced streaming** | Host optimization, packet recovery, network mode, display synchronization, frame pacing, and aspect scaling | **Stream & virtual display**, plus Apply resolution + reconnect |
-| **Controller** | Controller preset, gyro/sensitivity, sprint helper, PS behavior, shoulder swap, and graphical button mapping | **Controller & input**, plus Apply input changes + reconnect |
-| **Touch and keyboard** | Touch mode, front/rear zones, mouse acceleration, and keyboard layout | Core touch mode under **Controller & input**; keyboard on the main stream menu |
-| **System and support** | Performance overlay, Start/Stop support log, PC audio, Vita power behavior, and X/O layout | Performance overlay, Real-time diagnostics, and Start/Stop support log on the main stream menu |
+| **Advanced streaming** | Packet recovery, network mode, optional display synchronization, and aspect scaling | The same four controls under **Stream & virtual display**, plus Apply resolution + reconnect |
+| **Controller** | Controller preset, gyro/sensitivity, sprint helper, PS behavior, shoulder swap, and graphical button mapping | Profile, gyro, sprint, PS, touch mode, and shoulder swap under **Controller & input**; sensitivity and graphical mapping remain pre-stream |
+| **Touch and keyboard** | Touch mode, graphical front tap-zone mapper, rear zones, mouse acceleration, and keyboard layout | Core touch mode under **Controller & input**; keyboard on the main stream menu |
+| **System and support** | Performance overlay, Start/Stop support log, PC audio, Vita power behavior, and X/O layout | Performance overlay, Real-time diagnostics, and Start/Stop support log; audio, power, and X/O layout remain pre-stream |
 
 Immediate settings such as performance-overlay mode update while streaming.
 Stream-format settings and controller type require a reconnect. Each in-stream
@@ -104,11 +114,11 @@ Windows game.
 | **Frame rate** | 60 FPS produces smoother movement and shorter input-to-visible-frame intervals. | 30 FPS is easier for Wi-Fi and decoder load, but less fluid. Intermediate 24/40/50 values are available for special cases and make the preset Custom. |
 | **Video bitrate** | More bits reduce blocks, smearing, and lost detail during motion. | A rate above the sustainable link capacity causes queues, loss, freezes, and added input latency. The accepted range is 1-30 Mbps. |
 | **Network mode** | Auto detect chooses local/remote handling; Local only and Remote / VPN override it. | Forcing the wrong path can reduce responsiveness or reliability. Leave Auto detect selected unless the host path is known. |
-| **Packet-loss recovery** | Requests reference-frame invalidation when the host supports it; otherwise Moonlight falls back to requesting a clean IDR frame. | Small protocol/encoder overhead; leave it on for Wi-Fi, but the host ultimately decides which recovery mechanism is negotiated. |
-| **Frame pacing** | Drops late or excess frames instead of displaying an uneven queue. | Usually smoother. Turning it off can feel slightly more immediate in a special case but can introduce judder. |
+| **Packet-loss recovery** | Automatically requests a clean IDR keyframe when the decoder must recover. Reference-frame invalidation is intentionally disabled because the Vita hardware decoder requires a rewritten one-reference-frame SPS. | No user tuning is required. This avoids the corruption that reference invalidation can cause when the decoded reference structure differs from the host's original stream. |
+| **Presentation timing** | Displays each completed hardware-decoded frame immediately. | This is the lowest-latency policy and avoids turning harmless one-second timer jitter into future-frame drops. Use Vita vblank synchronization only if visible tearing matters more than minimum latency. |
 | **Wait for Vita vblank** | Synchronizes drawing to the Vita display. | May reduce tearing, but can add synchronization latency; presets leave it off. |
 | **Aspect scaling** | Fit shows the complete encoded frame; Crop / fill removes borders by trimming edges. | Crop can hide desktop UI and game HUD elements. Fit is the safe default. |
-| **Host game optimization** | Allows Sunshine's protocol to request game-oriented settings. | A game may rewrite its own graphics choices. Disable only for titles that repeatedly change them. |
+| **Virtual-display optimization** | Always enabled for the managed host. It lets Sunshine honor the Vita launch resolution and select the dedicated SDR display. | This is part of the host/client compatibility contract and is no longer exposed as a switch. Use a streaming preset or resolution control instead. |
 | **Local audio** | Keeps audio playing on the PC as well as the Vita. | Can cause echo in the room; presets leave it off. |
 
 The client requests H.264 only because the Vita has a hardware H.264 decoder.
@@ -124,6 +134,12 @@ WMM enabled, and reduce competing 2.4 GHz traffic. Raise bitrate only after
 motion is stable; do not lower resolution merely because a static desktop
 reports fewer than 60 newly rendered frames.
 
+If the Vita link is unstable, open **Vita Settings > Power Save Settings** and
+clear **Use Wi-Fi in Power Save Mode**. [Sony's Vita manual](https://manuals.playstation.net/document/gb/psvita/settings/wifi_savemode.html)
+says disabling that power-saving option may improve Wi-Fi stability; it does
+not guarantee higher throughput. Vita Moonlight does not call undocumented
+wireless or power APIs to force this setting.
+
 ## Performance overlay
 
 Choose **Performance overlay** in Settings or on the stream menu's main page.
@@ -131,7 +147,7 @@ It is drawn in the top-right corner over a 50%-alpha background.
 
 | Mode | Shows | Collection behavior |
 |---|---|---|
-| **Off** | Nothing | Extended per-frame diagnostics are skipped unless the diagnostics screen or a support-log capture needs them. |
+| **Off** | Nothing | FPS aggregation and extended per-frame/transport diagnostics are disabled unless the diagnostics screen or a support-log capture needs them. |
 | **Frame rate** | Rendered FPS / target FPS | Smallest on-screen view. |
 | **Frame rate + network** | FPS, Moonlight connection health, estimated round-trip time, and measured encoded-video Kbps | Useful for separating encoder artifacts from an unstable link. |
 | **Advanced** | The above, stream resolution/configured bitrate, average and maximum decode time, dropped frames, and recovered/failed/out-of-sequence packet counts | Best for short tuning sessions; more screen area and metric collection. |
@@ -152,7 +168,7 @@ in-stream menu and select the dedicated **Real-time diagnostics** item to see:
   reconnect when they differ;
 - average/maximum decode time and dropped frames;
 - virtual-controller type;
-- gyro enabled/requested state, report rate, event count, and sensor errors;
+- gyro enabled/requested state, negotiated report rate, and sensor errors;
 - performance-overlay and support-log state;
 - the actual support-log path.
 
@@ -160,10 +176,11 @@ Opening this screen collects the metrics required to update it, but does not
 write a file. Choose **Start support log** on the main in-stream menu, or press
 **Triangle** while this screen says **Not capturing**. After reproducing the
 problem, choose **Stop and save support log** or press Triangle again. Press
-**O** or **START** to return.
+the configured **Cancel** button (O by default) or **START** to return.
 
 Support logging is off by default. When it is not capturing, Vita Moonlight
-does not open, create, or write a support-log file. A capture writes:
+does not open, create, or write a support-log file. It also does not maintain
+gyro-sample counters or logging-only event totals. A capture writes:
 
 `ux0:data/moonlight/moonlight.log`
 
@@ -212,10 +229,12 @@ optional Python summarizer.
 ## On-screen keyboard
 
 Focus a text field in the streamed Windows application first. Then either hold
-**START** and tap **D-pad Left** within 300 ms, or choose **Open on-screen
+**SELECT first** and tap **D-pad Left** within one second, or choose **Open on-screen
 keyboard** from the in-stream menu. Typed characters are forwarded
 immediately; Backspace, Left/Right, and Enter are sent as PC keys. Close or
-minimize the Vita keyboard to return to the stream.
+minimize the Vita keyboard to return to the stream. When opened from the
+in-stream menu, that menu closes first so the keyboard returns directly to
+live video.
 
 Select the matching US, Spanish, or Latin American layout under
 **Settings > Touch and keyboard > Keyboard layout**. The keyboard translates
@@ -270,8 +289,8 @@ If Steam does not expose gyro, inspect **Real-time diagnostics**:
 
 - **Awaiting host request** means the DS4 motion path is enabled locally but
   Sunshine has not requested gyro samples.
-- A report rate and increasing event count confirms the Vita is sending
-  samples.
+- **Reporting at _N_ Hz** confirms the Vita is sending samples at the rate the
+  host requested. Individual samples are deliberately not counted.
 - A sensor error identifies a Vita-side motion failure.
 
 ### Custom input and touch
@@ -321,22 +340,29 @@ virtual controller type. Reconnect only after changing the advertised
 Xbox/DS4 controller profile. The simple **Swap L1/R1 with L2/R2** option and
 Custom mapping are mutually exclusive.
 
-#### Front-touch zone mapper
+#### Front-touch tap-zone mapper
 
-Open **Settings > Touch and keyboard > Front-touch zone mapper** for a scaled
+Open **Settings > Touch and keyboard > Front-touch tap-zone mapper** for a scaled
 Vita-screen preview. White dots show current front touches. The four corner
 zones share an **Edge inset** and square **Zone size**, while each corner has
 its own action. Available actions include the local stream menu and keyboard,
 PC Guide and gamepad buttons, mouse buttons, Esc/Tab/I/M, F1-F12, or a manual
-keyboard code. Set a corner to **None** when touches there should continue to
-the selected normal touch mode.
+keyboard code. Set a corner to **None** when no action is needed there.
 
-The **Enabled** row in the graphical editor and the **Front-touch zones** row
-in the main Input menu control the same setting. Geometry, enabled state, and
-assignments take effect immediately; leaving Settings writes them to the main
-Moonlight configuration. No reconnect is required. Reset restores a 150-pixel
-corner size with top-left opening the stream menu, bottom-left sending PC
-Guide, and the other corners unassigned.
+The graphical editor is the single place that enables and configures these
+zones. A zone action fires only for a short, stationary, single-finger tap that
+begins in that corner. Moving farther than the tap tolerance, holding for more
+than 250 ms, or adding another finger permanently hands that gesture to the
+selected normal touch mode until every finger is lifted. A mouse drag, tablet
+stroke, DS4 touch, or swipe can therefore begin in or cross a mapped corner
+without firing its action. The small initial tap tolerance prevents hand
+jitter from triggering a drag; it does not add delay to touches that begin
+outside an assigned zone.
+
+Geometry, enabled state, and assignments take effect immediately; leaving
+Settings writes them to the main Moonlight configuration. No reconnect is
+required. Reset restores a 150-pixel corner size with top-left opening the
+stream menu, bottom-left sending PC Guide, and the other corners unassigned.
 
 ### PS button behavior
 
@@ -346,6 +372,18 @@ Guide, and the other corners unassigned.
 | **Safe PC Guide** | Waits 250 ms, then sends a single PS as Guide. Quick double-PS remains local. | Steam Guide works with a small delay. |
 | **Immediate PC Guide** | Sends Guide immediately; double-PS still releases to LiveArea. | Lowest Guide delay, but the first event can trigger Steam, Windows, or paused media before the second press is known. |
 | **System / LiveArea** | Vita retains PS; one press leaves Moonlight. | No captured double-tap and no PC Guide event. |
+
+The in-stream menu displays the active Confirm and Cancel buttons, so its
+button hints also follow **Swap X and O in Moonlight**.
+
+## Keep Vita awake while streaming
+
+This setting is on for a fresh installation because a hands-off cutscene or
+video should not let the Vita suspend an otherwise healthy stream. Its small
+worker exists only during an active stream, refreshes the screen/suspend timers
+every ten seconds, and is destroyed at disconnect. Turning the setting off
+removes the worker and restores the Vita's normal timers. Changing a named
+streaming preset does not change this independent preference.
 
 ## Practical tuning order
 

@@ -41,8 +41,6 @@ enum {
 };
 
 // Variables globales para actualización pendiente de IP
-int pending_ip_update_idx = -1;
-char pending_ip_update[64] = "";
 int first_scan_pending = 0;
 
 // Prototipos para el control del escaneo de hosts
@@ -61,6 +59,19 @@ enum {
   HOST_MANAGE_FORCE_CONNECT,
   HOST_MANAGE_BACK
 };
+
+static const char *device_label(const device_info_t *info) {
+  return info->display_name[0] ? info->display_name : info->name;
+}
+
+static void connect_saved_device(
+    device_info_t *info, int host_index, const char *discovered_ip) {
+  if (info->paired) {
+    ui_connect_paired_device(info, host_index, discovered_ip);
+  } else {
+    ui_connect_and_pairing(info);
+  }
+}
 
 static int ui_host_manage_menu_loop(int cursor, void *context, const input_data *input) {
   device_info_t *info = (device_info_t *)context;
@@ -98,21 +109,10 @@ static int ui_host_manage_menu_loop(int cursor, void *context, const input_data 
         return 1;
       }
       // Calcular broadcast a partir de la IP interna
-      char broadcast[32] = {0};
-      const char *ip = info->internal;
-      if (!ip[0]) {
-        flash_message("No IP for this host");
-        return 1;
-      }
+      /* A limited broadcast works for IPv4 literals and saved DNS names
+       * without deriving a subnet from untrusted text. */
+      const char *broadcast = "255.255.255.255";
       // Copiar IP y reemplazar el último octeto por 255
-      strncpy(broadcast, ip, sizeof(broadcast)-1);
-      char *last_dot = strrchr(broadcast, '.');
-      if (last_dot) {
-        strcpy(last_dot+1, "255");
-      } else {
-        flash_message("Invalid IP");
-        return 1;
-      }
       extern bool send_wol_packet(const char *mac, const char *ip_broadcast, int port);
       bool wol_ok = send_wol_packet(info->mac, broadcast, 9);
       if (wol_ok) {
@@ -129,8 +129,6 @@ static int ui_host_manage_menu_loop(int cursor, void *context, const input_data 
       vita_debug_log("[UI] Menú gestión: conectar a %s", info->name);
       stop_host_scan();
       // Si la IP está cambiada, pedir confirmación antes de emparejar
-      extern int pending_ip_update_idx;
-      extern char pending_ip_update[64];
       int host_idx = -1;
       for (int i = 0; i < known_devices.count; i++) {
         if (&known_devices.devices[i] == info) {
@@ -138,31 +136,32 @@ static int ui_host_manage_menu_loop(int cursor, void *context, const input_data 
           break;
         }
       }
-      if (host_idx >= 0 && pending_ip_update_idx == host_idx && pending_ip_update[0] != '\0') {
-        char msg[320];
-        snprintf(msg, sizeof(msg), "Host IP changed!\nOld: %s\nNew: %s\nDo you want to pair with the new IP?", info->internal, pending_ip_update);
-        int res = display_confirm(msg);
-        if (res) {
-          ui_check_ip_update(info, pending_ip_update);
-          device_info_t *updated = find_device(info->name);
-          if (updated) info = updated;
-          ui_connect_paired_device(info);
-        } else {
-          flash_message("Connection cancelled");
-        }
-      } else {
-        ui_connect_paired_device(info);
-      }
+      char discovered_ip[64] = "";
+      struct host_status status = {0};
+      bool has_discovered_ip = false;
+      (void)host_scan_get_snapshot(
+          host_idx, &status, discovered_ip, sizeof(discovered_ip),
+          &has_discovered_ip);
+      /* Saved pinned addresses are always tried first. The unauthenticated
+       * mDNS result is only a fallback hint inside the paired connection
+       * flow, where it must pass the existing Sunshine certificate pin. */
+      connect_saved_device(
+          info, host_idx, has_discovered_ip ? discovered_ip : NULL);
       return 1;
     }
     case HOST_MANAGE_DELETE: {
       char msg[320];
-      snprintf(msg, sizeof(msg), "Delete host?\nAre you sure you want to delete %s?", info->name);
+      snprintf(msg, sizeof(msg),
+               "Forget %s on this Vita?\n\n"
+               "This removes local pairing data. To revoke the Vita from "
+               "the PC too, remove it from Sunshine's paired clients.",
+               device_label(info));
       int res = display_confirm(msg);
       if (res) {
         vita_debug_log("[UI] Host management: delete %s", info->name);
         if (remove_device(info->name)) {
-          flash_message("Host deleted");
+          host_scan_clear_pending_ip_update(-1);
+          flash_message("Computer forgotten on this Vita");
         } else {
           flash_message("Error deleting host");
         }
@@ -175,35 +174,54 @@ static int ui_host_manage_menu_loop(int cursor, void *context, const input_data 
     case HOST_MANAGE_CHANGE_IP: {
       vita_debug_log("[UI] Menú gestión: cambiar IP %s", info->name);
       char new_ip[256] = "";
-      if (ime_dialog_string(new_ip, "Enter new IP:", info->internal) == 0 && strlen(new_ip) > 0) {
+      if (ime_dialog_string(new_ip, sizeof(new_ip), "Enter new IP:",
+                            info->internal) == 0 && strlen(new_ip) > 0) {
+        if (info->paired &&
+            !check_connection(info->name, new_ip, info->port)) {
+          display_error("The computer at that address did not match the "
+                        "saved Sunshine identity.\n"
+                        "The address was not changed.");
+          return 1;
+        }
+        char previous_ip[sizeof(info->internal)];
+        strncpy(previous_ip, info->internal, sizeof(previous_ip) - 1);
+        previous_ip[sizeof(previous_ip) - 1] = '\0';
         strncpy(info->internal, new_ip, sizeof(info->internal)-1);
         info->internal[sizeof(info->internal)-1] = '\0';
-        strncpy(info->external, new_ip, sizeof(info->external)-1);
-        info->external[sizeof(info->external)-1] = '\0';
         info->prefer_external = false;
-        save_device_info(info);
-        flash_message("IP updated: %s", new_ip);
+        if (save_device_info(info)) {
+          flash_message("IP updated: %s", new_ip);
+        } else {
+          strncpy(info->internal, previous_ip, sizeof(info->internal) - 1);
+          info->internal[sizeof(info->internal) - 1] = '\0';
+          display_error("The new address could not be saved.\n"
+                        "Check free storage and try again.");
+        }
       } else {
         flash_message("IP change cancelled");
       }
       return 1;
     }
     case HOST_MANAGE_CHANGE_NAME: {
-      vita_debug_log("[UI] Menú gestión: cambiar nombre %s", info->name);
+      vita_debug_log("[UI] Set display name for %s", info->name);
       char new_name[256] = "";
-      if (ime_dialog_string(new_name, "Enter new name:", info->name) == 0 && strlen(new_name) > 0) {
-        // Guardar el nombre anterior para eliminar el archivo viejo
-        char old_name[256];
-        strncpy(old_name, info->name, sizeof(old_name)-1);
-        old_name[sizeof(old_name)-1] = '\0';
-        strncpy(info->name, new_name, sizeof(info->name)-1);
-        info->name[sizeof(info->name)-1] = '\0';
-        save_device_info(info);
-        // Eliminar el archivo antiguo si el nombre cambió
-        if (strcmp(old_name, new_name) != 0) {
-          remove_device(old_name);
+      if (ime_dialog_string(new_name, sizeof(new_name), "Enter display name:",
+                            device_label(info)) == 0 && strlen(new_name) > 0) {
+        char previous_name[256];
+        strncpy(previous_name, info->display_name,
+                sizeof(previous_name) - 1);
+        previous_name[sizeof(previous_name) - 1] = '\0';
+        strncpy(info->display_name, new_name, sizeof(info->display_name)-1);
+        info->display_name[sizeof(info->display_name)-1] = '\0';
+        if (save_device_info(info)) {
+          flash_message("Display name updated: %s", new_name);
+        } else {
+          strncpy(info->display_name, previous_name,
+                  sizeof(info->display_name) - 1);
+          info->display_name[sizeof(info->display_name) - 1] = '\0';
+          display_error("The display name could not be saved.\n"
+                        "Check free storage and try again.");
         }
-        flash_message("Name updated: %s", new_name);
       } else {
         flash_message("Name change cancelled");
       }
@@ -212,7 +230,7 @@ static int ui_host_manage_menu_loop(int cursor, void *context, const input_data 
     case HOST_MANAGE_FORCE_CONNECT:
       vita_debug_log("[UI] Menú gestión: conexión forzada a %s", info->name);
       stop_host_scan();
-      ui_connect_paired_device(info); // Aquí podrías agregar lógica especial si lo necesitas
+      connect_saved_device(info, -1, NULL);
       return 1;
     case HOST_MANAGE_BACK:
       return 1;
@@ -228,9 +246,9 @@ void ui_host_manage_menu(device_info_t *info) {
   menu_entry menu[12];
   int idx = 0;
   char title[256];
-  snprintf(title, sizeof(title), "Host: %s", info->name);
+  snprintf(title, sizeof(title), "Computer: %s", device_label(info));
   // Mensaje principal
-  menu[idx++] = (menu_entry){ .name = "Host management", .disabled = true, .color = 0xFFFFFFFF };
+  menu[idx++] = (menu_entry){ .name = "Computer", .disabled = true, .color = 0xFFFFFFFF };
   menu[idx++] = (menu_entry){ .name = title, .disabled = true, .color = 0xFF00AAFF };
   // Info IP y estado con punto de color
   char ipinfo[320];
@@ -243,8 +261,12 @@ void ui_host_manage_menu(device_info_t *info) {
     }
   }
   if (host_idx >= 0) {
-    struct host_status st = g_host_status[host_idx];
-    if (pending_ip_update_idx == host_idx && pending_ip_update[0] != '\0') {
+    struct host_status st = {0};
+    char pending_ip[64] = "";
+    bool has_pending_ip = false;
+    (void)host_scan_get_snapshot(
+        host_idx, &st, pending_ip, sizeof(pending_ip), &has_pending_ip);
+    if (has_pending_ip) {
       snprintf(status_text, sizeof(status_text), "[IP changed]");
     } else if (st.current_ip[0] && strcmp(info->internal, st.current_ip) != 0) {
       snprintf(status_text, sizeof(status_text), "[IP changed]");
@@ -268,11 +290,9 @@ void ui_host_manage_menu(device_info_t *info) {
   // menu[idx++] = (menu_entry){ .name = "Check MAC", .id = HOST_MANAGE_CHECK_MAC }; // Oculta la opción Check MAC
   menu[idx++] = (menu_entry){ .name = "Wake on LAN (WOL)", .id = HOST_MANAGE_WAKE };
 // Opción extra para pruebas
-#define HOST_MANAGE_CHECK_MAC 3001
-  menu[idx++] = (menu_entry){ .name = "Force connect", .id = HOST_MANAGE_FORCE_CONNECT };
-  menu[idx++] = (menu_entry){ .name = "Delete", .id = HOST_MANAGE_DELETE };
+  menu[idx++] = (menu_entry){ .name = "Forget on this Vita", .id = HOST_MANAGE_DELETE };
   menu[idx++] = (menu_entry){ .name = "Change IP", .id = HOST_MANAGE_CHANGE_IP };
-  menu[idx++] = (menu_entry){ .name = "Change Name", .id = HOST_MANAGE_CHANGE_NAME };
+  menu[idx++] = (menu_entry){ .name = "Set display name", .id = HOST_MANAGE_CHANGE_NAME };
   menu[idx++] = (menu_entry){ .name = "Back", .id = HOST_MANAGE_BACK };
   menu_geom geom = make_geom_centered(600, 320);
   display_menu(menu, idx, &geom, &ui_host_manage_menu_loop, &ui_host_manage_menu_back, NULL, info);
@@ -280,23 +300,23 @@ void ui_host_manage_menu(device_info_t *info) {
 
 int ui_main_menu_loop(int cursor, void *context, const input_data *input) {
   // menu_entry *menu = (menu_entry*)context; // Variable no usada
-  extern volatile int g_host_status_changed;
-  extern volatile int g_host_scan_thread_status;
+  bool status_changed = host_scan_take_status_changed();
   // Refresco manual con Triángulo
   if ((input->buttons & SCE_CTRL_TRIANGLE) != 0) {
     vita_debug_log("[UI] Refresco manual solicitado (Triángulo): reiniciando escaneo de hosts");
     stop_host_scan();
     start_host_scan();
-    g_host_status_changed = 0; // Limpiar flag para evitar refresco doble
     first_scan_pending = 0;
     return 2; // Forzar refresco del menú
   }
   // Refresco automático solo una vez tras el primer escaneo, pero NO si hay IP cambiada
-  if (first_scan_pending && g_host_status_changed && g_host_scan_thread_status != 1) {
+  if (first_scan_pending && status_changed &&
+      host_scan_state() != 1) {
     // Si hay IP cambiada, no forzar refresco/reinicio del menú
     int ip_changed = 0;
     for (int i = 0; i < known_devices.count; i++) {
-      struct host_status st = g_host_status[i];
+      struct host_status st = {0};
+      (void)host_scan_get_snapshot(i, &st, NULL, 0, NULL);
       if (st.status == HOST_IP_CHANGED && strcmp(known_devices.devices[i].internal, st.current_ip) != 0) {
         ip_changed = 1;
         break;
@@ -304,18 +324,15 @@ int ui_main_menu_loop(int cursor, void *context, const input_data *input) {
     }
     if (!ip_changed) {
       vita_debug_log("[UI] Refresco automático tras primer escaneo\n");
-      g_host_status_changed = 0;
       first_scan_pending = 0;
       return 2;
     }
     // Si hay IP cambiada, solo limpiar flags pero NO reiniciar menú
-    g_host_status_changed = 0;
     first_scan_pending = 0;
   }
   // Solo refrescar por cambio de estado si el hilo está activo
-  if (g_host_status_changed && g_host_scan_thread_status == 1) {
+  if (status_changed && host_scan_state() == 1) {
     vita_debug_log("[UI] Refrescando menú por cambio de estado de host\n");
-    g_host_status_changed = 0;
     return 2; // Forzar refresco del menú
   }
 
@@ -325,6 +342,7 @@ int ui_main_menu_loop(int cursor, void *context, const input_data *input) {
   // Permitir acceder al menú de gestión de host siempre, incluso si está offline o la IP cambió
   if (cursor >= MAIN_MENU_CONNECT_PAIRED && cursor < MAIN_MENU_QUIT) {
     int host_idx = cursor - MAIN_MENU_CONNECT_PAIRED;
+    if (host_idx < 0 || host_idx >= known_devices.count) return 0;
     device_info_t *info = &known_devices.devices[host_idx];
     stop_host_scan();
     ui_host_manage_menu(info);
@@ -334,31 +352,6 @@ int ui_main_menu_loop(int cursor, void *context, const input_data *input) {
 
   // Al seleccionar cualquier opción que cambie de menú, detener el escaneo de hosts
   int exit_menu = 0;
-  if (cursor >= MAIN_MENU_CONNECT_PAIRED && cursor < MAIN_MENU_QUIT) {
-    device_info_t *info = &known_devices.devices[cursor - MAIN_MENU_CONNECT_PAIRED];
-    int host_idx = cursor - MAIN_MENU_CONNECT_PAIRED;
-    struct host_status st;
-    st = g_host_status[host_idx];
-    vita_debug_log("[UI] (LOOP) host_idx=%d, hilo_estado=%d, st.status=%d, st.current_ip=%s", host_idx, g_host_scan_thread_status, st.status, st.current_ip);
-
-    if (st.status == HOST_IP_CHANGED && strcmp(info->internal, st.current_ip) != 0) {
-      vita_debug_log("[UI] Host %s detected IP change: old=%s, new=%s. Deferring IP update dialog.", info->name, info->internal, st.current_ip);
-      pending_ip_update_idx = host_idx;
-      strncpy(pending_ip_update, st.current_ip, sizeof(pending_ip_update)-1);
-      pending_ip_update[sizeof(pending_ip_update)-1] = '\0';
-      exit_menu = 1;
-    } else if (st.status == HOST_ONLINE) {
-      vita_debug_log("[UI] Host %s is ONLINE. Connecting normally.", info->name);
-      vita_debug_log("[UI] Deteniendo escaneo de hosts antes de conectar");
-      stop_host_scan();
-      ui_connect_paired_device(info);
-      exit_menu = 2;
-    } else {
-      vita_debug_log("[UI] Host %s is OFFLINE or unreachable.", info->name);
-      flash_message("Host is offline or unreachable.");
-      return 0;
-    }
-  }
   switch (cursor) {
     case MAIN_MENU_CONNECT:
       vita_debug_log("[UI] Seleccionado: Add manually");
@@ -400,8 +393,10 @@ int ui_main_menu_loop(int cursor, void *context, const input_data *input) {
       if (connection_get_status() != LI_DISCONNECTED) {
         connection_terminate();
       }
-      exit(0);
-      return 0;
+      /* Return through main() so input/motion/power/network resources are
+       * released in a defined order and the PS button is always unlocked. */
+      exit_menu = 1;
+      break;
   }
   // Si se va a salir del menú, detener el escaneo
   if (exit_menu) {
@@ -429,7 +424,13 @@ int ui_main_menu() {
     stop_host_scan(); // Detener escaneo si por alguna razón sigue activo
   }
 
-  menu_entry menu[16];
+  size_t menu_capacity = (size_t)known_devices.count + 10;
+  menu_entry *menu = calloc(menu_capacity, sizeof(*menu));
+  if (menu == NULL) {
+    display_error("Not enough memory to display saved computers.");
+    stop_host_scan();
+    return 1;
+  }
   int idx = 0;
 
 #define MENU_TITLE(NAME) \
@@ -451,7 +452,8 @@ int ui_main_menu() {
 
   char program_info[256];
 #ifdef __vita__
-  snprintf(program_info, 256, "Moonlight v%d.%d.%d", VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH);
+  snprintf(program_info, 256, "Moonlight v%d.%d.%d  [%s]",
+           VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH, VITA_BUILD_ID);
   MENU_TITLE(program_info);
 #endif
 
@@ -468,7 +470,7 @@ int ui_main_menu() {
   static char last_ip_logged[256] = "";
   if (ui_connect_connected()) {
     MENU_SEPARATOR("Current connection");
-    ui_connect_address(addr);
+    ui_connect_address(addr, sizeof(addr));
     sprintf(resume_msg, "Resume connection to %s", addr);
     MENU_ENTRY(MAIN_MENU_CONNECT_RESUME, resume_msg, false);
   } else {
@@ -477,25 +479,29 @@ int ui_main_menu() {
     MENU_ENTRY(MAIN_MENU_CONNECT, "Add manually ...", false);
 
     if (known_devices.count) {
-      MENU_SEPARATOR("Paired computers");
+      MENU_SEPARATOR("Saved computers");
       // Usar resultados del hilo de escaneo
       for (int i = 0; i < known_devices.count; i++) {
         device_info_t *cur = &known_devices.devices[i];
-        if (!cur->paired) {
-          continue;
-        }
-        struct host_status st;
-        st = g_host_status[i];
+        struct host_status st = {0};
+        char pending_ip[64] = "";
+        bool has_pending_ip = false;
+        (void)host_scan_get_snapshot(
+            i, &st, pending_ip, sizeof(pending_ip), &has_pending_ip);
 
         // unsigned int color = 0; // No usado
         // const char* color_str = ""; // No usado
         // bool ip_changed = (st.current_ip[0] && strcmp(cur->internal, st.current_ip) != 0); // No usado
-        // bool ip_pending = (pending_ip_update_idx == i && pending_ip_update[0] != '\0'); // No usado
-        MENU_ENTRY(MAIN_MENU_CONNECT_PAIRED + i, cur->name, false);
+        MENU_ENTRY(MAIN_MENU_CONNECT_PAIRED + i, device_label(cur), false);
         int real_idx = idx - 1;
         menu[real_idx].is_host_entry = true;
+        if (!cur->paired) {
+          strcpy(menu[real_idx].subname, "Pairing required");
+          menu[real_idx].color = 0xFF00FFFF;
+          continue;
+        }
         // Si hay cambio de IP pendiente para este host, forzar amarillo y saltar el resto
-        if (pending_ip_update_idx == i && pending_ip_update[0] != '\0') {
+        if (has_pending_ip) {
           strcpy(menu[real_idx].subname, "[IP changed]");
           menu[real_idx].color = 0xFF00FFFF;
           vita_debug_log("[UI] Host %s menu idx=%d, color=0x%08X (YELLOW, IP pendiente), archivo=ui.c", cur->name, real_idx, 0xFF00FFFF);
@@ -531,7 +537,15 @@ int ui_main_menu() {
 
   // Solo iniciar escaneo si NO hay cambio de IP pendiente y no se ha hecho ya
   menu_geom geom = make_geom_centered(500, 200);
-  return display_menu(menu, idx, &geom, &ui_main_menu_loop, &ui_main_menu_back, NULL, NULL);
+  int result = display_menu(
+      menu, idx, &geom, &ui_main_menu_loop, &ui_main_menu_back, NULL, NULL);
+  /* Back/O exits display_menu without passing through the explicit Quit
+   * entry. Join the scanner on every return path before main() tears down the
+   * Vita network stack. stop_host_scan() is idempotent when a menu action
+   * already stopped it. */
+  stop_host_scan();
+  free(menu);
+  return result;
 }
 
 int global_loop(int cursor, void *ctx, const input_data *input) {
@@ -559,6 +573,8 @@ void gui_loop() {
   gui_init();
 
   while (ui_main_menu() == 2);
+}
 
+void gui_shutdown() {
   vita2d_fini();
 }

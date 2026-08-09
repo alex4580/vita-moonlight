@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Globalization;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Xml.Linq;
 using Microsoft.Win32;
@@ -14,6 +15,13 @@ internal enum PnPUtilExitDisposition
     Failure,
 }
 
+internal sealed record ManagedVddDeviceStatus(
+    string InstanceId,
+    bool Present,
+    bool Enabled,
+    uint DeviceStatus,
+    uint ProblemCode);
+
 internal sealed class HostRestartRequiredException(string message) : Exception(message);
 
 internal sealed class DisplayWizardAdapter
@@ -21,6 +29,12 @@ internal sealed class DisplayWizardAdapter
     private const string DriverHardwareId = @"ROOT\MttVDD";
     private const string DriverClassGuid = "4D36E968-E325-11CE-BFC1-08002BE10318";
     private const string DriverConfigurationDirectory = @"C:\VirtualDisplayDriver";
+    private const uint CrSuccess = 0;
+    private const uint CrNoSuchDevNode = 0x0000000d;
+    private const uint CmDisableUiNotOk = 0x00000004;
+    private const uint CmDisablePersist = 0x00000008;
+    private const uint CmProblemDisabled = 22;
+    private const uint DeviceNodeStarted = 0x00000008;
     private static readonly IReadOnlyDictionary<string, string> DriverFileHashes =
         new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
@@ -75,8 +89,13 @@ internal sealed class DisplayWizardAdapter
         return new DisplayWizardAdapter(Path.GetFullPath(selected));
     }
 
-    internal void PrepareMode(int width, int height, int fps)
+    internal void PrepareMode(
+        DisplayTransactionLease transaction,
+        int width,
+        int height,
+        int fps)
     {
+        transaction.RequireActive();
         RequireProtectedBundle();
         ValidateDimension(width, nameof(width), 64, 7680);
         ValidateDimension(height, nameof(height), 64, 4320);
@@ -84,19 +103,28 @@ internal sealed class DisplayWizardAdapter
         ValidateDriverBundle();
         var configurationPath = EnsureDriverConfiguration();
         AddMode(configurationPath, width, height, fps);
-        ReloadDriver();
+        ReloadDriver(transaction);
     }
 
-    internal void InstallDriver()
+    internal void InstallDriver(
+        DisplayTransactionLease transaction,
+        string? expectedExistingDeviceInstanceId = null)
     {
+        transaction.RequireActive();
         RequireProtectedBundle();
         ValidateDriverBundle();
-        PrepareDriverConfigurationDirectoryForInstall();
+        var workingDirectory = Path.GetDirectoryName(executablePath)!;
+        // Explicit install/repair is the only operation allowed to acquire a
+        // device. It either reuses the exact journal-owned node, adopts one
+        // unambiguous pre-existing node after recording its enabled baseline,
+        // or publishes a durable creation intent before invoking nefconw.
+        var ownership = ManagedVddOwnershipJournal.PrepareInstallLocked(
+            transaction,
+            expectedExistingDeviceInstanceId);
+        PrepareDriverConfigurationDirectoryForInstall(transaction);
         EnsureDriverConfiguration();
         DriverNativeModeVerification.Invalidate();
-        var workingDirectory = Path.GetDirectoryName(executablePath)!;
-        var driverAlreadyInstalled = IsDriverInstalled();
-        if (!driverAlreadyInstalled)
+        if (ownership.Action == ManagedVddInstallAction.CreateInstance)
         {
             EnsureProcessSucceeded(RunProcess(
                 Path.Combine(workingDirectory, "nefconw.exe"),
@@ -106,6 +134,7 @@ internal sealed class DisplayWizardAdapter
                 "--hardware-id", DriverHardwareId,
                 "--class-name", "Display",
                 "--class-guid", DriverClassGuid));
+            ManagedVddOwnershipJournal.CompleteCreationLocked(transaction);
         }
 
         // Always stage and install the pinned package. This repairs damaged
@@ -116,188 +145,175 @@ internal sealed class DisplayWizardAdapter
             workingDirectory,
             60000,
             "/add-driver", Path.Combine(workingDirectory, "MttVDD.inf"), "/install"));
+        _ = ManagedVddOwnershipJournal.RequireOwnedPresentDevicesLocked(
+            transaction,
+            required: true);
 
         // A third-party package action must not silently replace the fixed
         // directory we pinned before invoking it. Explicit install/repair may
         // safely detach such a replacement and create a fresh protected
         // directory; normal reload and runtime operations only verify.
-        PrepareDriverConfigurationDirectoryForInstall();
+        PrepareDriverConfigurationDirectoryForInstall(transaction);
 
         // Apply the managed modes after staging/installing the package. A real
         // upgrade can replace C:\VirtualDisplayDriver\vdd_settings.xml with
         // the driver's stock copy, while a repair of an equal/newer package
         // leaves the existing file in place. Normalizing at this point handles
         // both cases without assuming a clean installation.
-        EnsureVitaCompatibilityModes();
-        ReloadDriver();
+        EnsureVitaCompatibilityModes(transaction);
+        ReloadDriver(transaction);
     }
 
-    internal bool UninstallDriver()
+    internal bool UninstallDriver(DisplayTransactionLease transaction)
     {
-        RequireProtectedBundle();
-        var topology = new DisplayTopologyService();
-        topology.RecoverPhysicalDisplays();
-        topology.DisableManagedVirtualDisplays();
-        UninstallManager.VerifyPhysicalOnlyTopology(topology);
-
-        if (!IsDriverInstalled() &&
-            FindDriverPackageNames().Count == 0)
+        transaction.RequireActive();
+        if (!File.Exists(ManagedVddOwnershipJournal.JournalFile))
         {
-            // Nothing can consume the fixed path. Remove it only if it is the
-            // exact directory recorded by this installation; an unknown entry
-            // is unrelated data and is deliberately left alone.
-            if (DriverConfigurationDirectoryTrust.TryAcquireVerified(
-                    DriverConfigurationDirectory,
-                    out var trustedDirectory,
-                    out _))
+            var unownedTopology = new DisplayTopologyService();
+            if (!unownedTopology.TryCaptureExactPhysicalOnlySnapshot(
+                    out var physicalOnly) ||
+                physicalOnly is null)
             {
-                using (trustedDirectory)
-                {
-                    TrustedFileSystem.DeleteFile(
-                        DriverConfigurationPath);
-                }
-                DriverConfigurationDirectoryTrust
-                    .DeleteTrustedDirectoryIfEmpty(
-                        DriverConfigurationDirectory);
+                throw new InvalidOperationException(
+                    "Vita Moonlight has no exact ownership journal for the existing virtual display, and Windows is not already in a complete physical-only layout. No unowned device or shared driver package was changed.");
             }
-            DriverNativeModeVerification.Invalidate();
+            Console.WriteLine(
+                "No exact Vita-managed virtual-display ownership exists. The unproven device and shared driver package were left unchanged.");
             return false;
         }
-
-        using (AcquireDriverConfigurationDirectory())
-        {
-            // Refuse to remove a driver whose fixed configuration path is no
-            // longer the protected directory recorded by this installation.
-        }
-
+        RequireProtectedBundle();
+        // Resolve exact authority before changing either PnP or topology.
+        // Uninstall never deletes the shared MttVDD package or its fixed
+        // configuration. It removes only a proven app-created node, restores
+        // an adopted node's recorded baseline, or preserves an out-of-band
+        // state change and relinquishes ownership.
+        var release = ManagedVddOwnershipJournal.PrepareReleaseLocked(
+            transaction);
         var serviceName = StreamingHostLocator.FindSunshineServiceName();
-        var restartSunshine =
-            WindowsServiceManager.GetState(serviceName) == WindowsServiceState.Running;
+        var initialSunshineState =
+            WindowsServiceManager.GetState(serviceName);
+        var stopSunshine = initialSunshineState is not (
+            WindowsServiceState.NotInstalled or
+            WindowsServiceState.Stopped);
+        var restartSunshine = initialSunshineState is
+            WindowsServiceState.Running or
+            WindowsServiceState.StartPending or
+            WindowsServiceState.ContinuePending or
+            WindowsServiceState.PausePending or
+            WindowsServiceState.Paused;
+        var topology = new DisplayTopologyService();
         Exception? operationError = null;
-        if (restartSunshine)
+        if (stopSunshine)
         {
             WindowsServiceManager.Stop(serviceName, "Sunshine");
         }
 
         try
         {
-            var installations = FindDriverInstallations();
-            if (installations.Any(installation =>
-                    string.IsNullOrWhiteSpace(installation.InfPath)))
+            if (release.Device is not null &&
+                release.State?.ReleasedAtUtc is null)
             {
-                throw new InvalidOperationException(
-                    "Windows found the MTT virtual display device but did not expose its driver-store package. " +
-                    "The driver was left installed; remove it from Device Manager instead.");
+                // Establish the physical desktop while exact authority is
+                // still live and Sunshine cannot race the transition. This
+                // includes the concurrent-change path, which preserves the
+                // other controller's PnP state. A released tombstone no
+                // longer grants authority to alter that display's topology.
+                topology.RecoverPhysicalDisplays();
+                topology.DisableManagedVirtualDisplays();
+                UninstallManager.VerifyPhysicalOnlyTopology(topology);
             }
-            var driverPackages = FindDriverPackageNames()
-                .Concat(installations
-                    .Select(installation => installation.InfPath)
-                    .Where(infPath => !string.IsNullOrWhiteSpace(infPath))
-                    .Select(infPath => infPath!))
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .ToArray();
-            var restartRequired = false;
-            var pendingDeviceRemovals = new HashSet<string>(
-                StringComparer.OrdinalIgnoreCase);
-            var pendingPackageRemovals = new HashSet<string>(
-                StringComparer.OrdinalIgnoreCase);
-            foreach (var installation in installations)
+            if (release.Action is ManagedVddReleaseAction.Nothing or
+                ManagedVddReleaseAction.PreserveConcurrentChange)
             {
-                var pendingRestart =
-                    EnsurePnPUtilRemovalAccepted(RunProcess(
-                    "pnputil.exe",
-                    Path.GetDirectoryName(executablePath)!,
-                    60000,
-                    "/remove-device", installation.InstanceId));
-                restartRequired |= pendingRestart;
-                if (pendingRestart)
+                ManagedVddOwnershipJournal.CompleteReleaseLocked(
+                    transaction,
+                    release.Device?.InstanceId,
+                    release.Action);
+                DriverNativeModeVerification.Invalidate();
+                if (release.Action ==
+                    ManagedVddReleaseAction.PreserveConcurrentChange)
                 {
-                    pendingDeviceRemovals.Add(
-                        installation.InstanceId);
+                    Console.WriteLine(
+                        "A concurrent enabled-state change was preserved; Vita Moonlight relinquished the exact VDD instance without changing or removing it.");
                 }
+                return false;
             }
 
-            foreach (var infPath in driverPackages)
+            var owned = release.Device
+                ?? throw new InvalidDataException(
+                    "The managed-VDD release plan has no exact device.");
+            if (release.Action ==
+                ManagedVddReleaseAction.RestoreAdoptedInstance)
             {
-                var pendingRestart =
-                    EnsurePnPUtilRemovalAccepted(RunProcess(
-                    "pnputil.exe",
-                    Path.GetDirectoryName(executablePath)!,
-                    60000,
-                    "/delete-driver", infPath,
-                    "/uninstall",
-                    "/force"));
-                restartRequired |= pendingRestart;
-                if (pendingRestart)
-                {
-                    pendingPackageRemovals.Add(infPath);
-                }
+                SetManagedDriverEnabled(
+                    transaction,
+                    [owned.InstanceId],
+                    release.DesiredEnabled!.Value);
+                topology.RecoverPhysicalDisplays();
+                topology.DisableManagedVirtualDisplays();
+                UninstallManager.VerifyPhysicalOnlyTopology(topology);
+                ManagedVddOwnershipJournal.CompleteReleaseLocked(
+                    transaction,
+                    owned.InstanceId,
+                    release.Action);
+                DriverNativeModeVerification.Invalidate();
+                return false;
             }
 
-            IReadOnlyList<DriverInstallation> remainingInstallations = [];
-            IReadOnlyList<string> remainingPackages = [];
-            for (var attempt = 0; attempt < 20; attempt++)
-            {
-                remainingInstallations = FindDriverInstallations();
-                remainingPackages = FindDriverPackageNames();
-                var unexpectedDevice =
-                    remainingInstallations.Any(installation =>
-                        !pendingDeviceRemovals.Contains(
-                            installation.InstanceId));
-                var unexpectedPackage =
-                    remainingPackages.Any(package =>
-                        !pendingPackageRemovals.Contains(package));
-                if (!unexpectedDevice &&
-                    !unexpectedPackage)
-                {
-                    break;
-                }
-                Thread.Sleep(250);
-            }
-            remainingInstallations = FindDriverInstallations();
-            remainingPackages = FindDriverPackageNames();
-            var unexpectedDevices = remainingInstallations
-                .Where(installation =>
-                    !pendingDeviceRemovals.Contains(
-                        installation.InstanceId))
-                .Select(installation => installation.InstanceId)
-                .ToArray();
-            var unexpectedPackages = remainingPackages
-                .Where(package =>
-                    !pendingPackageRemovals.Contains(package))
-                .ToArray();
-            if (unexpectedDevices.Length > 0 ||
-                (IsDriverInstalled() &&
-                 remainingInstallations.Count == 0))
-            {
-                throw new InvalidOperationException(
-                    "Windows retained an MTT virtual display device that was " +
-                    "not reported as pending restart.");
-            }
-            if (unexpectedPackages.Length > 0)
-            {
-                throw new InvalidOperationException(
-                    "Windows retained an MttVDD driver-store package that was " +
-                    "not reported as pending restart.");
-            }
-
-            DriverNativeModeVerification.Invalidate();
+            SetManagedDriverEnabled(
+                transaction,
+                [owned.InstanceId],
+                enabled: false);
+            var restartRequired = EnsurePnPUtilRemovalAccepted(RunProcess(
+                "pnputil.exe",
+                Path.GetDirectoryName(executablePath)!,
+                60000,
+                "/remove-device", owned.InstanceId));
             if (restartRequired)
             {
                 topology.RecoverPhysicalDisplays();
+                topology.DisableManagedVirtualDisplays();
                 UninstallManager.VerifyPhysicalOnlyTopology(topology);
+                // Retain exact ownership through the required restart so a
+                // retry can prove that this node, not a shared replacement,
+                // disappeared before deleting the journal.
                 return true;
             }
-            using (AcquireDriverConfigurationDirectory())
-            {
-                TrustedFileSystem.DeleteFile(DriverConfigurationPath);
-            }
-            DriverConfigurationDirectoryTrust.DeleteTrustedDirectoryIfEmpty(
-                DriverConfigurationDirectory);
 
+            IReadOnlyList<ManagedVddDeviceStatus> remaining = [];
+            for (var attempt = 0; attempt < 20; attempt++)
+            {
+                remaining = InspectManagedDriverDevices()
+                    .Where(device => device.Present)
+                    .ToArray();
+                var unowned = remaining.Any(device =>
+                    !string.Equals(
+                        device.InstanceId,
+                        owned.InstanceId,
+                        StringComparison.OrdinalIgnoreCase));
+                if (unowned)
+                {
+                    throw new InvalidOperationException(
+                        "An unowned ROOT\\MttVDD instance appeared during exact device removal. The ownership journal was retained and no shared package was deleted.");
+                }
+                if (remaining.Count == 0) break;
+                Thread.Sleep(250);
+            }
+            if (remaining.Count > 0)
+            {
+                throw new InvalidOperationException(
+                    "Windows retained the exact app-created MTT virtual display device after removal.");
+            }
+
+            ManagedVddOwnershipJournal.CompleteReleaseLocked(
+                transaction,
+                owned.InstanceId,
+                release.Action);
+            DriverNativeModeVerification.Invalidate();
             topology.RecoverPhysicalDisplays();
+            topology.DisableManagedVirtualDisplays();
             UninstallManager.VerifyPhysicalOnlyTopology(topology);
-            return restartRequired;
+            return false;
         }
         catch (Exception error)
         {
@@ -306,7 +322,9 @@ internal sealed class DisplayWizardAdapter
         }
         finally
         {
-            if (restartSunshine)
+            if (restartSunshine &&
+                WindowsServiceManager.GetState(serviceName) !=
+                WindowsServiceState.NotInstalled)
             {
                 try
                 {
@@ -317,12 +335,12 @@ internal sealed class DisplayWizardAdapter
                     if (operationError is null)
                     {
                         throw new InvalidOperationException(
-                            "The virtual display was removed, but Sunshine could not be restarted. " +
+                            "The exact virtual-display ownership release finished, but Sunshine could not be restarted. " +
                             restartError.Message,
                             restartError);
                     }
                     throw new AggregateException(
-                        "Virtual-display removal failed and Sunshine could not be restarted.",
+                        "Exact virtual-display ownership release failed and Sunshine could not be restarted.",
                         operationError,
                         restartError);
                 }
@@ -330,8 +348,10 @@ internal sealed class DisplayWizardAdapter
         }
     }
 
-    internal bool EnsureVitaCompatibilityModes()
+    internal bool EnsureVitaCompatibilityModes(
+        DisplayTransactionLease transaction)
     {
+        transaction.RequireActive();
         RequireProtectedBundle();
         ValidateDriverBundle();
         using var directoryLease = AcquireDriverConfigurationDirectory();
@@ -372,10 +392,11 @@ internal sealed class DisplayWizardAdapter
             }
     }
 
-    internal void ReloadDriver()
+    internal void ReloadDriver(DisplayTransactionLease transaction)
     {
+        transaction.RequireActive();
         RequireProtectedBundle();
-        EnsureVitaCompatibilityModes();
+        EnsureVitaCompatibilityModes(transaction);
         // Hold a read-only directory lease that denies write/delete sharing
         // for the entire device restart. The fixed name must still map to the
         // file identity born with our protected DACL before SYSTEM consumes
@@ -385,26 +406,250 @@ internal sealed class DisplayWizardAdapter
         {
             throw new InvalidOperationException("The signed virtual display driver is not installed.");
         }
-        var instanceIds = FindDriverInstanceIds();
-        if (instanceIds.Count == 0)
-        {
-            throw new InvalidOperationException("The virtual display driver is installed, but its PnP instance could not be resolved.");
-        }
+        // Runtime handoff is intentionally fail-closed. Restarting every MTT
+        // node made duplicate/legacy devices available as fallback monitors.
+        var instanceIds = ManagedVddOwnershipJournal
+            .RequireOwnedPresentDevicesLocked(transaction, required: true)
+            .Select(device => device.InstanceId)
+            .ToArray();
+        SetManagedDriverEnabled(
+            transaction,
+            instanceIds,
+            enabled: true);
         foreach (var instanceId in instanceIds)
         {
-            EnsurePnPUtilSucceeded(
-                RunProcess(
-                    "pnputil.exe",
-                    Path.GetDirectoryName(executablePath)!,
-                    45000,
-                    "/enable-device", instanceId),
-                allowAlreadyEnabledNoOp: true);
             EnsurePnPUtilSucceeded(RunProcess(
                 "pnputil.exe",
                 Path.GetDirectoryName(executablePath)!,
                 45000,
                 "/restart-device", instanceId));
         }
+        _ = ManagedVddOwnershipJournal.RequireOwnedPresentDevicesLocked(
+            transaction,
+            required: true);
+    }
+
+    /// <summary>
+    /// Requests a normal Windows device rescan without disabling any display.
+    /// This is the first recovery step for an older installation which left
+    /// only the managed VDD in QueryDisplayConfig.
+    /// </summary>
+    internal static void RescanDisplayDevicesForRecovery()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            throw new PlatformNotSupportedException(
+                "Display-device recovery is available only on Windows.");
+        }
+        var systemDirectory = Environment.GetFolderPath(
+            Environment.SpecialFolder.System);
+        EnsureProcessSucceeded(RunProcess(
+            Path.Combine(systemDirectory, "pnputil.exe"),
+            systemDirectory,
+            45000,
+            "/scan-devices"));
+    }
+
+    /// <summary>
+    /// Restarts one and only one present, enabled MTT VDD instance. The caller
+    /// must separately prove that the active topology is the exact managed
+    /// VDD-only recovery case and must retain the display transaction through
+    /// the final physical-only proof.
+    /// </summary>
+    internal static string RestartExactManagedVddForRecovery(
+        DisplayTransactionLease transaction)
+    {
+        transaction.RequireActive();
+        var instanceId = ManagedVddOwnershipJournal
+            .RequireOwnedEnabledRecoveryTargetLocked(transaction);
+        var systemDirectory = Environment.GetFolderPath(
+            Environment.SpecialFolder.System);
+        EnsurePnPUtilSucceeded(RunProcess(
+            Path.Combine(systemDirectory, "pnputil.exe"),
+            systemDirectory,
+            45000,
+            "/restart-device",
+            instanceId));
+        return instanceId;
+    }
+
+    internal static string SelectExactManagedVddRestartTarget(
+        IEnumerable<ManagedVddDeviceStatus> devices)
+    {
+        var candidates = devices
+            .Where(device => device.Present && device.Enabled)
+            .Select(device => device.InstanceId)
+            .Where(instanceId => !string.IsNullOrWhiteSpace(instanceId))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (candidates.Length != 1)
+        {
+            throw new InvalidOperationException(
+                "Vita Moonlight will not restart a virtual display during recovery because Windows did not expose exactly one present, enabled managed MTT device. " +
+                $"Observed managed candidates: {candidates.Length}. No unrelated or ambiguous display device was changed.");
+        }
+        return candidates[0];
+    }
+
+    internal static bool HasSingleManagedVddRestartTargetForTest(
+        IEnumerable<ManagedVddDeviceStatus> devices) =>
+        devices
+            .Where(device => device.Present && device.Enabled)
+            .Select(device => device.InstanceId)
+            .Where(instanceId => !string.IsNullOrWhiteSpace(instanceId))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Take(2)
+            .Count() == 1;
+
+    internal static IReadOnlyList<ManagedVddDeviceStatus>
+        InspectManagedDriverDevices()
+    {
+        var devices = new List<ManagedVddDeviceStatus>();
+        foreach (var installation in FindDriverInstallations())
+        {
+            var deviceNode = 0u;
+            var locateResult = CM_Locate_DevNodeW(
+                ref deviceNode,
+                installation.InstanceId,
+                0);
+            if (locateResult == CrNoSuchDevNode)
+            {
+                devices.Add(new ManagedVddDeviceStatus(
+                    installation.InstanceId,
+                    false,
+                    false,
+                    0,
+                    0));
+                continue;
+            }
+            EnsureConfigurationManagerSucceeded(
+                locateResult,
+                $"locate managed virtual display {installation.InstanceId}");
+            var statusResult = CM_Get_DevNode_Status(
+                out var deviceStatus,
+                out var problemCode,
+                deviceNode,
+                0);
+            EnsureConfigurationManagerSucceeded(
+                statusResult,
+                $"inspect managed virtual display {installation.InstanceId}");
+            devices.Add(new ManagedVddDeviceStatus(
+                installation.InstanceId,
+                true,
+                IsManagedDeviceEnabled(deviceStatus, problemCode),
+                deviceStatus,
+                problemCode));
+        }
+        return devices;
+    }
+
+    internal static void SetManagedDriverEnabled(
+        DisplayTransactionLease transaction,
+        IEnumerable<string> instanceIds,
+        bool enabled,
+        bool requirePhysicalOnlyBeforeDisable = true)
+    {
+        transaction.RequireActive();
+        if (!OperatingSystem.IsWindows())
+        {
+            throw new PlatformNotSupportedException(
+                "Virtual display device control is available only on Windows.");
+        }
+        if (!enabled && requirePhysicalOnlyBeforeDisable)
+        {
+            // Device disable is permitted only after a separately queried
+            // topology proves that at least one physical path is active and
+            // the managed virtual path is already inactive.
+            UninstallManager.VerifyPhysicalOnlyTopology(
+                new DisplayTopologyService());
+        }
+
+        var requested = instanceIds
+            .Where(instanceId => !string.IsNullOrWhiteSpace(instanceId))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (requested.Count == 0) return;
+
+        var ownedDevices = ManagedVddOwnershipJournal
+            .RequireOwnedPresentDevicesLocked(transaction, required: true);
+        var ownedInstanceIds = ownedDevices
+            .Select(device => device.InstanceId)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (!requested.SetEquals(ownedInstanceIds))
+        {
+            throw new InvalidOperationException(
+                "The requested managed virtual display set is not the exact journal-owned set. No device was changed.");
+        }
+
+        var preparedMutations = new HashSet<string>(
+            StringComparer.OrdinalIgnoreCase);
+        foreach (var device in ownedDevices)
+        {
+            if (!ManagedVddOwnershipJournal.PrepareEnabledMutationLocked(
+                    transaction,
+                    device.InstanceId,
+                    enabled))
+            {
+                continue;
+            }
+            preparedMutations.Add(device.InstanceId);
+            var deviceNode = 0u;
+            EnsureConfigurationManagerSucceeded(
+                CM_Locate_DevNodeW(
+                    ref deviceNode,
+                    device.InstanceId,
+                    0),
+                $"locate managed virtual display {device.InstanceId}");
+            var result = enabled
+                ? CM_Enable_DevNode(deviceNode, 0)
+                : CM_Disable_DevNode(
+                    deviceNode,
+                    CmDisableUiNotOk | CmDisablePersist);
+            EnsureConfigurationManagerSucceeded(
+                result,
+                $"{(enabled ? "enable" : "disable")} managed virtual display {device.InstanceId}");
+        }
+        if (preparedMutations.Count == 0) return;
+
+        for (var attempt = 0; attempt < 40; attempt++)
+        {
+            var current = InspectManagedDriverDevices();
+            var currentById = current.ToDictionary(
+                device => device.InstanceId,
+                StringComparer.OrdinalIgnoreCase);
+            if (requested.All(instanceId =>
+                    currentById.TryGetValue(instanceId, out var device)
+                        ? device.Present && device.Enabled == enabled
+                        : false))
+            {
+                foreach (var instanceId in preparedMutations)
+                {
+                    ManagedVddOwnershipJournal
+                        .CompleteEnabledMutationLocked(
+                            transaction,
+                            instanceId,
+                            enabled);
+                }
+                return;
+            }
+            Thread.Sleep(250);
+        }
+        throw new InvalidOperationException(
+            $"Windows did not confirm that every managed virtual display device became {(enabled ? "enabled" : "disabled")} within 10 seconds.");
+    }
+
+    internal static bool IsManagedDeviceEnabled(
+        uint deviceStatus,
+        uint problemCode) =>
+        problemCode == 0 &&
+        (deviceStatus & DeviceNodeStarted) != 0;
+
+    private static void EnsureConfigurationManagerSucceeded(
+        uint result,
+        string operation)
+    {
+        if (result == CrSuccess) return;
+        throw new InvalidOperationException(
+            $"Windows Configuration Manager could not {operation} (CONFIGRET 0x{result:X8}).");
     }
 
     internal static bool IsDriverInstalled()
@@ -413,6 +658,74 @@ internal sealed class DisplayWizardAdapter
     }
 
     internal static bool IsLegacyDriverInstalled() => IsHardwareIdInstalled(@"ROOT\IddSampleDriver");
+
+    /// <summary>
+    /// Recognizes only the exact footprint written by a previous Vita
+    /// Moonlight release before the device-instance journal existed. This is
+    /// migration evidence, not a generic MttVDD ownership heuristic.
+    /// </summary>
+    internal static bool HasExactLegacyVitaOwnershipEvidence(
+        IReadOnlyList<ManagedVddDeviceStatus> devices,
+        bool allowAuthorizedMaintenanceBootstrap = false)
+    {
+        var runningInstalledPayload =
+            InstallationTrust.IsInstalledPayload(out _);
+        if (!runningInstalledPayload &&
+            (!allowAuthorizedMaintenanceBootstrap ||
+             !HasExpectedInstalledHostFootprint()) ||
+            devices.Count != 1 ||
+            !devices[0].Present)
+        {
+            return false;
+        }
+        var installations = FindDriverInstallations();
+        var packages = FindDriverPackageNames();
+        if (installations.Count != 1 ||
+            packages.Count != 1 ||
+            string.IsNullOrWhiteSpace(installations[0].InfPath) ||
+            !string.Equals(
+                installations[0].InstanceId,
+                devices[0].InstanceId,
+                StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(
+                installations[0].InfPath,
+                packages[0],
+                StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+        if (!DriverConfigurationDirectoryTrust.TryAcquireVerified(
+                DriverConfigurationDirectory,
+                out var trustedDirectory,
+                out _))
+        {
+            return false;
+        }
+        using (trustedDirectory)
+        {
+            return DriverNativeModeVerification.IsCurrent(out _);
+        }
+    }
+
+    private static bool HasExpectedInstalledHostFootprint()
+    {
+        var executable = InstallationTrust.ExpectedExecutablePath;
+        var directory = InstallationTrust.ExpectedInstallationDirectory;
+        try
+        {
+            return File.Exists(executable) &&
+                   Directory.Exists(directory) &&
+                   (File.GetAttributes(executable) &
+                    FileAttributes.ReparsePoint) == 0 &&
+                   (File.GetAttributes(directory) &
+                    FileAttributes.ReparsePoint) == 0;
+        }
+        catch (Exception error) when (
+            error is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
 
     internal void ValidateDriverBundle()
     {
@@ -571,13 +884,15 @@ internal sealed class DisplayWizardAdapter
             "Virtual display driver operation");
     }
 
-    private static void PrepareDriverConfigurationDirectoryForInstall()
+    private static void PrepareDriverConfigurationDirectoryForInstall(
+        DisplayTransactionLease transaction)
     {
         InstallationTrust.RequireInstalledPayload(
             "Virtual display driver configuration");
         var preparation =
             DriverConfigurationDirectoryTrust.PrepareForInstallOrRepair(
-                DriverConfigurationDirectory);
+                DriverConfigurationDirectory,
+                transaction);
         using (preparation.Lease)
         {
             if (!preparation.Recreated) return;
@@ -649,6 +964,11 @@ internal sealed class DisplayWizardAdapter
             updated = AddModeToConfiguration(updated, mode.Width, mode.Height, mode.Fps);
         }
 
+        // Repair the operational portions of an existing configuration as
+        // well as its modes. Older installations may otherwise keep several
+        // VDD monitors available or leave high-volume driver logging enabled.
+        updated = VddConfigurationNormalizer.NormalizeForVitaRuntime(updated);
+
         // Advertise the Vita's native mode first while retaining the stock
         // modes for local recovery and compatibility. Setup also activates and
         // verifies this mode once because Windows can retain an older mode for
@@ -689,6 +1009,7 @@ internal sealed class DisplayWizardAdapter
         return preferred?.Element("width")?.Value == VitaDisplayModes.Native.Width.ToString() &&
                preferred.Element("height")?.Value == VitaDisplayModes.Native.Height.ToString() &&
                HasEffectiveRefreshRate(preferred, VitaDisplayModes.Native.Fps, globalRefreshRates) &&
+               VddConfigurationNormalizer.IsNormalizedForVitaRuntime(configuration) &&
                VitaDisplayModes.Supported.All(mode => resolutions.Any(resolution =>
             resolution.Element("width")?.Value == mode.Width.ToString() &&
             resolution.Element("height")?.Value == mode.Height.ToString() &&
@@ -882,6 +1203,29 @@ internal sealed class DisplayWizardAdapter
     private sealed record DriverInstallation(
         string InstanceId,
         string? InfPath);
+
+    [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
+    private static extern uint CM_Locate_DevNodeW(
+        ref uint deviceInstance,
+        string deviceInstanceId,
+        uint flags);
+
+    [DllImport("cfgmgr32.dll")]
+    private static extern uint CM_Get_DevNode_Status(
+        out uint status,
+        out uint problemNumber,
+        uint deviceInstance,
+        uint flags);
+
+    [DllImport("cfgmgr32.dll")]
+    private static extern uint CM_Enable_DevNode(
+        uint deviceInstance,
+        uint flags);
+
+    [DllImport("cfgmgr32.dll")]
+    private static extern uint CM_Disable_DevNode(
+        uint deviceInstance,
+        uint flags);
 
     private static void ValidateDimension(int value, string name, int minimum, int maximum)
     {

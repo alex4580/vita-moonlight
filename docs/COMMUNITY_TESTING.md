@@ -9,7 +9,9 @@ You do not need to be a developer. A clear partial test is useful.
 ## Pick a test
 
 - Use the [minimum public-beta test](../host/BETA_SMOKE_TEST.md) for the
-  shortest release-critical pass.
+  shortest release-critical pass. One volunteer can complete its core path
+  and leave the clearly marked lifecycle/hardware variants to other testers;
+  list every skipped variant in the report.
 - Use the [full end-to-end test](../host/END_TO_END_TEST.md) to exercise the
   complete UI, display lifecycle, controllers, gyro, touch, recovery, upgrade,
   repair, and uninstall paths.
@@ -25,6 +27,9 @@ The project especially needs results for:
 - Windows 10 and Windows 11;
 - AMD, Intel, and NVIDIA GPUs;
 - laptop internal displays and recovery while on battery;
+- sleep/resume recovery from both idle and interrupted-stream states;
+- sleep initiated while the 15-second display test is actively switching;
+- the Pause, restart, Enable host-feature lifecycle;
 - two or more physical monitors;
 - Sunshine installations that existed before Vita Moonlight Host; and
 - uninstalling while keeping, and on disposable PCs removing, the shared
@@ -41,7 +46,10 @@ The project especially needs results for:
 4. Take a screenshot of the current Windows display arrangement.
 5. Know the emergency shortcut:
    **Ctrl + Alt + Shift + F11** restores physical displays from the PC
-   keyboard without opening the control panel.
+   keyboard without opening the control panel while Vita host features are
+   enabled. A complete **Pause Vita host features** removes the rescue agent,
+   so this shortcut is intentionally unavailable until the features are
+   enabled again.
 
 Do not deliberately crash display processes on a personal single-monitor PC.
 Specialized crash-injection tests require a disposable test machine with
@@ -56,7 +64,7 @@ A good report answers four questions:
 3. What was expected, and what happened instead?
 4. Could the user recover without rebooting or losing work?
 
-Open a [GitHub issue](https://github.com/alex4580/vita-moonlight/issues/new/choose)
+Open a [GitHub issue](../../../issues/new/choose)
 for a reproducible failure. Search existing issues first. Submit successful
 test passes in the release's testing discussion if one is provided, or use a
 GitHub issue when no collection thread exists.
@@ -74,12 +82,17 @@ Test type:
 [ ] Clean first install
 [ ] Upgrade from version:
 [ ] Same-version reinstall/repair
+[ ] Reinstall/repair while deliberately paused
+[ ] Interrupted setup retry or direct-uninstall takeover (disposable VM)
 [ ] Vita VPK reinstall/removal
 [ ] Normal stream
 [ ] Interrupted recovery
+[ ] Sleep/resume recovery
+[ ] Pause/restart/enable lifecycle
 [ ] Laptop/on battery
 [ ] Multiple monitors
 [ ] Uninstall, shared components kept
+[ ] Uninstall from deliberately paused state
 [ ] Uninstall, shared components removed
 
 Windows edition, version, and OS build:
@@ -107,6 +120,8 @@ Exact local time and time zone of the last reproduction:
 Did the physical display return automatically:
 Did Ctrl+Alt+Shift+F11 recover it:
 Was a restart required:
+Did an intentional Vita host-feature pause survive restart:
+Did Enable leave Sunshine unchanged and restore the saved VDD/recovery state:
 
 Host support report attached: Yes / No
 Short redacted Vita log attached: Yes / No
@@ -131,7 +146,10 @@ point-in-time machine report:
 The report captures the host version, Windows/platform state, component
 readiness, managed display inventory, recovery state, and recommendation at
 the moment it is created. It does not include a continuous history of your
-session. Create it soon after the problem, before changing the setup.
+session. Create it soon after the problem, before changing the setup. For a
+Pause/Enable or sleep/resume report, use the exact comparison fields and sparse
+rescue-record instructions in
+[Logging and support](LOGGING_AND_SUPPORT.md#create-a-windows-host-support-report).
 
 ## Optional Vita support log
 

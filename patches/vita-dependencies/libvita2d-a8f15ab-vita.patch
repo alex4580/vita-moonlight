@@ -1,0 +1,17 @@
+Vita Moonlight libvita2d compatibility patch
+Copyright (C) 2026 Vita Moonlight contributors
+SPDX-License-Identifier: GPL-3.0-or-later
+
+Declare ceil() through the standard header so current Vita GCC releases do
+not compile the JPEG down-scaling path with an implicit function declaration.
+
+diff --git a/libvita2d/source/vita2d_image_jpeg.c b/libvita2d/source/vita2d_image_jpeg.c
+index 7ce927b..0cd2f77 100644
+--- a/libvita2d/source/vita2d_image_jpeg.c
++++ b/libvita2d/source/vita2d_image_jpeg.c
+@@ -1,3 +1,5 @@
++/* Modified for Vita Moonlight, 2026. */
++#include <math.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>

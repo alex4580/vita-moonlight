@@ -436,9 +436,9 @@ static bool write_system_snapshot_locked(void) {
   safe_token(build_token, sizeof(build_token), COMPILE_OPTIONS);
   snprintf(
       fields_buffer, sizeof(fields_buffer),
-      "app_version=%d.%d.%d build=%s platform=vita model_id=%u "
+      "app_version=%d.%d.%d build_id=%s build_profile=%s platform=vita model_id=%u "
       "storage_mount=%s decoder_backend=vita_hw_h264 identifiers=redacted",
-      VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH, build_token,
+      VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH, VITA_BUILD_ID, build_token,
       (unsigned int)config.model, storage_mount_name());
   return write_record_locked(
       VITA_DEBUG_LEVEL_INFO, "system.snapshot", fields_buffer);

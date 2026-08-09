@@ -28,7 +28,15 @@ for details.
 1. Download `Vita-Moonlight-Host-Setup-win-x64.exe` and `moonlight.vpk` from
    the same GitHub release.
 2. Save open work and keep a keyboard connected to the PC.
-3. Run the Windows installer and accept the recommended components.
+3. Sign in to the Administrator Windows account you will use for streaming,
+   then run the installer and accept the recommended components. This beta
+   cannot install its interactive recovery safeguards from a standard account
+   by supplying a different Administrator account at the UAC prompt; setup
+   detects that case and stops before changing the PC.
+   If setup finds one existing MTT virtual display that it cannot prove belongs
+   to an earlier Vita Moonlight installation, it shows a separate adoption
+   question. **Yes** records that device's current enabled state before any
+   change so uninstall can restore it; **No** leaves it untouched.
 4. Restart Windows if asked.
 5. Open **Vita Moonlight Host** from the Start menu. Choose
    **Restart as Administrator** if that button appears.
@@ -39,8 +47,11 @@ for details.
    **Steam Big Picture**, **Desktop**, or a game.
 
 The display can briefly blink while Windows verifies the virtual display.
-When idle, the physical display should be active and the Vita virtual display
-should not be the only active screen.
+When host features are Enabled but no Vita stream is active, the physical
+display should be active, no recovery transaction should be pending, and the
+exact managed Vita virtual-display device should be PnP-disabled. The paired
+Vita arms it automatically before a Sunshine launch or same-application
+resume; the optional timed display test uses the same protected transaction.
 
 If setup requests a restart, it stops before changing the Sunshine stream
 display. Restart Windows, reopen the control panel as Administrator, and click
@@ -60,6 +71,23 @@ Do not uninstall the old version first:
 The upgrade is designed to preserve Sunshine credentials, pairing, unrelated
 Sunshine applications, and compatible user configuration. It restores a
 physical display before changing installed host components.
+
+An older or incomplete installation can contain the Vita display without the
+current protected ownership record. That is not treated as a clean install or
+silently claimed: setup first restores the physical desktop, then asks whether
+the one unambiguous existing MTT device may be adopted. For unattended
+deployment, `/ADOPTEXISTINGVDD` is the explicit equivalent; without it, silent
+setup stops before copying files or changing the device.
+
+If you previously chose **Pause Vita host features**, setup updates the
+installed files but preserves that paused state. It does not re-enable the
+virtual display or recovery tasks. Sunshine and any pre-existing Apollo
+installation are never stopped by Pause; Apollo itself is not configured or
+supported by the public beta. Safe controller/runtime repairs run immediately; selected streaming-host
+and virtual-display work is saved in protected state and completes only when
+you later choose **Enable Vita host features**. If completion fails or requires
+a restart, Vita host features return to Paused and the saved work can be
+retried by choosing Enable again.
 
 ## Reinstall or repair the current version
 
@@ -90,14 +118,42 @@ Use this page first.
 The recommended Vita starting profile is 960x544, 60 FPS, 8 Mbps, H.264, and
 SDR.
 
+### Pause the host for extended idle periods
+
+Use **Pause Vita host features** when this PC will not use Vita-owned display
+switching and recovery for a
+while. The action:
+
+- restores and verifies a physical-only Windows display layout;
+- stops and removes the two Vita Moonlight background safeguards;
+- persistently disables the managed VDD device without uninstalling it; and
+- leaves Sunshine and any pre-existing Apollo installation untouched and
+  reachable. The public beta configures Sunshine only. A client pinned to
+  the disabled Vita VDD may need Vita host features enabled again or a physical
+  output selected in its streaming-host configuration.
+
+The pause survives sign-out, restart, sleep, and an in-place upgrade. It keeps
+the app, pairing, settings, drivers, and shared programs installed. Choose
+**Enable Vita host features** to restore the Vita safeguards. The managed VDD
+still remains disabled while idle and is armed automatically for the next
+Vita stream. Both actions are safe to run again and require Administrator
+approval.
+
+Do not use Windows Device Manager or Task Scheduler to reproduce this state by
+hand. The control panel journals the exact Vita task and managed-device state.
+Sunshine and any pre-existing Apollo installation remain reachable while paused, so disconnect the Vita first
+and do not treat this control as a network-access block.
+
 ### Streaming
 
 Most users should keep the defaults:
 
-- **Streaming service:** Sunshine, unless the PC is intentionally using
-  Apollo.
-- **Preferred virtual display:** blank for automatic selection. Enter a name
-  only if the health check finds more than one virtual display.
+- **Streaming service:** Sunshine. Older Apollo selections are migrated to
+  Sunshine during repair; Apollo itself and unrelated Apollo settings are
+  preserved, but Apollo integration is not public-beta qualified.
+- **Preferred virtual display:** leave this blank. The supported Vita path
+  identifies the exact managed display automatically; do not select a Sunshine
+  output or enable the device in Device Manager.
 - **Use the Vita display with every streamed application:** enabled. This
   applies display switching to Steam, Desktop, and custom Sunshine apps.
 - **Force SDR for Vita virtual-display sessions:** enabled. The Vita does not
@@ -109,14 +165,17 @@ session. **Restart Sunshine now** restarts only the streaming service.
 
 ### Display & recovery
 
-The managed virtual display normally appears as **VDD by MTT** and remains
-inactive while idle.
+The managed virtual display normally appears as **VDD by MTT**. Its Windows
+device is PnP-disabled while Enabled + Idle, then enabled automatically after
+an authenticated request from the paired Vita and before Sunshine starts or
+resumes capture.
 
 - **Restore physical display now** ends the active stream, restores physical
-  displays, reloads VDD, leaves the Vita display inactive, and restarts
+  displays, reloads VDD only for recovery, disables it again, and restarts
   Sunshine.
-- **Turn off idle Vita display** disables only an idle managed VDD while
-  keeping a physical display active.
+- **Reconcile idle display now** is a fallback check: it restores a physical
+  desktop and disables the managed VDD device. Normal use performs this
+  automatically.
 - **Test Vita display for 15 seconds** temporarily activates 960x544 and then
   restores the original physical layout automatically.
 - **Show detected displays** lists physical and virtual displays.
@@ -126,12 +185,23 @@ inactive while idle.
 - **Show current session state** reports whether a display change is pending.
 
 During a stream or timed display test, a physical monitor may go blank because
-Sunshine captures only the Vita virtual display. A normal disconnect restores
-the physical layout.
+Sunshine captures only the Vita virtual display. The normal Vita stop request
+restores the exact saved physical layout, disables the managed device, and
+cannot stop a newer stream generation by mistake.
 
 If it does not return, press **Ctrl + Alt + Shift + F11** on the PC keyboard.
-This shortcut works without opening the control panel. Allow roughly 15
-seconds for the physical displays, driver, and Sunshine to recover.
+While Vita host features are enabled, this shortcut works without opening the
+control panel. Allow roughly 15 seconds for the physical displays, driver, and
+Sunshine to recover. A complete **Pause Vita host features** removes the rescue
+agent and therefore unregisters F11 until **Enable Vita host features** is run.
+
+The paired Vita request and its matching stop are the normal display boundary.
+The rescue agent uses Sunshine lifecycle events only as a fallback for abrupt
+Wi-Fi loss, a client crash, or Sunshine exit; it does not continuously poll or
+tail Sunshine while the host is idle. Startup, suspend, resume, emergency
+recovery, and uninstall also reconcile to the same physical-layout / managed-
+VDD-disabled idle state. A stream that crosses system sleep is treated as
+interrupted.
 
 ### Diagnostics & support
 
@@ -141,14 +211,17 @@ Technical output and individual repairs are kept away from everyday setup:
 - **Save support report...** creates a point-in-time JSON report only when
   requested.
 - **Copy technical details** copies the latest health/support output.
-- **Open diagnostics folder** opens the host's protected diagnostics location.
+- **Open diagnostics folder** opens the host's protected sparse rescue records.
+  See [Read the sparse Windows rescue records](../docs/LOGGING_AND_SUPPORT.md#read-the-sparse-windows-rescue-records)
+  before interpreting or sharing them.
 - **Repair sign-in display recovery** repairs the interrupted-session
   safeguard.
-- **Repair stream rescue shortcuts** repairs the background Vita and keyboard
+- **Repair automatic handoff and recovery** repairs the paired-Vita listener, background recovery, and keyboard
   recovery controls.
 - **Repair controller support** repairs ViGEmBus.
 - **Repair Sunshine** repairs the packaged compatible Sunshine installation.
-- **Check rescue shortcuts** reports the rescue agent and hotkey state.
+- **Check automatic handoff** reports the rescue agent, authenticated display
+  handoff, and hotkey state.
 
 Start with **Set up or repair this PC** instead of repairing individual
 components. Use an individual repair only when readiness or support output
@@ -161,12 +234,19 @@ the separate, optional Vita capture.
 
 ## Stream controls on the Vita
 
-- Hold **START**, then press **L + R** within one second to open the in-stream
-  menu without sending the chord to Windows.
+- Hold **SELECT first**, then press **L + R** within one second to open the
+  in-stream menu without sending the chord to Windows. Ordinary **START** is
+  sent to the streamed controller immediately.
 - Use **Open on-screen keyboard** in that menu, or press
-  **START + D-pad Left**.
+  **SELECT first + D-pad Left**.
 - Use **Disconnect stream** for a normal exit.
 - Double-press **PS** for a forced return to LiveArea.
+
+Mapped front-touch corners require a short stationary single-finger tap.
+Dragging, holding, adding another finger, or moving through a corner remains
+normal mouse/touchpad/tablet input. A normal disconnect joins decoder and
+audio workers before returning to menus; the Windows host then restores the
+exact pre-stream physical layout and default audio endpoint.
 
 The first-run **Recommended** preset uses the Vita's native 960x544 display at
 60 FPS and 8 Mbps. The other display modes are 960x540 for strict 16:9 game
@@ -174,8 +254,10 @@ compatibility and 1280x720 for games with a 720p minimum.
 
 Changing resolution, FPS, bitrate, or network mode during a session requires
 **Apply resolution + reconnect**. The video connection renegotiates while the
-Windows game stays open. Changing Xbox/DS4 controller capabilities requires
-**Apply input changes + reconnect**.
+Windows game stays open. The Vita performs an authenticated display preflight
+before Sunshine resumes the same application; it does not send or require the
+legacy Ctrl+Alt+Shift+F8/F9/F10 shortcuts. Changing Xbox/DS4 controller
+capabilities requires **Apply input changes + reconnect**.
 
 See the [Vita settings guide](../docs/VITA_SETTINGS_GUIDE.md) for presets,
 controller profiles, gyro, graphical mapping, front-touch zones, PS behavior,
@@ -185,15 +267,18 @@ and performance tradeoffs.
 
 If the Vita menu still draws over a black game:
 
-1. Choose **Close Windows game** and confirm it twice. The host protects
-   Sunshine, Steam, Explorer, and critical Windows processes.
-2. If Steam does not return, choose **End Sunshine app**.
+1. Choose **Open Windows Task Manager**, select the stuck game, and use
+   **End task**. This is an ordinary Windows decision made by the user; Vita
+   Moonlight never guesses which foreground process to terminate.
+2. If that is not practical, choose **End Sunshine app** to end the authenticated
+   GameStream application session.
 3. If the captured display is still unusable, choose
    **Recover host display**.
 
 If the Vita menu cannot be used:
 
-1. Press **Ctrl + Alt + Shift + F11** on the PC keyboard.
+1. If Vita host features are enabled, press **Ctrl + Alt + Shift + F11** on the
+   PC keyboard. A complete Pause intentionally unregisters this shortcut.
 2. If the Windows desktop is visible, open
    **Display & recovery > Restore physical display now**.
 3. If recovery cannot run, sign out and back in. The sign-in safeguard checks
@@ -221,20 +306,49 @@ Use the Windows installer for setup, repair, driver changes, and safeguards.
 3. Find **Vita Moonlight Host** and choose **Uninstall**.
 4. Leave all shared-component choices cleared for a normal uninstall.
 
-The uninstaller restores and verifies a physical display before removing the
+The uninstaller works whether Vita host features are enabled, paused, or
+partially recovered. It restores and verifies a physical display before removing the
 host or its recovery safeguards. By default it keeps:
 
 - Sunshine;
 - ViGEmBus controller emulation; and
 - the MTT virtual-display driver.
 
-These components may be used by other software. Select their removal only when
-you are certain they are no longer needed. Removing the VDD also removes its
-managed Vita display configuration.
+These components may be used by other software. The uninstaller can remove
+Sunshine or ViGEmBus only when you explicitly select them. It always releases
+only this installation's exact display authority: an app-created device is
+removed, while an adopted device returns to its recorded pre-install enabled
+state. With no exact ownership journal, every unproven device is left
+untouched. The shared MTT driver package is retained because package-wide
+ownership cannot be proved safely.
+
+Unlike setup/repair, uninstall may be approved with a different Administrator
+account. It verifies the exact executable and arguments of each Vita-owned
+scheduled task before removing it; an unexpected same-name task is retained and
+uninstall stops with an explanation.
+
+Pause and uninstall first make a bounded exact-audio restoration attempt. If a
+captured HDMI/DisplayPort endpoint was permanently removed, Pause retains only
+an inert retry record for a future Enable while still removing all background
+tasks. Uninstall reports the unresolved endpoint, keeps Windows' current
+default rather than guessing another device, and completes normally.
+
+When shared components are kept, uninstall leaves Sunshine unchanged and the
+VDD driver package installed. It removes an exact Vita-created node or restores
+an exact adopted node's recorded PnP state, then relinquishes its journal. It
+then removes both exact scheduled tasks, the running rescue agent, current host
+state, and exact legacy Vita Moonlight state. Unknown files in a legacy folder
+are retained rather than deleted recursively.
 
 If Windows requests a restart or a selected dependency cannot yet be removed,
 the host and recovery safeguards remain. Restart Windows and run uninstall
 again.
+
+If security software removes `VitaMoonlight.Host.exe` during an interrupted
+uninstall, restore that file from quarantine or copy the same-version file from
+the portable release into the install folder, then rerun uninstall. The
+uninstaller deliberately keeps its protected recovery state instead of
+guessing that an incomplete transaction is safe.
 
 **Keep the stream-rescue log for troubleshooting** preserves one timestamped
 rescue log but still removes settings and recovery records.

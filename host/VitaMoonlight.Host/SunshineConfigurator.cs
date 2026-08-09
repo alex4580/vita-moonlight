@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -10,20 +11,43 @@ internal sealed record SunshineConfigurationResult(
     string ConfigurationDirectory,
     string ApplicationName,
     int CoveredApplicationCount,
-    bool UsesNativeDisplayManagement,
+    bool UsesAuthenticatedStreamBoundary,
     string BackupPath);
 
 internal static class SunshineConfigurator
 {
     private const string HookMarker = "VitaMoonlight.Host";
+    private const string GlobalPrepCommandKey = "global_prep_cmd";
     private const string VitaDisplayModeRemapping =
         "{\"mixed\":[],\"resolution_only\":[" +
         "{\"requested_resolution\":\"960x540\",\"final_resolution\":\"960x540\"}," +
         "{\"requested_resolution\":\"960x544\",\"final_resolution\":\"960x544\"}," +
+        "{\"requested_resolution\":\"1280x720\",\"final_resolution\":\"1280x720\"}]," +
+        "\"refresh_rate_only\":[]}";
+    private const string LegacyMalformedVitaDisplayModeRemapping =
+        "{\"mixed\":[],\"resolution_only\":[" +
+        "{\"requested_resolution\":\"960x540\",\"final_resolution\":\"960x540\"}," +
+        "{\"requested_resolution\":\"960x544\",\"final_resolution\":\"960x544\"}," +
         "{\"requested_resolution\":\"1280x720\",\"final_resolution\":\"1280x720\"}," +
-        "{\"final_resolution\":\"960x544\"}],\"refresh_rate_only\":[]}";
+        "{\"final_resolution\":\"960x544\"}]," +
+        "\"refresh_rate_only\":[]}";
+    private static readonly string[] LegacyNativeDisplayKeys =
+    [
+        "output_name",
+        "dd_configuration_option",
+        "dd_resolution_option",
+        "dd_refresh_rate_option",
+        "dd_manual_refresh_rate",
+        "dd_mode_remapping",
+        "dd_hdr_option",
+        "dd_config_revert_delay",
+        "dd_config_revert_on_disconnect",
+    ];
 
-    internal static SunshineConfigurationResult Configure(HostSettings settings, string companionPath)
+    internal static SunshineConfigurationResult Configure(
+        HostSettings settings,
+        string companionPath,
+        DateTimeOffset? inventoryNotBeforeUtc = null)
     {
         var configDirectory =
             InstallationTrust.RequireTrustedConfigurationDirectory(
@@ -34,17 +58,19 @@ internal static class SunshineConfigurator
         Directory.CreateDirectory(configDirectory);
         var appsPath = Path.Combine(configDirectory, "apps.json");
         var sunshineConfigPath = Path.Combine(configDirectory, "sunshine.conf");
+        var backupPath = appsPath + ".vita-moonlight.backup";
+        SunshineOwnershipJournal.ValidateOwnedFile(appsPath);
+        SunshineOwnershipJournal.ValidateOwnedFile(sunshineConfigPath);
+        SunshineOwnershipJournal.ValidateOwnedFile(backupPath);
+        var originalApps = CaptureFile(appsPath);
+        var originalConfiguration = CaptureFile(sunshineConfigPath);
         var ownershipState = SunshineOwnershipJournal.Load();
+        var originalOwnershipState =
+            SunshineOwnershipJournal.Clone(ownershipState);
         var ownership = SunshineOwnershipJournal.GetOrAddLocation(
             ownershipState,
-            configDirectory);
-        var backup = BackupOnce(appsPath);
-        if (backup.Created)
-        {
-            ownership.BackupOwned = true;
-            ownership.BackupSha256 = backup.Sha256;
-        }
-        var backupPath = backup.Path;
+            configDirectory,
+            settings.HostMode);
 
         var root = File.Exists(appsPath)
             ? JsonNode.Parse(File.ReadAllText(appsPath))?.AsObject() ?? new JsonObject()
@@ -77,10 +103,32 @@ internal static class SunshineConfigurator
         }
         ownership.Hooks.Clear();
 
-        var useNativeDisplayManagement = settings.HostMode == "sunshine" && settings.IntegrateAllSunshineApps;
+        var useAuthenticatedStreamBoundary =
+            settings.HostMode == "sunshine" &&
+            settings.IntegrateAllSunshineApps;
         var managedApp = apps.OfType<JsonObject>().FirstOrDefault(candidate =>
             string.Equals(candidate["name"]?.GetValue<string>(), settings.SunshineApplicationName, StringComparison.OrdinalIgnoreCase));
-        if (!useNativeDisplayManagement && managedApp is null)
+        if (useAuthenticatedStreamBoundary &&
+            managedApp is not null &&
+            ownership.CreatedApplications.Contains(
+                settings.SunshineApplicationName,
+                StringComparer.OrdinalIgnoreCase) &&
+            IsUnchangedGeneratedManagedApplication(managedApp))
+        {
+            // Older/manual configurations created a no-op launcher solely to
+            // carry a display hook. Authenticated Vita preflight covers every
+            // Sunshine application without one. Remove only the exact
+            // journal-owned, unchanged generated app; a user-customized
+            // launcher is preserved.
+            apps.Remove(managedApp);
+            ownership.CreatedApplications.RemoveAll(applicationName =>
+                string.Equals(
+                    applicationName,
+                    settings.SunshineApplicationName,
+                    StringComparison.OrdinalIgnoreCase));
+            managedApp = null;
+        }
+        if (!useAuthenticatedStreamBoundary && managedApp is null)
         {
             managedApp = new JsonObject
             {
@@ -99,7 +147,9 @@ internal static class SunshineConfigurator
         }
 
         var applicationObjects = apps.OfType<JsonObject>().ToArray();
-        var targets = useNativeDisplayManagement ? Array.Empty<JsonObject>() : new[] { managedApp };
+        var targets = useAuthenticatedStreamBoundary
+            ? Array.Empty<JsonObject>()
+            : new[] { managedApp };
         foreach (var app in targets)
         {
             var hook = AddManagedHook(app!, companionPath);
@@ -109,60 +159,331 @@ internal static class SunshineConfigurator
         var configurationLines = File.Exists(sunshineConfigPath)
             ? File.ReadAllLines(sunshineConfigPath).ToList()
             : new List<string>();
-        UpdateSunshineConfiguration(configurationLines, ownership);
-        if (useNativeDisplayManagement)
+        MigrateLegacyFalseBaselineOwnership(
+            ownershipState,
+            ownership,
+            configurationLines);
+        SunshineOwnershipJournal.UpgradeFormat(ownershipState);
+        RemoveOwnedGlobalHooks(
+            configurationLines,
+            ownership.GlobalHooks,
+            ownership.GlobalPrepCommandOriginallyPresent);
+        RemoveLegacyGeneratedGlobalHooks(configurationLines);
+        ownership.GlobalHooks.Clear();
+        ownership.GlobalPrepCommandOriginallyPresent = null;
+        RetireOwnedLegacyDisplayConfiguration(
+            configurationLines,
+            ownership);
+        if (useAuthenticatedStreamBoundary)
         {
-            var displayDeviceId = WaitForManagedDisplayDeviceId(
-                Path.Combine(configDirectory, "sunshine.log"),
-                settings.DisplayMatch,
-                timeoutMilliseconds: 30000,
-                pollMilliseconds: 250);
-            if (displayDeviceId is null)
-            {
-                throw new InvalidOperationException(
-                    "Sunshine did not enumerate the Vita virtual display within 30 seconds. " +
-                    "Restart Windows if the display driver was just installed, then open Get started and choose Set up or repair this PC.");
-            }
-            ConfigureNativeDisplayManagement(
+            // The authenticated generation/heartbeat lease is the exact
+            // session authority. Older releases forced Sunshine to INFO so
+            // the rescue agent could infer a global session count from its
+            // log. Restore that Vita-owned value during upgrade and retire
+            // the ownership entry; supported all-app streaming neither
+            // requires nor continuously produces INFO lifecycle records.
+            RetireOwnedLifecycleConfigurationValue(
                 configurationLines,
-                displayDeviceId,
-                settings.ForceSdr,
-                ownership);
+                ownership,
+                "min_log_level");
         }
-        else if (settings.HostMode == "sunshine")
+        UpdateSunshineConfiguration(configurationLines, ownership);
+        if (settings.HostMode == "sunshine")
         {
-            SetOwnedConfigurationValue(
+            if (!useAuthenticatedStreamBoundary)
+            {
+                // The opt-in legacy per-application hook has no authenticated
+                // client generation. Keep its historical global Sunshine-log
+                // fallback isolated to that experimental mode and preserve
+                // the user's prior level for exact uninstall rollback.
+                SetOwnedLifecycleConfigurationValue(
+                    configurationLines,
+                    ownership,
+                    "min_log_level",
+                    "info");
+            }
+            // Empty means Sunshine's active output. The authenticated Vita
+            // preflight arms and activates the managed display before either
+            // GameStream launch or resume reaches Sunshine, so its encoder
+            // probe sees the correct output without an unsafe global hook.
+            SetOwnedLifecycleConfigurationValue(
+                configurationLines,
+                ownership,
+                "output_name",
+                string.Empty);
+            SetOwnedLifecycleConfigurationValue(
                 configurationLines,
                 ownership,
                 "dd_configuration_option",
                 "disabled");
-            SetOwnedConfigurationValue(
+            SetOwnedLifecycleConfigurationValue(
                 configurationLines,
                 ownership,
                 "dd_config_revert_on_disconnect",
                 "disabled");
         }
-        SunshineOwnershipJournal.Save(ownershipState);
-        DisplayTopologyService.AtomicWrite(appsPath, root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
-        DisplayTopologyService.AtomicWrite(
-            sunshineConfigPath,
-            string.Join(Environment.NewLine, configurationLines) + Environment.NewLine);
+        var appsContent = root.ToJsonString(
+            new JsonSerializerOptions { WriteIndented = true });
+        var configurationContent =
+            string.Join(Environment.NewLine, configurationLines) +
+            Environment.NewLine;
+        var createBackup = originalApps.Content is not null &&
+            !File.Exists(backupPath);
+        var newBackupSha256 = createBackup
+            ? ComputeSha256(originalApps.Content!)
+            : null;
+        if (createBackup)
+        {
+            // Publish ownership before creating the backup as well as before
+            // replacing either host file. A killed setup can therefore never
+            // leave a newly-created, permanently unowned backup behind.
+            ownership.BackupOwned = true;
+            ownership.BackupSha256 = newBackupSha256;
+        }
+        var backupCreatedDuringAttempt = false;
+        try
+        {
+            // Publish ownership before either host file. If the process is
+            // interrupted between atomic file replacements, every completed
+            // mutation is still attributable and a retry/uninstall can remove
+            // only the exact values and hooks this product applied.
+            SunshineOwnershipJournal.Save(ownershipState);
+            if (createBackup)
+            {
+                AtomicWriteBytes(backupPath, originalApps.Content!);
+                backupCreatedDuringAttempt = true;
+                if (!FixedTimeHexEquals(
+                        ComputeFileSha256(backupPath),
+                        newBackupSha256!))
+                {
+                    throw new IOException(
+                        "Windows did not verify the complete original apps.json backup.");
+                }
+            }
+            DisplayTopologyService.AtomicWrite(appsPath, appsContent);
+            DisplayTopologyService.AtomicWrite(
+                sunshineConfigPath,
+                configurationContent);
+            VerifyWrittenText(appsPath, appsContent);
+            VerifyWrittenText(sunshineConfigPath, configurationContent);
+        }
+        catch (Exception updateError)
+        {
+            var rollbackErrors = new List<Exception>();
+            TryRollbackFile(appsPath, originalApps, rollbackErrors);
+            TryRollbackFile(
+                sunshineConfigPath,
+                originalConfiguration,
+                rollbackErrors);
+            if (backupCreatedDuringAttempt)
+            {
+                try
+                {
+                    if (File.Exists(backupPath) &&
+                        FixedTimeHexEquals(
+                            ComputeFileSha256(backupPath),
+                            newBackupSha256!))
+                    {
+                        File.Delete(backupPath);
+                    }
+                    else if (File.Exists(backupPath))
+                    {
+                        throw new InvalidDataException(
+                            "The newly-created apps backup changed before configuration rollback.");
+                    }
+                }
+                catch (Exception backupError)
+                {
+                    rollbackErrors.Add(backupError);
+                }
+            }
+            if (rollbackErrors.Count == 0)
+            {
+                try
+                {
+                    SunshineOwnershipJournal.Replace(
+                        originalOwnershipState);
+                }
+                catch (Exception ownershipRollbackError)
+                {
+                    rollbackErrors.Add(ownershipRollbackError);
+                }
+            }
+
+            if (rollbackErrors.Count == 0)
+            {
+                throw new InvalidOperationException(
+                    "Streaming-host configuration failed; apps.json, sunshine.conf, and the ownership journal were restored to their original state.",
+                    updateError);
+            }
+            throw new AggregateException(
+                "Streaming-host configuration failed and could not be rolled back completely. " +
+                "The ownership journal was retained so repair or uninstall can retry exact cleanup.",
+                new[] { updateError }.Concat(rollbackErrors));
+        }
         return new SunshineConfigurationResult(
             configDirectory,
             settings.SunshineApplicationName,
-            useNativeDisplayManagement ? applicationObjects.Length : targets.Length,
-            useNativeDisplayManagement,
+            useAuthenticatedStreamBoundary ? applicationObjects.Length : targets.Length,
+            useAuthenticatedStreamBoundary,
             backupPath);
     }
 
-    internal static SunshineIntegrationCleanupResult RemoveManagedIntegration()
+    private sealed record ConfigurationFileSnapshot(byte[]? Content);
+
+    private static ConfigurationFileSnapshot CaptureFile(string path) =>
+        new(File.Exists(path) ? File.ReadAllBytes(path) : null);
+
+    private static void TryRollbackFile(
+        string path,
+        ConfigurationFileSnapshot snapshot,
+        ICollection<Exception> errors)
+    {
+        try
+        {
+            if (snapshot.Content is null)
+            {
+                if (File.Exists(path)) File.Delete(path);
+            }
+            else
+            {
+                AtomicWriteBytes(path, snapshot.Content);
+            }
+        }
+        catch (Exception error)
+        {
+            errors.Add(new IOException(
+                $"Could not restore {path} during configuration rollback.",
+                error));
+        }
+    }
+
+    private static void AtomicWriteBytes(string path, byte[] content)
+    {
+        var directory = Path.GetDirectoryName(path) ??
+            throw new InvalidOperationException(
+                "The configuration destination has no parent directory.");
+        Directory.CreateDirectory(directory);
+        var temporary = Path.Combine(
+            directory,
+            $".{Path.GetFileName(path)}.{Guid.NewGuid():N}.tmp");
+        try
+        {
+            File.WriteAllBytes(temporary, content);
+            File.Move(temporary, path, true);
+        }
+        finally
+        {
+            if (File.Exists(temporary)) File.Delete(temporary);
+        }
+    }
+
+    private static void VerifyWrittenText(string path, string expected)
+    {
+        if (!File.Exists(path) ||
+            !string.Equals(
+                File.ReadAllText(path),
+                expected,
+                StringComparison.Ordinal))
+        {
+            throw new IOException(
+                $"Windows did not verify the complete configuration write to {path}.");
+        }
+    }
+
+    internal static SunshineIntegrationCleanupResult RemoveManagedIntegration() =>
+        RemoveManagedIntegration(hostMode: null);
+
+    internal static void RequireManagedIntegrationCleanupReady()
     {
         var ownershipState = SunshineOwnershipJournal.Load();
+        var settings = HostSettings.Load();
+        SunshineOwnershipJournal.TagExistingLocation(
+            ownershipState,
+            ResolveConfigurationDirectory(
+                settings.SunshineConfigDirectory,
+                settings.HostMode),
+            settings.HostMode);
+        if (ownershipState.Locations.Any(location =>
+                SunshineOwnershipJournal.LocationMatchesHost(
+                    location,
+                    "apollo")) &&
+            StreamingHostLocator.IsApolloRunning())
+        {
+            throw new InvalidOperationException(
+                "Apollo is still running. Exit Apollo from its tray icon before uninstall so exact Vita-owned hooks can be removed before any shared dependency is changed.");
+        }
+
+        foreach (var ownership in ownershipState.Locations)
+        {
+            var configDirectory =
+                SunshineOwnershipJournal.ValidateConfigurationDirectory(
+                    InstallationTrust.RequireTrustedConfigurationDirectory(
+                        ownership.ConfigurationDirectory,
+                        "Streaming-host integration cleanup preflight"));
+            var appsPath = Path.Combine(configDirectory, "apps.json");
+            var sunshineConfigPath = Path.Combine(
+                configDirectory,
+                "sunshine.conf");
+            var backupPath = appsPath + ".vita-moonlight.backup";
+            SunshineOwnershipJournal.ValidateOwnedFile(appsPath);
+            SunshineOwnershipJournal.ValidateOwnedFile(sunshineConfigPath);
+            SunshineOwnershipJournal.ValidateOwnedFile(backupPath);
+            if (File.Exists(appsPath))
+            {
+                _ = JsonNode.Parse(File.ReadAllText(appsPath))?.AsObject()
+                    ?? throw new InvalidDataException(
+                        "Streaming-host apps.json has no root object.");
+            }
+            if (File.Exists(sunshineConfigPath))
+            {
+                _ = File.ReadAllLines(sunshineConfigPath);
+            }
+        }
+    }
+
+    internal static SunshineIntegrationCleanupResult
+        RemoveManagedIntegrationForHost(string hostMode) =>
+        RemoveManagedIntegration(hostMode);
+
+    private static SunshineIntegrationCleanupResult RemoveManagedIntegration(
+        string? hostMode)
+    {
+        var ownershipState = SunshineOwnershipJournal.Load();
+        if (hostMode is null)
+        {
+            // Journals written before host-mode ownership was recorded are
+            // tagged from the still-present protected settings before an
+            // uninstall decides whether Apollo must be closed.
+            var settings = HostSettings.Load();
+            SunshineOwnershipJournal.TagExistingLocation(
+                ownershipState,
+                ResolveConfigurationDirectory(
+                    settings.SunshineConfigDirectory,
+                    settings.HostMode),
+                settings.HostMode);
+        }
+        var selectedLocations = ownershipState.Locations
+            .Where(location =>
+                hostMode is null ||
+                SunshineOwnershipJournal.LocationMatchesHost(
+                    location,
+                    hostMode))
+            .ToArray();
+        if (selectedLocations.Any(location =>
+                SunshineOwnershipJournal.LocationMatchesHost(
+                    location,
+                    "apollo")) &&
+            StreamingHostLocator.IsApolloRunning())
+        {
+            throw new InvalidOperationException(
+                "Apollo is still running. Exit Apollo from its tray icon, then retry so Vita-owned hooks can be removed without racing Apollo's configuration writer.");
+        }
         var removedHooks = 0;
         var removedGeneratedApplication = false;
         var removedNativeDisplaySettings = false;
         var cleanedDirectories = new List<string>();
-        foreach (var ownership in ownershipState.Locations)
+        foreach (var ownership in selectedLocations)
         {
             var locationRemovedHooks = 0;
             var locationRemovedApplication = false;
@@ -221,7 +542,21 @@ internal static class SunshineConfigurator
             {
                 SunshineOwnershipJournal.ValidateOwnedFile(sunshineConfigPath);
                 var lines = File.ReadAllLines(sunshineConfigPath).ToList();
-                if (RestoreOwnedConfiguration(lines, ownership))
+                MigrateLegacyFalseBaselineOwnership(
+                    ownershipState,
+                    ownership,
+                    lines);
+                var removedGlobalHooks = RemoveOwnedGlobalHooks(
+                    lines,
+                    ownership.GlobalHooks,
+                    ownership.GlobalPrepCommandOriginallyPresent);
+                var removedLegacyGlobalHooks =
+                    RemoveLegacyGeneratedGlobalHooks(lines);
+                removedGlobalHooks += removedLegacyGlobalHooks;
+                removedHooks += removedGlobalHooks;
+                var restoredConfiguration =
+                    RestoreOwnedConfiguration(lines, ownership);
+                if (removedGlobalHooks > 0 || restoredConfiguration)
                 {
                     removedNativeDisplaySettings = true;
                     DisplayTopologyService.AtomicWrite(
@@ -245,8 +580,18 @@ internal static class SunshineConfigurator
                     File.Delete(backupPath);
                 }
             }
+
+            ownershipState.Locations.Remove(ownership);
         }
-        SunshineOwnershipJournal.Delete();
+        SunshineOwnershipJournal.UpgradeFormat(ownershipState);
+        if (ownershipState.Locations.Count == 0)
+        {
+            SunshineOwnershipJournal.Delete();
+        }
+        else
+        {
+            SunshineOwnershipJournal.Save(ownershipState);
+        }
 
         return new SunshineIntegrationCleanupResult(
             string.Join("; ", cleanedDirectories),
@@ -327,14 +672,27 @@ internal static class SunshineConfigurator
                 existing["undo"]?.GetValue<string>() ?? string.Empty));
     }
 
-    private static bool IsGeneratedStartCommand(string command) =>
-        command.StartsWith(
-            "cmd.exe /D /S /C \"\"",
-            StringComparison.OrdinalIgnoreCase) &&
-        command.Contains(
-            $"{HookMarker}.exe\" session start --width %SUNSHINE_CLIENT_WIDTH% " +
-            "--height %SUNSHINE_CLIENT_HEIGHT% --fps %SUNSHINE_CLIENT_FPS%",
-            StringComparison.OrdinalIgnoreCase);
+    private static bool IsGeneratedStartCommand(string command)
+    {
+        if (!command.StartsWith(
+                "cmd.exe /D /S /C \"\"",
+                StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var arguments =
+            "--width %SUNSHINE_CLIENT_WIDTH% " +
+            "--height %SUNSHINE_CLIENT_HEIGHT% --fps %SUNSHINE_CLIENT_FPS%";
+        return command.Contains(
+                   $"{HookMarker}.exe\" session hook-start {arguments}",
+                   StringComparison.OrdinalIgnoreCase) ||
+               // Recognize hooks from earlier releases so an upgrade removes
+               // the strict boundary before installing the tolerant one.
+               command.Contains(
+                   $"{HookMarker}.exe\" session start {arguments}",
+                   StringComparison.OrdinalIgnoreCase);
+    }
 
     private static bool IsGeneratedStopCommand(string command) =>
         command.StartsWith('"') &&
@@ -358,6 +716,236 @@ internal static class SunshineConfigurator
                app["exclude-global-prep-cmd"]?.GetValue<bool>() == false &&
                (app["prep-cmd"] is null ||
                 app["prep-cmd"] is JsonArray { Count: 0 });
+    }
+
+    private static int RemoveOwnedGlobalHooks(
+        List<string> lines,
+        IReadOnlyCollection<SunshineOwnedGlobalHook> ownedHooks,
+        bool? originallyPresent)
+    {
+        if (ownedHooks.Count == 0 ||
+            !TryGetConfigurationValue(
+                lines,
+                GlobalPrepCommandKey,
+                out var serializedCommands))
+        {
+            return 0;
+        }
+
+        var prepCommands = JsonNode.Parse(serializedCommands) as JsonArray
+            ?? throw new InvalidDataException(
+                "Sunshine global_prep_cmd must be a JSON array.");
+        var removed = 0;
+        for (var index = prepCommands.Count - 1; index >= 0; index--)
+        {
+            if (prepCommands[index] is not JsonObject command) continue;
+            if (!ownedHooks.Any(hook =>
+                    IsExactGlobalHook(command, hook)))
+            {
+                continue;
+            }
+            prepCommands.RemoveAt(index);
+            removed++;
+        }
+
+        if (removed == 0) return 0;
+        if (prepCommands.Count == 0 && originallyPresent != true)
+        {
+            RemoveConfigurationValue(lines, GlobalPrepCommandKey);
+        }
+        else
+        {
+            SetConfigurationValue(
+                lines,
+                GlobalPrepCommandKey,
+                prepCommands.ToJsonString());
+        }
+        return removed;
+    }
+
+    private static bool IsExactGlobalHook(
+        JsonObject command,
+        SunshineOwnedGlobalHook hook) =>
+        command.Count == 3 &&
+        string.Equals(
+            command["do"]?.GetValue<string>(),
+            hook.Do,
+            StringComparison.Ordinal) &&
+        string.Equals(
+            command["undo"]?.GetValue<string>(),
+            hook.Undo,
+            StringComparison.Ordinal) &&
+        command["elevated"]?.GetValue<bool>() == hook.Elevated;
+
+    private static int RemoveLegacyGeneratedGlobalHooks(List<string> lines)
+    {
+        if (!TryGetConfigurationValue(
+                lines,
+                GlobalPrepCommandKey,
+                out var serializedCommands))
+        {
+            return 0;
+        }
+
+        var prepCommands = JsonNode.Parse(serializedCommands) as JsonArray
+            ?? throw new InvalidDataException(
+                "Sunshine global_prep_cmd must be a JSON array.");
+        var removed = 0;
+        for (var index = prepCommands.Count - 1; index >= 0; index--)
+        {
+            if (prepCommands[index] is not JsonObject command ||
+                !IsGeneratedStartCommand(
+                    command["do"]?.GetValue<string>() ?? string.Empty) ||
+                !IsGeneratedStopCommand(
+                    command["undo"]?.GetValue<string>() ?? string.Empty))
+            {
+                continue;
+            }
+
+            prepCommands.RemoveAt(index);
+            removed++;
+        }
+
+        if (removed == 0) return 0;
+        if (prepCommands.Count == 0)
+        {
+            RemoveConfigurationValue(lines, GlobalPrepCommandKey);
+        }
+        else
+        {
+            SetConfigurationValue(
+                lines,
+                GlobalPrepCommandKey,
+                prepCommands.ToJsonString());
+        }
+        return removed;
+    }
+
+    internal static bool MigrateLegacyFalseBaselineOwnership(
+        SunshineOwnershipState state,
+        SunshineOwnedLocation ownership,
+        IReadOnlyList<string> lines)
+    {
+        var migratedFalseBaseline = false;
+        var importedLegacyLocation =
+            state.FormatVersion == SunshineOwnershipJournal.LegacyFormatVersion ||
+            ownership.LegacyDisplayOwnershipMigrationCompleted is null;
+        if (importedLegacyLocation &&
+            ownership.LegacyDisplayOwnershipMigrationCompleted != true &&
+            HasStrongLegacyVitaDisplayFingerprint(lines, ownership))
+        {
+            foreach (var key in LegacyNativeDisplayKeys)
+            {
+                var value = ownership.Values[key];
+                ownership.Values[key] = value with
+                {
+                    OriginalPresent = false,
+                    OriginalValue = null,
+                };
+            }
+            migratedFalseBaseline = true;
+        }
+        ownership.LegacyDisplayOwnershipMigrationCompleted = true;
+        return migratedFalseBaseline;
+    }
+
+    private static bool HasStrongLegacyVitaDisplayFingerprint(
+        IReadOnlyList<string> lines,
+        SunshineOwnedLocation ownership)
+    {
+        foreach (var key in LegacyNativeDisplayKeys)
+        {
+            if (!ownership.Values.TryGetValue(key, out var value) ||
+                !value.OriginalPresent ||
+                !IsLegacyFalseBaselineValue(key, value) ||
+                !TryGetConfigurationValue(lines, key, out var currentValue) ||
+                !string.Equals(
+                    currentValue,
+                    value.AppliedValue,
+                    StringComparison.Ordinal) ||
+                !IsExpectedLegacyVitaDisplayValue(key, currentValue))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static bool IsLegacyFalseBaselineValue(
+        string key,
+        SunshineOwnedValue value) =>
+        string.Equals(
+            value.OriginalValue,
+            value.AppliedValue,
+            StringComparison.Ordinal) ||
+        (string.Equals(
+             key,
+             "dd_mode_remapping",
+             StringComparison.OrdinalIgnoreCase) &&
+         string.Equals(
+             value.OriginalValue,
+             LegacyMalformedVitaDisplayModeRemapping,
+             StringComparison.Ordinal) &&
+         string.Equals(
+             value.AppliedValue,
+             VitaDisplayModeRemapping,
+             StringComparison.Ordinal));
+
+    private static bool IsExpectedLegacyVitaDisplayValue(
+        string key,
+        string value) => key switch
+        {
+            "output_name" =>
+                !string.IsNullOrWhiteSpace(value) &&
+                (Regex.IsMatch(
+                     value,
+                     "^\\{[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}\\}$",
+                     RegexOptions.CultureInvariant) ||
+                 value.Contains("MttVDD", StringComparison.OrdinalIgnoreCase) ||
+                 value.Contains("MTT", StringComparison.OrdinalIgnoreCase)),
+            "dd_configuration_option" => value == "ensure_only_display",
+            "dd_resolution_option" => value == "auto",
+            "dd_refresh_rate_option" => value == "manual",
+            "dd_manual_refresh_rate" => value == "60",
+            "dd_mode_remapping" => value == VitaDisplayModeRemapping,
+            "dd_hdr_option" => value is "auto" or "disabled",
+            "dd_config_revert_delay" => value == "500",
+            "dd_config_revert_on_disconnect" => value == "enabled",
+            _ => false,
+        };
+
+    private static bool RetireOwnedLegacyDisplayConfiguration(
+        List<string> lines,
+        SunshineOwnedLocation ownership)
+    {
+        var changed = false;
+        foreach (var key in LegacyNativeDisplayKeys)
+        {
+            if (!ownership.Values.TryGetValue(key, out var owned) ||
+                !TryGetConfigurationValue(lines, key, out var currentValue) ||
+                !string.Equals(
+                    currentValue,
+                    owned.AppliedValue,
+                    StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (owned.OriginalPresent)
+            {
+                SetConfigurationValue(
+                    lines,
+                    key,
+                    owned.OriginalValue ?? string.Empty);
+            }
+            else
+            {
+                RemoveConfigurationValue(lines, key);
+            }
+            ownership.Values.Remove(key);
+            changed = true;
+        }
+        return changed;
     }
 
     internal static bool RestoreOwnedConfiguration(
@@ -416,7 +1004,7 @@ internal static class SunshineConfigurator
     internal static string BuildStartCommand(string companionPath)
     {
         ValidateExecutablePath(companionPath);
-        return $"cmd.exe /D /S /C \"\"{companionPath}\" session start --width %SUNSHINE_CLIENT_WIDTH% --height %SUNSHINE_CLIENT_HEIGHT% --fps %SUNSHINE_CLIENT_FPS%\"";
+        return $"cmd.exe /D /S /C \"\"{companionPath}\" session hook-start --width %SUNSHINE_CLIENT_WIDTH% --height %SUNSHINE_CLIENT_HEIGHT% --fps %SUNSHINE_CLIENT_FPS%\"";
     }
 
     internal static string BuildStopCommand(string companionPath)
@@ -471,7 +1059,10 @@ internal static class SunshineConfigurator
         SetConfigurationValue(lines, ownership, "dd_config_revert_on_disconnect", "enabled");
     }
 
-    internal static string? FindManagedDisplayDeviceId(string logPath, string? displayMatch)
+    internal static string? FindManagedDisplayDeviceId(
+        string logPath,
+        string? displayMatch,
+        DateTimeOffset? inventoryNotBeforeUtc = null)
     {
         if (!File.Exists(logPath)) return null;
         string log;
@@ -490,7 +1081,16 @@ internal static class SunshineConfigurator
             return null;
         }
 
-        var candidates = ParseDisplayCandidates(log);
+        var inventory = ParseLatestDisplayInventory(log);
+        if (inventoryNotBeforeUtc is { } minimum &&
+            (inventory.ObservedAt is null ||
+             inventory.ObservedAt.Value.ToUniversalTime()
+                 .AddMilliseconds(2) <
+             minimum.ToUniversalTime()))
+        {
+            return null;
+        }
+        var candidates = inventory.Candidates;
         for (var index = candidates.Count - 1; index >= 0; index--)
         {
             var candidate = candidates[index];
@@ -509,7 +1109,8 @@ internal static class SunshineConfigurator
         string logPath,
         string? displayMatch,
         int timeoutMilliseconds,
-        int pollMilliseconds)
+        int pollMilliseconds,
+        DateTimeOffset? inventoryNotBeforeUtc = null)
     {
         if (timeoutMilliseconds < 0)
         {
@@ -523,7 +1124,10 @@ internal static class SunshineConfigurator
         var timer = Stopwatch.StartNew();
         while (true)
         {
-            var displayDeviceId = FindManagedDisplayDeviceId(logPath, displayMatch);
+            var displayDeviceId = FindManagedDisplayDeviceId(
+                logPath,
+                displayMatch,
+                inventoryNotBeforeUtc);
             if (displayDeviceId is not null) return displayDeviceId;
             if (timer.ElapsedMilliseconds >= timeoutMilliseconds) return null;
             var remaining = timeoutMilliseconds - timer.ElapsedMilliseconds;
@@ -531,15 +1135,17 @@ internal static class SunshineConfigurator
         }
     }
 
-    private static IReadOnlyList<SunshineDisplayCandidate> ParseDisplayCandidates(string log)
+    private static SunshineDisplayInventory ParseLatestDisplayInventory(
+        string log)
     {
         var candidates = new List<SunshineDisplayCandidate>();
         const string marker = "Currently available display devices:";
         var markerIndex = log.LastIndexOf(marker, StringComparison.OrdinalIgnoreCase);
         if (markerIndex < 0)
         {
-            return candidates;
+            return new SunshineDisplayInventory(null, candidates);
         }
+        var observedAt = ParseInventoryTimestamp(log, markerIndex);
 
         // Never fall back to an older inventory. While Sunshine is writing a
         // new block, returning an earlier device ID can bind output_name to a
@@ -548,12 +1154,12 @@ internal static class SunshineConfigurator
         var arrayStart = log.IndexOf('[', markerIndex + marker.Length);
         if (arrayStart < 0)
         {
-            return candidates;
+            return new SunshineDisplayInventory(observedAt, candidates);
         }
         var arrayEnd = FindJsonArrayEnd(log, arrayStart);
         if (arrayEnd < 0)
         {
-            return candidates;
+            return new SunshineDisplayInventory(observedAt, candidates);
         }
 
         var inventory = log[arrayStart..(arrayEnd + 1)];
@@ -576,7 +1182,10 @@ internal static class SunshineConfigurator
             // Older or development Sunshine builds may emit non-strict JSON;
             // the regex fallback below remains restricted to the newest block.
         }
-        if (candidates.Count > 0) return candidates;
+        if (candidates.Count > 0)
+        {
+            return new SunshineDisplayInventory(observedAt, candidates);
+        }
 
         var idFirst = Regex.Matches(
             inventory,
@@ -601,7 +1210,33 @@ internal static class SunshineConfigurator
                 match.Groups["name"].Value,
                 match.Value));
         }
-        return candidates;
+        return new SunshineDisplayInventory(observedAt, candidates);
+    }
+
+    private static DateTimeOffset? ParseInventoryTimestamp(
+        string log,
+        int markerIndex)
+    {
+        var lineStart = markerIndex > 0
+            ? log.LastIndexOf('\n', markerIndex - 1)
+            : -1;
+        var header = log[(lineStart + 1)..markerIndex];
+        var match = Regex.Match(
+            header,
+            @"\[(?<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3})\]",
+            RegexOptions.CultureInvariant);
+        if (!match.Success)
+        {
+            return null;
+        }
+        return DateTimeOffset.TryParseExact(
+            match.Groups["timestamp"].Value,
+            "yyyy-MM-dd HH:mm:ss.fff",
+            CultureInfo.InvariantCulture,
+            DateTimeStyles.AssumeLocal,
+            out var timestamp)
+            ? timestamp
+            : null;
     }
 
     private static int FindJsonArrayEnd(string text, int start)
@@ -644,23 +1279,154 @@ internal static class SunshineConfigurator
 
     private sealed record SunshineDisplayCandidate(string Id, string Name, string Raw);
 
-    internal static bool IsNativeDisplayManagementReady(string configDirectory)
+    private sealed record SunshineDisplayInventory(
+        DateTimeOffset? ObservedAt,
+        IReadOnlyList<SunshineDisplayCandidate> Candidates);
+
+    internal static bool IsAuthenticatedStreamBoundaryConfigurationReady(
+        string configDirectory,
+        bool forceSdr,
+        string? displayMatch = null,
+        DateTimeOffset? inventoryNotBeforeUtc = null)
     {
+        _ = forceSdr;
+        _ = displayMatch;
+        _ = inventoryNotBeforeUtc;
         var path = Path.Combine(configDirectory, "sunshine.conf");
         if (!File.Exists(path)) return false;
         try
         {
             var lines = File.ReadAllLines(path);
-            return HasConfigurationValue(lines, "dd_configuration_option", "ensure_only_display") &&
-                   HasConfigurationValue(lines, "dd_resolution_option", "auto") &&
-                   HasConfigurationValue(lines, "dd_refresh_rate_option", "manual") &&
-                   HasConfigurationValue(lines, "dd_manual_refresh_rate", "60") &&
-                   HasConfigurationValue(lines, "dd_mode_remapping", VitaDisplayModeRemapping) &&
-                   HasConfigurationValue(lines, "dd_config_revert_on_disconnect", "enabled") &&
-                   lines.Any(line => line.TrimStart().StartsWith("output_name =", StringComparison.OrdinalIgnoreCase) &&
-                                     !string.IsNullOrWhiteSpace(line[(line.IndexOf('=') + 1)..]));
+            var normalizedDirectory = Path.GetFullPath(configDirectory)
+                .TrimEnd(
+                    Path.DirectorySeparatorChar,
+                    Path.AltDirectorySeparatorChar);
+            var ownership = SunshineOwnershipJournal.Load().Locations
+                .FirstOrDefault(location => string.Equals(
+                    Path.GetFullPath(location.ConfigurationDirectory)
+                        .TrimEnd(
+                            Path.DirectorySeparatorChar,
+                            Path.AltDirectorySeparatorChar),
+                    normalizedDirectory,
+                    StringComparison.OrdinalIgnoreCase));
+            if (ownership is null || ownership.GlobalHooks.Count != 0 ||
+                !ownership.Values.TryGetValue(
+                    "output_name",
+                    out var ownedOutput) ||
+                ownedOutput.AppliedValue.Length != 0 ||
+                !TryGetConfigurationValue(
+                    lines,
+                    "output_name",
+                    out var configuredOutput) ||
+                configuredOutput.Length != 0 ||
+                HasGeneratedGlobalLifecycleHook(lines))
+            {
+                return false;
+            }
+            return HasConfigurationValue(lines, "dd_configuration_option", "disabled") &&
+                   HasConfigurationValue(lines, "dd_config_revert_on_disconnect", "disabled") &&
+                   HasConfigurationValue(lines, "controller", "enabled") &&
+                   HasConfigurationValue(lines, "gamepad", "auto") &&
+                   HasConfigurationValue(lines, "motion_as_ds4", "enabled") &&
+                   HasConfigurationValue(lines, "touchpad_as_ds4", "enabled") &&
+                   HasConfigurationValue(lines, "keyboard", "enabled") &&
+                   HasConfigurationValue(lines, "mouse", "enabled") &&
+                   HasConfigurationValue(lines, "native_pen_touch", "enabled");
         }
-        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        catch (Exception error) when (
+            error is IOException or
+                UnauthorizedAccessException or
+                JsonException or
+                InvalidDataException or
+                InvalidOperationException or
+                ArgumentException or
+                System.Security.SecurityException)
+        {
+            return false;
+        }
+    }
+
+    private static bool HasGeneratedGlobalLifecycleHook(
+        IReadOnlyList<string> lines)
+    {
+        if (!TryGetConfigurationValue(
+                lines,
+                GlobalPrepCommandKey,
+                out var serializedCommands))
+        {
+            return false;
+        }
+
+        var prepCommands = JsonNode.Parse(serializedCommands) as JsonArray
+            ?? throw new InvalidDataException(
+                "Sunshine global_prep_cmd must be a JSON array.");
+        return prepCommands.OfType<JsonObject>().Any(command =>
+            IsGeneratedStartCommand(
+                command["do"]?.GetValue<string>() ?? string.Empty) &&
+            IsGeneratedStopCommand(
+                command["undo"]?.GetValue<string>() ?? string.Empty));
+    }
+
+    internal static bool IsManagedHookReady(
+        string configDirectory,
+        string applicationName,
+        string companionPath)
+    {
+        var appsPath = Path.Combine(configDirectory, "apps.json");
+        if (!File.Exists(appsPath)) return false;
+        try
+        {
+            var expected = new SunshineOwnedHook(
+                applicationName,
+                BuildStartCommand(companionPath),
+                BuildStopCommand(companionPath),
+                true);
+            var normalizedDirectory = Path.GetFullPath(configDirectory)
+                .TrimEnd(
+                    Path.DirectorySeparatorChar,
+                    Path.AltDirectorySeparatorChar);
+            var ownership = SunshineOwnershipJournal.Load().Locations
+                .FirstOrDefault(location => string.Equals(
+                    Path.GetFullPath(location.ConfigurationDirectory)
+                        .TrimEnd(
+                            Path.DirectorySeparatorChar,
+                            Path.AltDirectorySeparatorChar),
+                    normalizedDirectory,
+                    StringComparison.OrdinalIgnoreCase));
+            if (ownership is null ||
+                !ownership.Hooks.Any(hook => hook == expected))
+            {
+                return false;
+            }
+
+            var root = JsonNode.Parse(File.ReadAllText(appsPath))?.AsObject();
+            if (root?["apps"] is not JsonArray apps) return false;
+            return apps.OfType<JsonObject>().Any(app =>
+                string.Equals(
+                    app["name"]?.GetValue<string>(),
+                    applicationName,
+                    StringComparison.OrdinalIgnoreCase) &&
+                app["prep-cmd"] is JsonArray prepCommands &&
+                prepCommands.OfType<JsonObject>().Any(command =>
+                    string.Equals(
+                        command["do"]?.GetValue<string>(),
+                        expected.Do,
+                        StringComparison.Ordinal) &&
+                    string.Equals(
+                        command["undo"]?.GetValue<string>(),
+                        expected.Undo,
+                        StringComparison.Ordinal) &&
+                    (command["elevated"]?.GetValue<bool>() ?? false) ==
+                    expected.Elevated));
+        }
+        catch (Exception error) when (
+            error is IOException or
+                UnauthorizedAccessException or
+                JsonException or
+                InvalidDataException or
+                InvalidOperationException or
+                ArgumentException or
+                System.Security.SecurityException)
         {
             return false;
         }
@@ -696,12 +1462,65 @@ internal static class SunshineConfigurator
         SetConfigurationValue(lines, key, value);
     }
 
-    private static void SetOwnedConfigurationValue(
+    private static void SetOwnedLifecycleConfigurationValue(
         List<string> lines,
         SunshineOwnedLocation ownership,
         string key,
-        string value) =>
+        string value)
+    {
+        if (ownership.Values.TryGetValue(key, out var existing) &&
+            (!TryGetConfigurationValue(lines, key, out var currentValue) ||
+             !string.Equals(
+                 currentValue,
+                 existing.AppliedValue,
+                 StringComparison.Ordinal)))
+        {
+            // A user or host update changed this setting after our previous
+            // write. Rebase the rollback value before applying the lifecycle
+            // requirement so uninstall restores that latest external choice,
+            // never an obsolete product-era baseline.
+            ownership.Values.Remove(key);
+        }
         SetConfigurationValue(lines, ownership, key, value);
+    }
+
+    internal static bool RetireOwnedLifecycleConfigurationValue(
+        List<string> lines,
+        SunshineOwnedLocation ownership,
+        string key)
+    {
+        if (!ownership.Values.TryGetValue(key, out var existing))
+        {
+            return false;
+        }
+
+        var changed = false;
+        if (TryGetConfigurationValue(lines, key, out var currentValue) &&
+            string.Equals(
+                currentValue,
+                existing.AppliedValue,
+                StringComparison.Ordinal))
+        {
+            if (existing.OriginalPresent)
+            {
+                SetConfigurationValue(
+                    lines,
+                    key,
+                    existing.OriginalValue ?? string.Empty);
+            }
+            else
+            {
+                RemoveConfigurationValue(lines, key);
+            }
+            changed = true;
+        }
+
+        // A divergent current value is user/host-owned. Preserve it and drop
+        // only our obsolete rollback claim so a later uninstall can never
+        // replace that newer external choice with a product-era baseline.
+        ownership.Values.Remove(key);
+        return changed;
+    }
 
     private static void SetConfigurationValue(List<string> lines, string key, string value)
     {
@@ -761,24 +1580,12 @@ internal static class SunshineConfigurator
         }
     }
 
-    private static BackupResult BackupOnce(string path)
-    {
-        var backupPath = path + ".vita-moonlight.backup";
-        var created = false;
-        if (File.Exists(path) && !File.Exists(backupPath))
-        {
-            File.Copy(path, backupPath);
-            created = true;
-        }
-        return new BackupResult(
-            backupPath,
-            created,
-            created ? ComputeFileSha256(backupPath) : null);
-    }
-
     private static string ComputeFileSha256(string path) =>
         Convert.ToHexString(
             SHA256.HashData(File.ReadAllBytes(path)));
+
+    private static string ComputeSha256(byte[] content) =>
+        Convert.ToHexString(SHA256.HashData(content));
 
     private static bool FixedTimeHexEquals(
         string first,
@@ -798,11 +1605,6 @@ internal static class SunshineConfigurator
             return false;
         }
     }
-
-    private sealed record BackupResult(
-        string Path,
-        bool Created,
-        string? Sha256);
 
     private static void ValidateExecutablePath(string companionPath)
     {

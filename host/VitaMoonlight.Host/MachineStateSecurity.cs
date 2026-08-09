@@ -28,15 +28,35 @@ internal static class MachineStateSecurity
                 "companion before using protected state.");
         }
         SecureCore();
+        InstallResidueCleanup.RunForInstalledPayloadIfNeeded();
     }
 
     internal static void SecureAfterLegacyMigration()
     {
         SecureCore();
         MarkProtectionInitialized();
+        InstallResidueCleanup.RunForInstalledPayloadIfNeeded();
     }
 
-    private static void SecureCore()
+    internal static void SecureWhileDisplayTransactionHeld(
+        DisplayTransactionLease transaction)
+    {
+        transaction.RequireActive();
+        Environment.SetEnvironmentVariable(
+            "VITA_MOONLIGHT_STATE_DIR",
+            null);
+        if (!IsProtectionInitialized())
+        {
+            throw new InvalidOperationException(
+                "Legacy machine state has not been migrated. Run " +
+                "`session recover-upgrade` from the installed Administrator " +
+                "companion before using protected state.");
+        }
+        SecureCore(skipDisplayTransactionFile: true);
+    }
+
+    private static void SecureCore(
+        bool skipDisplayTransactionFile = false)
     {
         // Secure the root itself first. No recursive pathname traversal is
         // used: every object is opened with OPEN_REPARSE_POINT, checked by
@@ -46,6 +66,17 @@ internal static class MachineStateSecurity
 
         foreach (var path in ProtectedMachineFiles())
         {
+            if (skipDisplayTransactionFile &&
+                string.Equals(
+                    path,
+                    HostStatePaths.LockFile,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                // The active typed lease already proves this exact protected
+                // file is open exclusively. Reopening it here would deadlock
+                // the caller against its own FileShare.None handle.
+                continue;
+            }
             TrustedFileSystem.SecureExistingFile(path);
         }
         foreach (var path in WritableDiagnosticFiles())
@@ -99,14 +130,78 @@ internal static class MachineStateSecurity
         }
     }
 
+    /// <summary>
+    /// Fast-path precondition for the high-frequency authenticated stream
+    /// heartbeat. The agent performs the full ACL walk once at startup; each
+    /// exact journal open still rejects reparse points/hard links and applies
+    /// the protected file ACL, without rescanning unrelated machine state.
+    /// </summary>
+    internal static void RequireStreamBoundaryLeaseAccess()
+    {
+        Environment.SetEnvironmentVariable(
+            "VITA_MOONLIGHT_STATE_DIR",
+            null);
+        if (!IsProtectionInitialized())
+        {
+            throw new InvalidOperationException(
+                "Legacy machine state has not been migrated. Run " +
+                "`session recover-upgrade` before using stream-boundary state.");
+        }
+    }
+
+    /// <summary>
+    /// Narrow startup path for the short-lived Core Audio helper. Its parent
+    /// may hold session.lock while committing display restoration, so a full
+    /// machine-state ACL walk would deadlock/fail against that intentional
+    /// exclusive lease. The helper has no configurable endpoint argument and
+    /// may read or update only the three exact protected audio journal files.
+    /// </summary>
+    internal static void RequireAudioRecoveryWorkerAccess()
+    {
+        Environment.SetEnvironmentVariable(
+            "VITA_MOONLIGHT_STATE_DIR",
+            null);
+        if (!IsProtectionInitialized())
+        {
+            throw new InvalidOperationException(
+                "Legacy machine state has not been migrated. Run " +
+                "`session recover-upgrade` before using audio recovery state.");
+        }
+        SecureContainer();
+        TrustedFileSystem.SecureExistingFile(
+            HostStatePaths.AudioRecoveryFile);
+        TrustedFileSystem.SecureExistingFile(
+            HostStatePaths.AudioRecoveryBackupFile);
+        // OpenExclusiveFile applies the exact protected ACL when the worker
+        // acquires AudioRecoveryLockFile. Do not pre-open a competing lock.
+    }
+
     private static IEnumerable<string> ProtectedMachineFiles()
     {
         yield return HostStatePaths.RecoveryFile;
+        yield return HostStatePaths.AudioRecoveryFile;
+        yield return HostStatePaths.AudioRecoveryBackupFile;
+        yield return HostStatePaths.AudioRecoveryLockFile;
         yield return HostStatePaths.SettingsFile;
         yield return HostStatePaths.LockFile;
+        // The suspend intent is secured only while its dedicated protected
+        // cross-process gate is held. Including it in this bulk inventory
+        // would let an unrelated state-secure pass race its durable power
+        // event publication and turn a safe suspend into a sharing failure.
         yield return HostStatePaths.LastErrorFile;
         yield return DriverNativeModeVerification.VerificationFile;
         yield return DriverConfigurationDirectoryTrust.IdentityFile;
+        yield return ManagedVddOwnershipJournal.JournalFile;
+        yield return StreamBoundaryLeaseJournal.StateFile;
+        yield return StreamBoundaryLeaseJournal.BackupFile;
+        yield return StreamBoundaryLeaseJournal.LockFile;
+        yield return BackendLifecycleStateStore.StateFile;
+        yield return BackendLifecycleStateStore.BackupFile;
+        yield return BackendLifecycleStateStore.DisabledIntentFile;
+        yield return BackendLifecycleStateStore.UninstallIntentFile;
+        yield return DeferredHostSetupStore.PlanFile;
+        yield return InstallerMaintenanceFence.StateFile;
+        yield return InstallerMaintenanceFence.BackupFile;
     }
 
     private static IEnumerable<string> WritableDiagnosticFiles()

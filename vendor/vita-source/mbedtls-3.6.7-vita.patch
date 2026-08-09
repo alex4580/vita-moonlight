@@ -1,0 +1,165 @@
+Vita Moonlight mbedTLS compatibility patch
+Copyright (C) 2026 Vita Moonlight contributors
+SPDX-License-Identifier: GPL-3.0-or-later
+
+This patch adds the small platform adaptations needed to build the official
+Mbed TLS 3.6.7 source with VitaSDK. Apply it with `git apply`; fuzzy matching
+is intentionally not supported.
+
+diff --git a/library/common.h b/library/common.h
+index 1f59b32..e6e193a 100644
+--- a/library/common.h
++++ b/library/common.h
+@@ -39,8 +39,10 @@
+ #elif defined(unix) || defined(__unix) || defined(__unix__) ||    \
+     (defined(__APPLE__) && defined(__MACH__)) ||                  \
+     defined(__HAIKU__) ||                                         \
+     defined(__midipix__) ||                                       \
++    defined(__vita__) ||                                          \
+     /* Add other Unix-like platform indicators here ^^^^ */ 0
+ /* defined(MBEDTLS_PLATFORM_IS_UNIXLIKE) ==> we can include <unistd.h> */
+ #define MBEDTLS_PLATFORM_IS_UNIXLIKE
++/* Modified for PlayStation Vita by Vita Moonlight contributors, 2026. */
+ #endif
+diff --git a/library/entropy_poll.c b/library/entropy_poll.c
+index 1c8a29d..cdee64e 100644
+--- a/library/entropy_poll.c
++++ b/library/entropy_poll.c
+@@ -31,7 +31,9 @@
+ 
++/* Modified for PlayStation Vita by Vita Moonlight contributors, 2026. */
+ #if !defined(unix) && !defined(__unix__) && !defined(__unix) && \
+     !defined(__APPLE__) && !defined(_WIN32) && !defined(__QNXNTO__) && \
+-    !defined(__HAIKU__) && !defined(__midipix__) && !defined(__MVS__)
++    !defined(__HAIKU__) && !defined(__midipix__) && !defined(__MVS__) && \
++    !defined(__vita__)
+ #error \
+     "Platform entropy sources only work on Unix and Windows, see MBEDTLS_NO_PLATFORM_ENTROPY in mbedtls_config.h"
+ #endif
+@@ -145,6 +146,26 @@ static int sysctl_arnd_wrapper(unsigned char *buf, size_t buflen)
+ #endif /* KERN_ARND */
+ #endif /* __FreeBSD__ || __NetBSD__ */
+ 
++/* VitaSDK provides getentropy(), with a maximum of 256 bytes per call. */
++#if defined(__vita__)
++int getentropy(void *, size_t); /* Hidden behind __BSD_VISIBLE in VitaSDK. */
++
++static int vita_getentropy_wrapper(unsigned char *buf, size_t buflen)
++{
++    size_t len;
++
++    while (buflen > 0) {
++        len = buflen > 256 ? 256 : buflen;
++        if (getentropy(buf, len) == -1) {
++            return -1;
++        }
++        buflen -= len;
++        buf += len;
++    }
++    return 0;
++}
++#endif /* __vita__ */
++
+ #include <stdio.h>
+ 
+ const char *mbedtls_platform_dev_random = MBEDTLS_PLATFORM_DEV_RANDOM;
+@@ -178,6 +199,14 @@ int mbedtls_platform_entropy_poll(void *data,
+     }
+     *olen = len;
+     return 0;
++#elif defined(__vita__)
++    ((void) file);
++    ((void) read_len);
++    if (vita_getentropy_wrapper(output, len) == -1) {
++        return MBEDTLS_ERR_ENTROPY_SOURCE_FAILED;
++    }
++    *olen = len;
++    return 0;
+ #else
+ 
+     *olen = 0;
+diff --git a/library/net_sockets.c b/library/net_sockets.c
+index c919f6f..2656ee7 100644
+--- a/library/net_sockets.c
++++ b/library/net_sockets.c
+@@ -277,6 +277,36 @@ static int net_would_block(const mbedtls_net_context *ctx)
+     ((void) ctx);
+     return WSAGetLastError() == WSAEWOULDBLOCK;
+ }
++#elif defined(__vita__)
++/* Modified for PlayStation Vita by Vita Moonlight contributors, 2026. */
++/*
++ * Check if the requested operation would be blocking on a non-blocking socket
++ * and thus 'failed' with a negative return value.
++ */
++static int net_would_block(const mbedtls_net_context *ctx)
++{
++    int err = errno;
++    long b = 0L;
++    socklen_t b_size = sizeof(b);
++
++    /* Never report WOULD BLOCK for a blocking socket. */
++    if (getsockopt(ctx->fd, SOL_SOCKET, SO_NONBLOCK, &b, &b_size) != 0 ||
++        b != 1L) {
++        errno = err;
++        return 0;
++    }
++
++    switch (errno = err) {
++#if defined(EAGAIN)
++        case EAGAIN:
++#endif
++#if defined(EWOULDBLOCK) && EWOULDBLOCK != EAGAIN
++        case EWOULDBLOCK:
++#endif
++            return 1;
++    }
++    return 0;
++}
+ #else
+ /*
+  * Check if the requested operation would be blocking on a non-blocking socket
+@@ -324,6 +354,7 @@ int mbedtls_net_accept(mbedtls_net_context *bind_ctx,
+ #if defined(__socklen_t_defined) || defined(_SOCKLEN_T) ||  \
+     defined(_SOCKLEN_T_DECLARED) || defined(__DEFINED_socklen_t) || \
+-    defined(socklen_t) || (defined(_POSIX_VERSION) && _POSIX_VERSION >= 200112L)
++    defined(socklen_t) || (defined(_POSIX_VERSION) && _POSIX_VERSION >= 200112L) || \
++    defined(__vita__)
+     socklen_t n = (socklen_t) sizeof(client_addr);
+     socklen_t type_len = (socklen_t) sizeof(type);
+ #else
+@@ -428,6 +458,9 @@ int mbedtls_net_set_block(mbedtls_net_context *ctx)
+     !defined(EFI32)
+     u_long n = 0;
+     return ioctlsocket(ctx->fd, FIONBIO, &n);
++#elif defined(__vita__)
++    long b = 0L;
++    return setsockopt(ctx->fd, SOL_SOCKET, SO_NONBLOCK, &b, sizeof(b));
+ #else
+     return fcntl(ctx->fd, F_SETFL, fcntl(ctx->fd, F_GETFL) & ~O_NONBLOCK);
+ #endif
+@@ -439,6 +472,9 @@ int mbedtls_net_set_nonblock(mbedtls_net_context *ctx)
+     !defined(EFI32)
+     u_long n = 1;
+     return ioctlsocket(ctx->fd, FIONBIO, &n);
++#elif defined(__vita__)
++    long b = 1L;
++    return setsockopt(ctx->fd, SOL_SOCKET, SO_NONBLOCK, &b, sizeof(b));
+ #else
+     return fcntl(ctx->fd, F_SETFL, fcntl(ctx->fd, F_GETFL) | O_NONBLOCK);
+ #endif
+diff --git a/library/platform_util.c b/library/platform_util.c
+index 1cab42f..3e98d93 100644
+--- a/library/platform_util.c
++++ b/library/platform_util.c
+@@ -219,7 +219,9 @@ void (*mbedtls_test_hook_test_fail)(const char *, int, const char *);
+ #include <unistd.h>
+ #endif
+ 
++/* Modified for PlayStation Vita by Vita Moonlight contributors, 2026. */
+-#if (defined(_POSIX_VERSION) && _POSIX_VERSION >= 199309L) || defined(__HAIKU__)
++#if (defined(_POSIX_VERSION) && _POSIX_VERSION >= 199309L) || \
++    defined(__HAIKU__) || defined(__vita__)
+ mbedtls_ms_time_t mbedtls_ms_time(void)
+ {
+     int ret;

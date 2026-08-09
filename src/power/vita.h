@@ -18,6 +18,7 @@
  */
 
 bool vitapower_init();
+bool vitapower_shutdown(void);
 void vitapower_config(CONFIGURATION config);
 
 void vitapower_start();

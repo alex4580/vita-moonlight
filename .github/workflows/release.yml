@@ -61,8 +61,8 @@ jobs:
           if [[ "$tag_verified" == "true" ]]; then
             echo "GitHub verified the signed annotated tag $GITHUB_REF_NAME."
           elif [[ "$GITHUB_REPOSITORY" == "alex4580/vita-moonlight" &&
-                  "$GITHUB_REF_NAME" == "v0.14.6-beta.1" ]]; then
-            echo "::warning::The one-time bootstrap tag is annotated but not cryptographically signed (reason: $tag_reason)."
+                  "$GITHUB_REF_NAME" == "v0.14.8-beta.1" ]]; then
+            echo "::warning::The exact unsigned beta-preview tag is annotated but not cryptographically signed (reason: $tag_reason)."
           else
             echo "GitHub did not verify the signature on $GITHUB_REF_NAME (reason: $tag_reason)." >&2
             exit 1
@@ -116,7 +116,17 @@ jobs:
       - name: Checkout release metadata
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
+          submodules: recursive
           persist-credentials: false
+
+      - name: Build complete Vita Corresponding Source archive
+        run: >-
+          python3 tools/build-vita-source-bundle.py
+          --lock tools/vita-corresponding-source.lock.json
+          --output-dir release-source
+          --cache-dir "$RUNNER_TEMP/vita-source-cache"
+          --require-complete
 
       - name: Download Vita release artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -137,6 +147,7 @@ jobs:
           mkdir release-dist
           mapfile -d '' vpk_assets < <(find release-assets -type f -name '*.vpk' -print0)
           mapfile -d '' vita_manifest_assets < <(find release-assets -type f -name 'vitasdk-dependencies.json' -print0)
+          mapfile -d '' vita_source_assets < <(find release-source -maxdepth 1 -type f -name '*-Vita-Source.tar.gz' -print0)
           mapfile -d '' windows_signing_manifest_assets < <(find release-assets -type f -name 'windows-signing-status.json' -print0)
           mapfile -d '' installer_assets < <(find release-assets -type f -name '*.exe' -print0)
           mapfile -d '' portable_assets < <(find release-assets -type f -name '*.zip' -print0)
@@ -145,7 +156,11 @@ jobs:
             exit 1
           fi
           if (( ${#vita_manifest_assets[@]} != 1 )); then
-            echo "Expected exactly one VitaSDK dependency manifest; found ${#vita_manifest_assets[@]}." >&2
+            echo "Expected exactly one Vita source-dependency manifest; found ${#vita_manifest_assets[@]}." >&2
+            exit 1
+          fi
+          if (( ${#vita_source_assets[@]} != 1 )); then
+            echo "Expected exactly one complete Vita source archive; found ${#vita_source_assets[@]}." >&2
             exit 1
           fi
           if (( ${#windows_signing_manifest_assets[@]} != 1 )); then
@@ -160,8 +175,55 @@ jobs:
             echo "Expected exactly one portable archive; found ${#portable_assets[@]}." >&2
             exit 1
           fi
+
+          vita_manifest="${vita_manifest_assets[0]}"
+          vita_lock="tools/vita-corresponding-source.lock.json"
+          vita_lock_sha256="$(sha256sum "$vita_lock" | cut -d ' ' -f 1)"
+          manifest_schema="$(jq --raw-output '.schema // empty' "$vita_manifest")"
+          manifest_lock_schema="$(jq --raw-output '.source_lock.schema // empty' "$vita_manifest")"
+          manifest_lock_sha256="$(jq --raw-output '.source_lock.sha256 // empty' "$vita_manifest")"
+          manifest_lock_path="$(jq --raw-output '.source_lock.path // empty' "$vita_manifest")"
+          manifest_locked_at="$(jq --raw-output '.source_lock.locked_at_utc // empty' "$vita_manifest")"
+          locked_schema="$(jq --raw-output '.schema // empty' "$vita_lock")"
+          locked_at="$(jq --raw-output '.locked_at_utc // empty' "$vita_lock")"
+          if [[ "$manifest_schema" != "vita-moonlight/vita-source-dependency-manifest/v1" ||
+                "$manifest_lock_schema" != "vita-moonlight/vita-corresponding-source-lock/v1" ||
+                "$locked_schema" != "$manifest_lock_schema" ||
+                "$manifest_lock_sha256" != "$vita_lock_sha256" ||
+                "$manifest_lock_path" != "$vita_lock" ||
+                "$manifest_locked_at" != "$locked_at" ]]; then
+            echo "Vita dependency manifest is not bound to the committed source lock." >&2
+            exit 1
+          fi
+          jq --sort-keys '.dependency_source_build' "$vita_manifest" \
+            > "$RUNNER_TEMP/vita-dependency-manifest-recipe.json"
+          jq --sort-keys '.dependency_source_build' "$vita_lock" \
+            > "$RUNNER_TEMP/vita-dependency-lock-recipe.json"
+          if ! cmp --silent \
+            "$RUNNER_TEMP/vita-dependency-manifest-recipe.json" \
+            "$RUNNER_TEMP/vita-dependency-lock-recipe.json"; then
+            echo "Vita dependency manifest recipe differs from the committed source lock." >&2
+            exit 1
+          fi
+          if ! jq --exit-status \
+            --argjson required_paths "$(jq '.dependency_source_build.required_outputs' "$vita_lock")" '
+              (.sources | type == "array" and length > 0) and
+              (.build_verification.status == "complete") and
+              (.build_verification.completed_at_utc | type == "string" and length > 0) and
+              (.build_verification.outputs | type == "array" and length > 0) and
+              ([.build_verification.outputs[].path] == $required_paths) and
+              (all(.build_verification.outputs[];
+                (.path | type == "string" and length > 0) and
+                (.sha256 | type == "string" and test("^[0-9a-f]{64}$")) and
+                (.size | type == "number" and . > 0 and floor == .)))
+            ' "$vita_manifest" > /dev/null; then
+            echo "Vita dependency manifest does not prove a complete source build." >&2
+            exit 1
+          fi
+
           cp -- "${vpk_assets[0]}" release-dist/
-          cp -- "${vita_manifest_assets[0]}" release-dist/
+          cp -- "$vita_manifest" release-dist/
+          cp -- "${vita_source_assets[0]}" release-dist/
           cp -- "${windows_signing_manifest_assets[0]}" release-dist/
           cp -- "${installer_assets[0]}" release-dist/
           cp -- "${portable_assets[0]}" release-dist/
@@ -197,9 +259,9 @@ jobs:
           fi
 
           if [[ "$GITHUB_REPOSITORY" == "alex4580/vita-moonlight" &&
-                "$GITHUB_REF_NAME" == "v0.14.6-beta.1" ]]; then
-            if [[ "$signing_mode" != "unsigned-bootstrap" ]]; then
-              echo "v0.14.6-beta.1 must use unsigned-bootstrap mode." >&2
+                "$GITHUB_REF_NAME" == "v0.14.8-beta.1" ]]; then
+            if [[ "$signing_mode" != "unsigned-beta-preview" ]]; then
+              echo "v0.14.8-beta.1 must use unsigned-beta-preview mode." >&2
               exit 1
             fi
             if ! jq --exit-status '
@@ -210,12 +272,12 @@ jobs:
                 .signer_thumbprint == null and
                 .timestamp_subject == null)
             ' "$signing_manifest" > /dev/null; then
-              echo "Unsigned-bootstrap manifest contains signed or inconsistent Windows artifacts." >&2
+              echo "Unsigned beta-preview manifest contains signed or inconsistent Windows artifacts." >&2
               exit 1
             fi
           else
             if [[ "$signing_mode" != "signed-release" ]]; then
-              echo "Every release except v0.14.6-beta.1 requires signed-release mode." >&2
+              echo "Every release except v0.14.8-beta.1 requires signed-release mode." >&2
               exit 1
             fi
             if ! jq --exit-status '
@@ -280,12 +342,13 @@ jobs:
               *.vpk \
               *.exe \
               *.zip \
+              *-Vita-Source.tar.gz \
               vitasdk-dependencies.json \
               windows-signing-status.json > SHA256SUMS
             sha256sum --check SHA256SUMS
           )
-          if [[ "$(find release-dist -maxdepth 1 -type f | wc -l)" != "6" ]]; then
-            echo "Release staging must contain exactly six assets." >&2
+          if [[ "$(find release-dist -maxdepth 1 -type f | wc -l)" != "7" ]]; then
+            echo "Release staging must contain exactly seven assets." >&2
             find release-dist -maxdepth 1 -type f -printf '%f\n' >&2
             exit 1
           fi
@@ -301,28 +364,31 @@ jobs:
             echo "CHANGELOG.md has no release notes for $release_version." >&2
             exit 1
           fi
-          if [[ "$signing_mode" == "unsigned-bootstrap" ]]; then
+          policy_url="https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_REF_NAME/docs/CODE_SIGNING_POLICY.md"
+          privacy_url="https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_REF_NAME/PRIVACY.md"
+          if [[ "$signing_mode" == "unsigned-beta-preview" ]]; then
             {
-              printf '%s\n\n' "UNSIGNED-WINDOWS-BOOTSTRAP: $GITHUB_REF_NAME"
+              printf '%s\n\n' "UNSIGNED-WINDOWS-BETA-PREVIEW: $GITHUB_REF_NAME"
               printf '%s\n' '> [!WARNING]'
               printf '%s\n' '> **The Windows host packages in this beta are intentionally not Authenticode-signed.**'
               printf '%s\n' '> Windows will show **Unknown publisher** and may display a Microsoft'
               printf '%s\n' '> Defender SmartScreen warning. Download only from this GitHub release,'
               printf '%s\n' '> verify `SHA256SUMS` and the GitHub attestations, and do not continue if'
               printf '%s\n\n' '> the hashes differ.'
-              printf '%s\n' 'This one-time exception applies only to `v0.14.6-beta.1`; later beta,'
-              printf '%s\n\n' 'release-candidate, and stable tags remain signing-required.'
+              printf '%s\n' 'This exception applies only to `v0.14.8-beta.1`; every other beta,'
+              printf '%s\n\n' 'release-candidate, and stable tag remains signing-required.'
               printf '%s\n' 'The Vita VPK is not a Windows executable and does not use Authenticode.'
-              printf '%s\n' "See the [Code signing policy](https://github.com/alex4580/vita-moonlight/blob/$GITHUB_REF_NAME/docs/CODE_SIGNING_POLICY.md),"
-              printf '%s\n\n' "the [Privacy policy](https://github.com/alex4580/vita-moonlight/blob/$GITHUB_REF_NAME/PRIVACY.md), and \`windows-signing-status.json\`."
+              printf '%s\n' "See the [Code signing policy]($policy_url),"
+              printf '%s\n\n' "the [Privacy policy]($privacy_url), and \`windows-signing-status.json\`."
             } > release-notes.md
           else
-            cat > release-notes.md <<'EOF'
-          The project-owned Windows executables in this release passed
-          Authenticode verification. See `windows-signing-status.json` for the
-          signer identity and artifact hashes.
-
-          EOF
+            {
+              printf '%s\n' 'The project-owned Windows executables in this release passed'
+              printf '%s\n' 'Authenticode verification. See `windows-signing-status.json` for the'
+              printf '%s\n\n' 'signer identity and artifact hashes.'
+              printf '%s\n' "See the [Code signing policy]($policy_url) and"
+              printf '%s\n\n' "the [Privacy policy]($privacy_url)."
+            } > release-notes.md
           fi
           cat release-notes-body.md >> release-notes.md
 
@@ -385,12 +451,12 @@ jobs:
             jq --raw-output '.assets[].name' "$release_json" |
               LC_ALL=C sort
           )
-          if (( ${#expected_assets[@]} != 6 ||
-                ${#published_assets[@]} != 6 )) ||
+          if (( ${#expected_assets[@]} != 7 ||
+                ${#published_assets[@]} != 7 )) ||
              ! diff --unified \
                <(printf '%s\n' "${expected_assets[@]}") \
                <(printf '%s\n' "${published_assets[@]}"); then
-            echo "Draft release does not contain the exact six staged assets." >&2
+            echo "Draft release does not contain the exact seven staged assets." >&2
             exit 1
           fi
 
@@ -418,23 +484,26 @@ jobs:
 
           release_body="$RUNNER_TEMP/draft-release-body.md"
           jq --raw-output '.body' "$release_json" > "$release_body"
+          policy_url="https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_REF_NAME/docs/CODE_SIGNING_POLICY.md"
+          expected_policy_link="[Code signing policy]($policy_url)"
+          if ! grep --fixed-strings --quiet "$expected_policy_link" "$release_body"; then
+            echo "The draft release is missing its tag-pinned Code signing policy link." >&2
+            exit 1
+          fi
           if [[ "$GITHUB_REPOSITORY" == "alex4580/vita-moonlight" &&
-                "$GITHUB_REF_NAME" == "v0.14.6-beta.1" ]]; then
-            if [[ "$(head -n 1 "$release_body")" != "UNSIGNED-WINDOWS-BOOTSTRAP: v0.14.6-beta.1" ]] ||
+                "$GITHUB_REF_NAME" == "v0.14.8-beta.1" ]]; then
+            if [[ "$(head -n 1 "$release_body")" != "UNSIGNED-WINDOWS-BETA-PREVIEW: v0.14.8-beta.1" ]] ||
                ! grep --fixed-strings --quiet "Unknown publisher" "$release_body" ||
                ! grep --fixed-strings --quiet "SmartScreen" "$release_body" ||
                ! grep --fixed-strings --quiet \
-                 "/blob/v0.14.6-beta.1/docs/CODE_SIGNING_POLICY.md" \
-                 "$release_body" ||
-               ! grep --fixed-strings --quiet \
-                 "/blob/v0.14.6-beta.1/PRIVACY.md" \
+                  "https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_REF_NAME/PRIVACY.md" \
                  "$release_body"; then
-              echo "Unsigned-bootstrap release warning or pinned policy links are missing." >&2
+              echo "Unsigned beta-preview warning or pinned policy links are missing." >&2
               exit 1
             fi
           elif grep --fixed-strings --quiet \
-            "UNSIGNED-WINDOWS-BOOTSTRAP:" "$release_body"; then
-            echo "Unsigned-bootstrap marker is forbidden on every other release." >&2
+            "UNSIGNED-WINDOWS-BETA-PREVIEW:" "$release_body"; then
+            echo "Unsigned beta-preview marker is forbidden on every other release." >&2
             exit 1
           fi
 
@@ -489,7 +558,7 @@ jobs:
           tag_verified="$(jq --raw-output '.verification.verified' <<<"$tag_object")"
           if [[ "$tag_verified" != "true" &&
                 ! ( "$GITHUB_REPOSITORY" == "alex4580/vita-moonlight" &&
-                    "$GITHUB_REF_NAME" == "v0.14.6-beta.1" ) ]]; then
+                    "$GITHUB_REF_NAME" == "v0.14.8-beta.1" ) ]]; then
             echo "The release tag no longer has a GitHub-verified signature." >&2
             exit 1
           fi

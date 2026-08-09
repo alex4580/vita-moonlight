@@ -47,11 +47,20 @@ extern CONNECTION_LISTENER_CALLBACKS connection_callbacks;
 extern int connection_stage;
 
 int connection_reset();
+/* Cancel host setup before a stream exists. This is the only legal
+ * LI_READY -> LI_DISCONNECTED transition and never calls LiStopConnection(). */
+int connection_abort_attempt();
 int connection_paired();
 int connection_minimize();
 int connection_resume();
+/* Request media teardown, or join an asynchronous Moonlight teardown already
+ * in progress. Success means every Moonlight media/renderer worker is gone. */
 int connection_terminate();
+/* Await an already-requested teardown without starting one. This is the
+ * barrier that must precede host HTTP/CURL cleanup. */
+int connection_wait_for_termination();
 
 bool connection_is_ready();
 bool connection_is_connected();
+bool connection_is_terminating();
 int connection_get_status();

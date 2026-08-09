@@ -3,8 +3,7 @@
 Last updated: July 26, 2026
 
 This policy covers the Vita Moonlight client and the Vita Moonlight Host
-companion maintained at
-<https://github.com/alex4580/vita-moonlight>.
+companion maintained in [this repository](.).
 
 ## Summary
 
@@ -57,8 +56,14 @@ the Vita or Windows PC, including:
 
 - app settings, saved host names and addresses, pairing material, and button
   or touch mappings;
-- Windows host settings, display-recovery state, and the records needed to
-  restore Vita-owned Sunshine configuration;
+- Windows host settings, display-recovery state, the records needed to
+  restore Vita-owned Sunshine configuration, and a protected local lifecycle
+  record used to restore exact scheduled-task and managed-virtual-display
+  state after a user-requested host-feature pause;
+- short protected suspend, installer-maintenance, and uninstall transaction
+  records used for crash recovery. These contain local state/phase values and,
+  while setup is active, its Windows process ID and start time; they do not
+  record controller input, screen content, network traffic, or credentials;
 - credentials and pairing state maintained by the selected Sunshine or Apollo
   installation; and
 - optional support files that the user explicitly creates.
@@ -99,7 +104,7 @@ SignPath.
 ## Questions and changes
 
 Ask a non-sensitive privacy question or report an inaccurate disclosure
-through [GitHub issues](https://github.com/alex4580/vita-moonlight/issues).
+through [GitHub issues](../../issues).
 Do not publish credentials or security-sensitive personal information.
 
 This policy will be updated when project-controlled collection, storage,

@@ -30,22 +30,162 @@ jobs:
       - name: Verify release version consistency
         run: python3 tools/check-version-consistency.py
 
+      - name: Verify release packaging and policy contract
+        run: python3 tools/check-release-contract.py
+
+      - name: Verify Vita/host compatibility contract
+        run: python3 tools/check-host-client-contract.py
+
+      - name: Verify Vita media callback contract
+        run: python3 tools/check-vita-media-contract.py
+
+      - name: Verify Vita pairing and lifecycle security
+        run: python3 tools/check-vita-security-contract.py
+
+      - name: Verify Vita saved-computer persistence
+        run: python3 tools/check-vita-device-contract.py
+
+      - name: Verify Vita host scanner lifecycle
+        run: python3 tools/check-vita-host-scan-contract.py
+
+      - name: Compile and run the clean-room Vita mDNS parser tests
+        run: python3 tools/check-vita-mdns-parser.py
+
+      - name: Verify Vita client resilience and low-latency lifecycle
+        run: python3 tools/check-vita-client-resilience.py
+
+      - name: Verify Vita stream diagnostics and recovery reliability
+        run: python3 tools/check-vita-stream-reliability.py
+
+      - name: Verify Sunshine XML response hardening
+        run: python3 tools/check-xml-hardening.py
+
+      - name: Verify pinned Moonlight RTSP hardening backport
+        run: python3 tools/check-moonlight-common-backport.py
+
       - name: Test privacy-safe support-log summarizer
         run: python3 tools/summarize-vita-log.py --self-test
 
-      - name: Test VitaSDK dependency resolver
-        run: python3 tools/fetch-vitasdk-packages.py --self-test
+      - name: Test Vita dependency source staging contract
+        run: >-
+          python3 tools/stage-vita-dependency-sources.py
+          --lock tools/vita-corresponding-source.lock.json
+          --self-test
+
+      - name: Verify the Vita source-bundle lock and completion status
+        run: >-
+          python3 tools/build-vita-source-bundle.py
+          --lock tools/vita-corresponding-source.lock.json
+          --self-test
+          --require-complete
 
       - name: Set up dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake make python3 python3-pip curl git
+          sudo apt-get install -y cmake make pkg-config python3 python3-pip curl git patch libexpat1-dev
+
+      - name: Run native Sunshine XML status protocol vectors
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -Ilibgamestream \
+            tests/xml_status_test.c libgamestream/xml.c -lexpat \
+            -o /tmp/vita-moonlight-xml-status-test
+          /tmp/vita-moonlight-xml-status-test
+
+      - name: Run authenticated stream-boundary protocol vectors
+        run: |
+          cc -std=c99 -Wall -Wextra -Werror -Ilibgamestream \
+            tests/stream_boundary_protocol_test.c \
+            libgamestream/bridge_protocol.c \
+            -o /tmp/vita-moonlight-stream-boundary-test
+          /tmp/vita-moonlight-stream-boundary-test
+
+      - name: Compile and run Vita display geometry tests
+        run: |
+          set -euo pipefail
+          cc -std=c99 -Wall -Wextra -Werror \
+            -Isrc/video \
+            tests/video_scaling_test.c src/video/scaling.c \
+            -lm -o "$RUNNER_TEMP/vita-video-scaling-test"
+          "$RUNNER_TEMP/vita-video-scaling-test"
+
+      - name: Compile and run Vita keyboard bounds tests
+        run: |
+          set -euo pipefail
+          cc -std=c99 -Wall -Wextra -Werror \
+            tests/ime_text_test.c \
+            -o "$RUNNER_TEMP/vita-ime-text-test"
+          "$RUNNER_TEMP/vita-ime-text-test"
+
+      - name: Compile and run Vita keyboard event tests
+        run: |
+          set -euo pipefail
+          cc -std=c99 -Wall -Wextra -Werror \
+            -Isrc \
+            tests/keyboard_ime_test.c \
+            -o "$RUNNER_TEMP/vita-keyboard-ime-test"
+          "$RUNNER_TEMP/vita-keyboard-ime-test"
+
+      - name: Compile and run Vita front-touch gesture tests
+        run: |
+          set -euo pipefail
+          cc -std=c99 -Wall -Wextra -Werror \
+            -Isrc \
+            tests/touch_zone_gesture_test.c \
+            src/input/touch_zone_gesture.c \
+            -o "$RUNNER_TEMP/vita-touch-zone-gesture-test"
+          "$RUNNER_TEMP/vita-touch-zone-gesture-test"
+
+      - name: Compile and run Vita SPS low-latency regression
+        run: |
+          set -euo pipefail
+          cc -std=c11 -Wall -Wextra -Werror -Wno-unused-parameter \
+            -Ilibgamestream \
+            -Ithird_party/moonlight-common-c/src \
+            -Ithird_party/h264bitstream \
+            tests/sps_reorder_test.c \
+            libgamestream/sps.c \
+            third_party/h264bitstream/h264_stream.c \
+            third_party/h264bitstream/h264_nal.c \
+            third_party/h264bitstream/h264_sei.c \
+            -o "$RUNNER_TEMP/vita-sps-reorder-test"
+          "$RUNNER_TEMP/vita-sps-reorder-test"
+
+      - name: Test offline Vita mbedTLS source inputs and exact-context patch
+        run: >-
+          python3 tools/stage-vita-mbedtls.py
+          --lock tools/vita-mbedtls-source.lock.json
+          --vendor-dir vendor/vita-source
+          --self-test
+
+      - name: Run host-native Vita pairing crypto self-test
+        run: |
+          set -euo pipefail
+          host_mbedtls_source="$RUNNER_TEMP/mbedtls-host-source"
+          host_mbedtls_build="$RUNNER_TEMP/mbedtls-host-build"
+          mkdir -p "$host_mbedtls_source"
+          tar xjf vendor/vita-source/mbedtls-3.6.7.tar.bz2 \
+            -C "$host_mbedtls_source" --strip-components=1
+          cmake -S "$host_mbedtls_source" -B "$host_mbedtls_build" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DENABLE_PROGRAMS=OFF \
+            -DENABLE_TESTING=OFF \
+            -DMBEDTLS_FATAL_WARNINGS=OFF
+          cmake --build "$host_mbedtls_build" --parallel 2
+          cc -std=c99 -Wall -Wextra -Werror \
+            -Ilibgamestream -I"$host_mbedtls_source/include" \
+            tools/vita-crypto-selftest.c \
+            libgamestream/crypto.c libgamestream/mkcert.c \
+            "$host_mbedtls_build/library/libmbedtls.a" \
+            "$host_mbedtls_build/library/libmbedx509.a" \
+            "$host_mbedtls_build/library/libmbedcrypto.a" \
+            -pthread -o "$RUNNER_TEMP/vita-crypto-selftest"
+          "$RUNNER_TEMP/vita-crypto-selftest"
 
       - name: Clean up old VitaSDK if present
         run: |
           rm -rf $GITHUB_WORKSPACE/vitasdk
 
-      - name: Install pinned VitaSDK and verified packages
+      - name: Install pinned VitaSDK and build verified dependencies from source
         run: |
           set -euo pipefail
 
@@ -59,30 +199,28 @@ jobs:
           tar xjf "$sdk_archive" -C "$VITASDK" --strip-components=1
           export PATH="$VITASDK/bin:$PATH"
 
-          vdpm_commit="e423be457622a9ba517858f4831566dcd263729a"
-          git clone --filter=blob:none --no-checkout https://github.com/vitasdk/vdpm.git "$RUNNER_TEMP/vdpm"
-          git -C "$RUNNER_TEMP/vdpm" checkout --detach "$vdpm_commit"
-          test "$(git -C "$RUNNER_TEMP/vdpm" rev-parse HEAD)" = "$vdpm_commit"
-
-          package_dir="$RUNNER_TEMP/vitasdk-packages"
-          mkdir -p "$package_dir"
           dependency_manifest="$GITHUB_WORKSPACE/vitasdk-dependencies.json"
-          python3 tools/fetch-vitasdk-packages.py \
-            --output-dir "$package_dir" \
+          dependency_sources="$RUNNER_TEMP/vita-dependency-sources"
+          dependency_cache="$RUNNER_TEMP/vita-dependency-cache"
+          dependency_build="$RUNNER_TEMP/vita-dependency-build"
+          python3 tools/stage-vita-dependency-sources.py \
+            --lock tools/vita-corresponding-source.lock.json \
+            --output-dir "$dependency_sources" \
+            --cache-dir "$dependency_cache" \
             --manifest "$dependency_manifest"
-          python3 -c \
-            'import json, sys; print("\n".join(a["name"] for a in json.load(open(sys.argv[1], encoding="utf-8"))["assets"]))' \
-            "$dependency_manifest" |
-            while IFS= read -r asset_name; do
-              "$RUNNER_TEMP/vdpm/vdpm" -f "$package_dir/$asset_name"
-            done
+          VITA_BUILD_JOBS=2 bash tools/build-vita-dependencies.sh \
+            "$dependency_sources" "$dependency_build"
+          python3 tools/stage-vita-dependency-sources.py \
+            --lock tools/vita-corresponding-source.lock.json \
+            --manifest "$dependency_manifest" \
+            --finalize-install "$VITASDK"
 
           test -f "$VITASDK/share/vita.toolchain.cmake"
           echo "$VITASDK/bin" >> $GITHUB_PATH
 
       - name: Update submodules and build
         run: |
-          cmake -S . -B build -DCMAKE_TOOLCHAIN_FILE="${{ env.VITASDK }}/share/vita.toolchain.cmake"
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE="${{ env.VITASDK }}/share/vita.toolchain.cmake"
           cd build
           make
           cp ../vitasdk-dependencies.json .

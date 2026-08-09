@@ -27,7 +27,25 @@ internal sealed class HostControlPanel : Form
         MaximumSize = new Size(850, 0),
         ForeColor = Color.FromArgb(64, 76, 98),
         UseMnemonic = false,
-        Text = "Checking this PC…",
+        Text = "Checking this PC...",
+        Padding = new Padding(0, 4, 0, 0),
+    };
+    private readonly Label backendSummary = new()
+    {
+        AutoSize = true,
+        MaximumSize = new Size(850, 0),
+        ForeColor = Color.FromArgb(64, 76, 98),
+        UseMnemonic = false,
+        Text = "Checking Vita host features...",
+        Padding = new Padding(0, 4, 0, 4),
+    };
+    private readonly Label recoveryHotkeySummary = new()
+    {
+        AutoSize = true,
+        MaximumSize = new Size(850, 0),
+        ForeColor = Color.FromArgb(64, 76, 98),
+        UseMnemonic = false,
+        Text = "Checking whether the F11 rescue shortcut is available...",
         Padding = new Padding(0, 4, 0, 0),
     };
     private readonly ToolStripStatusLabel status = new("Ready");
@@ -88,7 +106,11 @@ internal sealed class HostControlPanel : Form
         Controls.Add(root);
 
         LoadSettings();
-        Shown += async (_, _) => await RunHealthCheckAsync();
+        Shown += async (_, _) =>
+        {
+            await RefreshBackendStatusAsync();
+            await RunHealthCheckAsync();
+        };
     }
 
     internal static void Run()
@@ -196,18 +218,19 @@ internal sealed class HostControlPanel : Form
         AddPageControl(page, actions);
 
         AddPageControl(page, CreateReadinessCard());
+        AddPageControl(page, CreateBackendLifecycleCard());
         AddPageControl(page, CreateInfoCard(
             "What happens next",
             "1. Install and open the Vita VPK.\n" +
             "2. Add this PC in Moonlight and approve the PIN in Sunshine.\n" +
-            "3. Launch Steam Big Picture, Desktop, or a game. The host switches to the Vita display for the stream and restores your physical display when the session ends."));
+            "3. Launch Steam Big Picture, Desktop, or a game. The host enables and switches to the Vita display for the stream, then restores your exact physical layout and disables the Vita display when the session ends."));
         AddPageControl(page, CreateInfoCard(
             "Recommended starting profile",
             "960 × 544  •  60 FPS  •  8 Mbps  •  H.264  •  SDR\n" +
             "This profile matches the Vita screen and is selected for dependable Wi-Fi performance. Tune quality later from the Vita settings menu."));
         AddPageControl(page, CreateInfoCard(
             "If a game or display gets stuck",
-            "On the Vita, hold START and then press L + R within one second to open the stream menu without sending the shortcut to the PC. Close the Windows game first; if video does not recover, choose Recover display + Sunshine. Double-press PS remains the forced return to Vita LiveArea."));
+            "On the Vita, hold SELECT first and then press L + R within one second to open the stream menu without sending the shortcut to the PC. START remains an ordinary game/controller button. Choose Open Windows Task Manager to close a stuck game. Use Recover host display only when the captured display itself is unusable. Double-press PS remains the forced return to Vita LiveArea."));
         return page;
     }
 
@@ -217,7 +240,7 @@ internal sealed class HostControlPanel : Form
         AddHeading(
             page,
             "Streaming preferences",
-            "The recommended defaults work for most PCs. Change these only when you use Apollo or have more than one virtual display.");
+            "The public beta uses its pinned Sunshine build and managed Vita display. Change the display match only when readiness finds more than one managed Vita display.");
 
         var form = new TableLayoutPanel
         {
@@ -228,7 +251,7 @@ internal sealed class HostControlPanel : Form
         };
         form.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 210));
         form.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        hostMode.Items.AddRange(new object[] { "Sunshine", "Apollo" });
+        hostMode.Items.Add("Sunshine");
         AddField(form, "Streaming service", hostMode);
         AddField(form, "Preferred virtual display", displayMatch);
         var optionsRow = form.RowCount++;
@@ -266,13 +289,11 @@ internal sealed class HostControlPanel : Form
         AddCommandButton(actions, "Restore physical display now", ButtonKind.Warning,
             async () => { await RunCommandAsync(new[] { "emergency", "recover-display" }); }, 200,
             "End the current stream, restore the physical monitor, reload the Vita display driver, and restart Sunshine?");
-        AddCommandButton(actions, "Turn off idle Vita display", ButtonKind.Secondary,
+        AddCommandButton(actions, "Reconcile idle display now", ButtonKind.Secondary,
             async () => { await RunCommandAsync(new[] { "display", "disable-virtual" }); }, 210,
-            "Turn off only the idle Vita virtual monitor while keeping a physical monitor active?");
+            "Restore a physical desktop and disable the managed Vita virtual-display device now? Normal stream disconnect performs this automatically.");
         AddPageControl(page, actions);
-        AddPageControl(page, CreateInfoCard(
-            "Recovery without this window",
-            "Press Ctrl + Alt + Shift + F11 on the PC keyboard. The background rescue agent performs the same physical-display and driver recovery even when this control panel is closed."));
+        AddPageControl(page, CreateRecoveryHotkeyCard());
 
         var testing = CreateActionRow();
         AddCommandButton(testing, "Test Vita display for 15 seconds", ButtonKind.Primary,
@@ -329,7 +350,7 @@ internal sealed class HostControlPanel : Form
         AddCommandButton(repairActions, "Repair sign-in display recovery", ButtonKind.Secondary,
             async () => { await RunCommandAsync(new[] { "recovery", "install" }); }, 210,
             "Install or repair the logon recovery task for interrupted display sessions?");
-        AddCommandButton(repairActions, "Repair stream rescue shortcuts", ButtonKind.Secondary,
+        AddCommandButton(repairActions, "Repair automatic handoff and recovery", ButtonKind.Secondary,
             async () => { await RunCommandAsync(new[] { "agent", "install" }); }, 210,
             "Install or repair the background hotkey agent used by the Vita overlay for game and display recovery?");
         AddCommandButton(repairActions, "Repair controller support", ButtonKind.Secondary,
@@ -338,7 +359,7 @@ internal sealed class HostControlPanel : Form
         AddCommandButton(repairActions, "Repair Sunshine", ButtonKind.Secondary,
             async () => { await RepairSunshineAsync(); }, 210,
             "Install or repair the packaged compatible Sunshine build? Active streams will end.");
-        AddCommandButton(repairActions, "Check rescue shortcuts", ButtonKind.Secondary,
+        AddCommandButton(repairActions, "Check automatic handoff", ButtonKind.Secondary,
             async () => { await RunCommandAsync(new[] { "agent", "status" }, allowNonZeroExit: true); }, 180,
             requiresAdministrator: false);
         AddPageControl(page, CreateSection(
@@ -356,7 +377,7 @@ internal sealed class HostControlPanel : Form
         AddPageControl(page, CreateActivityPanel());
         AddPageControl(page, CreateInfoCard(
             "Black-screen recovery",
-            "From the Vita overlay, first choose Close Windows game. If video does not recover, choose Recover display + Sunshine; the stream will disconnect while Windows activates the physical monitor, reloads VDD, and restarts Sunshine. Sign out and back in only if the rescue agent cannot run."));
+            "From the Vita overlay, choose Open Windows Task Manager to close a stuck game, or choose End Sunshine app to end the current host session safely. If the captured display remains unusable, choose Recover host display; the stream will disconnect while Windows activates the physical monitor, reloads VDD, and restarts Sunshine. Sign out and back in only if the rescue agent cannot run."));
         return page;
     }
 
@@ -497,6 +518,32 @@ internal sealed class HostControlPanel : Form
         return card;
     }
 
+    private Control CreateRecoveryHotkeyCard()
+    {
+        var card = new TableLayoutPanel
+        {
+            AutoSize = true,
+            ColumnCount = 1,
+            RowCount = 2,
+            BackColor = Color.FromArgb(241, 246, 255),
+            Padding = new Padding(14, 12, 14, 12),
+            Margin = new Padding(0, 8, 0, 0),
+        };
+        card.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        card.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        card.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        card.Controls.Add(new Label
+        {
+            AutoSize = true,
+            Font = new Font("Segoe UI Semibold", 10.5f),
+            ForeColor = Ink,
+            UseMnemonic = false,
+            Text = "Recovery without this window",
+        }, 0, 0);
+        card.Controls.Add(recoveryHotkeySummary, 0, 1);
+        return card;
+    }
+
     private Control CreateReadinessCard()
     {
         var card = new TableLayoutPanel
@@ -521,6 +568,39 @@ internal sealed class HostControlPanel : Form
         }, 0, 0);
         card.Controls.Add(readinessSummary, 0, 1);
         return card;
+    }
+
+    private Control CreateBackendLifecycleCard()
+    {
+        var actions = CreateActionRow();
+        AddCommandButton(
+            actions,
+            "Enable Vita host features",
+            ButtonKind.Primary,
+            EnableBackendAsync,
+            210);
+        AddCommandButton(
+            actions,
+            "Pause Vita host features",
+            ButtonKind.Warning,
+            DisableBackendAsync,
+            210,
+            "Pause Vita host features now? Disconnect the Vita first. Windows will restore the physical desktop, stop Vita Moonlight safeguards, and keep the exact managed Vita display instances disabled. Sunshine and any pre-existing Apollo installation remain installed and reachable, but this beta supports streaming through Sunshine only. This does not block network access. Pairing, settings, and installed components are kept. The F11 rescue shortcut is unavailable during a complete Pause.");
+
+        var content = new TableLayoutPanel
+        {
+            AutoSize = true,
+            ColumnCount = 1,
+            RowCount = 2,
+            Dock = DockStyle.Top,
+        };
+        content.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        content.Controls.Add(backendSummary, 0, 0);
+        content.Controls.Add(actions, 0, 1);
+        return CreateSection(
+            "Vita host features",
+            "Pause Vita-owned display switching and recovery safeguards when you will not use them for a while. Shared streaming servers remain installed and reachable, although clients pinned to the Vita display may need a physical output. The choice survives restart and upgrades; enabling it again preserves pairing and settings.",
+            content);
     }
 
     private static Control CreateSection(
@@ -598,25 +678,172 @@ internal sealed class HostControlPanel : Form
                 $"Host settings could not be read:{Environment.NewLine}{error}";
             output.Text = lastTechnicalOutput;
         }
-        hostMode.SelectedItem = settings.HostMode.Equals("apollo", StringComparison.OrdinalIgnoreCase) ? "Apollo" : "Sunshine";
+        var legacyApolloSelection = settings.HostMode.Equals(
+            "apollo",
+            StringComparison.OrdinalIgnoreCase);
+        hostMode.SelectedItem = "Sunshine";
         integrateAllApps.Checked = settings.IntegrateAllSunshineApps;
         forceSdr.Checked = settings.ForceSdr;
-        displayMatch.Text = settings.DisplayMatch ?? string.Empty;
+        displayMatch.Text = legacyApolloSelection
+            ? string.Empty
+            : settings.DisplayMatch ?? string.Empty;
+        if (legacyApolloSelection)
+        {
+            readinessSummary.Text =
+                "This PC has an older experimental Apollo selection. Apollo is not release-qualified in this beta. " +
+                "Set up or repair this PC to migrate to the supported Sunshine + Vita display path; Apollo itself and its settings are preserved.";
+            readinessSummary.ForeColor = Color.FromArgb(145, 91, 0);
+        }
     }
 
     private async Task RunHealthCheckAsync()
     {
-        readinessSummary.Text = "Checking Windows, streaming, display, controller, and recovery components…";
+        readinessSummary.Text = "Checking Windows, streaming, display, controller, and recovery components...";
         readinessSummary.ForeColor = Color.FromArgb(64, 76, 98);
         var ready = await RunCommandAsync(
             new[] { "doctor" },
             allowNonZeroExit: true);
+        var preference = BackendLifecycleManager.ReadPreference();
+        if (preference.State == BackendPreferenceState.Disabled &&
+            !isAdministrator)
+        {
+            readinessSummary.Text =
+                "Vita host features are paused by you. The installed components are kept; choose Enable Vita host features before the next Vita session.";
+            readinessSummary.ForeColor = Color.FromArgb(44, 82, 130);
+            return;
+        }
+        if (preference.State == BackendPreferenceState.Error)
+        {
+            readinessSummary.Text =
+                "The protected Vita host-feature preference could not be read. Restart as Administrator and open Diagnostics & support.";
+            readinessSummary.ForeColor = Color.FromArgb(145, 91, 0);
+            return;
+        }
+        if (!isAdministrator)
+        {
+            readinessSummary.Text = ready
+                ? "Basic readiness checks passed. Restart as Administrator to verify protected tasks, device state, and recovery safeguards."
+                : "Restart as Administrator to complete protected task, device, and recovery verification.";
+            readinessSummary.ForeColor = Color.FromArgb(44, 82, 130);
+            return;
+        }
+        var backend = await Task.Run(BackendLifecycleManager.Inspect);
+        if (backend.Status == BackendLifecycleStatus.Disabled)
+        {
+            readinessSummary.Text =
+                "Vita host features are paused by you. The installed components are kept; choose Enable Vita host features before the next Vita session.";
+            readinessSummary.ForeColor = Color.FromArgb(44, 82, 130);
+            return;
+        }
+        if (backend.Status is BackendLifecycleStatus.Error or
+            BackendLifecycleStatus.Partial)
+        {
+            readinessSummary.Text =
+                $"The requested {backend.DesiredState.ToString().ToLowerInvariant()} state is only partly applied or could not be verified. Open Diagnostics & support, then repeat the matching Overview action.";
+            readinessSummary.ForeColor = Color.FromArgb(145, 91, 0);
+            return;
+        }
         readinessSummary.Text = ready
             ? "Ready to stream. Required host, display, controller, and recovery checks passed."
             : "This PC needs attention. Open Diagnostics & support for the full recommendations, then use Set up or repair this PC.";
         readinessSummary.ForeColor = ready
             ? Color.FromArgb(22, 101, 52)
             : Color.FromArgb(145, 91, 0);
+    }
+
+    private async Task RefreshBackendStatusAsync()
+    {
+        if (!isAdministrator)
+        {
+            var preference = BackendLifecycleManager.ReadPreference();
+            backendSummary.Text = preference.State switch
+            {
+                BackendPreferenceState.Disabled =>
+                    "Paused by you. The rescue agent and Ctrl + Alt + Shift + F11 shortcut are unavailable until you choose Enable Vita host features. Restart as Administrator to verify that every Vita-owned task and managed display instance is off.",
+                BackendPreferenceState.Enabled =>
+                    "Vita host features are enabled. The managed display should remain disabled until a Vita stream begins. Restart as Administrator to verify the protected handoff and recovery safeguards.",
+                _ =>
+                    "The protected Vita host-feature preference could not be read. Restart as Administrator for recovery details.",
+            };
+            recoveryHotkeySummary.Text = preference.State switch
+            {
+                BackendPreferenceState.Disabled =>
+                    "Unavailable while Vita host features are paused. Choose Enable Vita host features as Administrator to restore the rescue agent and Ctrl + Alt + Shift + F11 shortcut.",
+                BackendPreferenceState.Enabled =>
+                    "Vita host features are enabled, but protected task state cannot be verified without Administrator access. Run Check readiness as Administrator before relying on Ctrl + Alt + Shift + F11.",
+                _ =>
+                    "Shortcut availability could not be verified. Restart as Administrator and review Diagnostics & support before relying on Ctrl + Alt + Shift + F11.",
+            };
+            backendSummary.ForeColor = preference.State switch
+            {
+                BackendPreferenceState.Disabled => Color.FromArgb(44, 82, 130),
+                BackendPreferenceState.Enabled => Color.FromArgb(22, 101, 52),
+                _ => Color.FromArgb(145, 91, 0),
+            };
+            return;
+        }
+
+        BackendLifecycleReport report;
+        try
+        {
+            report = await Task.Run(BackendLifecycleManager.Inspect);
+        }
+        catch (Exception error)
+        {
+            backendSummary.Text =
+                $"Windows could not read the Vita host-feature state: {error.Message}";
+            recoveryHotkeySummary.Text =
+                "Shortcut availability could not be verified. Review Diagnostics & support before relying on Ctrl + Alt + Shift + F11.";
+            backendSummary.ForeColor = Color.FromArgb(145, 91, 0);
+            return;
+        }
+
+        backendSummary.Text = report.Status switch
+        {
+            BackendLifecycleStatus.Enabled =>
+                "Enabled. Automatic stream handoff and recovery are ready; the Vita display remains disabled while idle and is armed only for a journaled stream. Check PC readiness below to verify every component.",
+            BackendLifecycleStatus.Disabled =>
+                "Paused. The physical desktop is active and Vita background functions are off; pairing, settings, and installed components are kept. The rescue agent and Ctrl + Alt + Shift + F11 shortcut are unavailable until you choose Enable Vita host features.",
+            BackendLifecycleStatus.Partial =>
+                $"The requested {report.DesiredState.ToString().ToLowerInvariant()} state is only partly applied. Choose the same action again. " +
+                string.Join(" ", report.Issues.Take(2)),
+            _ =>
+                "Windows could not safely verify the Vita host-feature state. No state is assumed; review Diagnostics & support before streaming. " +
+                string.Join(" ", report.Issues.Take(2)),
+        };
+        recoveryHotkeySummary.Text = report.Status switch
+        {
+            BackendLifecycleStatus.Disabled =>
+                "Unavailable while Vita host features are paused. Choose Enable Vita host features to restore the rescue agent and Ctrl + Alt + Shift + F11 shortcut.",
+            BackendLifecycleStatus.Enabled when
+                report.Components?.RescueAgentTaskInstalled == true &&
+                report.Components.RescueAgentRunning =>
+                "Press Ctrl + Alt + Shift + F11 on the PC keyboard. The background rescue agent performs physical-display and driver recovery even when this control panel is closed.",
+            BackendLifecycleStatus.Enabled =>
+                "Vita host features are enabled, but the rescue agent is not fully ready. Run Check readiness and repair the named safeguard before relying on Ctrl + Alt + Shift + F11.",
+            _ =>
+                "Shortcut availability could not be verified. Repeat the matching Enable or Pause action, then run Check readiness before relying on Ctrl + Alt + Shift + F11.",
+        };
+        backendSummary.ForeColor = report.Status switch
+        {
+            BackendLifecycleStatus.Enabled => Color.FromArgb(22, 101, 52),
+            BackendLifecycleStatus.Disabled => Color.FromArgb(44, 82, 130),
+            _ => Color.FromArgb(145, 91, 0),
+        };
+    }
+
+    private async Task EnableBackendAsync()
+    {
+        await RunCommandAsync(new[] { "backend", "enable" });
+        await RefreshBackendStatusAsync();
+        await RunHealthCheckAsync();
+    }
+
+    private async Task DisableBackendAsync()
+    {
+        await RunCommandAsync(new[] { "backend", "disable" });
+        await RefreshBackendStatusAsync();
+        await RunHealthCheckAsync();
     }
 
     private async Task SaveSupportReportAsync()
@@ -734,6 +961,23 @@ internal sealed class HostControlPanel : Form
         bool restartSunshine,
         bool repairPrerequisites = false)
     {
+        if (!BackendLifecycleManager.IsEnabled)
+        {
+            var enable = MessageBox.Show(
+                this,
+                "Vita host features are paused. Enable them now so setup can continue? Pairing and saved settings will be preserved.",
+                "Enable Vita host features",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Question);
+            if (enable != DialogResult.Yes ||
+                !await RunCommandAsync(new[] { "backend", "enable" }))
+            {
+                await RefreshBackendStatusAsync();
+                return;
+            }
+            await RefreshBackendStatusAsync();
+        }
+
         var selectedHost = hostMode.SelectedItem?.ToString()?.ToLowerInvariant() ?? "sunshine";
         var arguments = new List<string>
         {
@@ -767,6 +1011,7 @@ internal sealed class HostControlPanel : Form
         {
             if (!await RunCommandAsync(new[] { "host", "restart", "--host", "sunshine" })) return;
         }
+        await RefreshBackendStatusAsync();
         await RunHealthCheckAsync();
     }
 
@@ -799,7 +1044,60 @@ internal sealed class HostControlPanel : Form
     private async Task<bool> RepairDisplayDriverAsync()
     {
         if (!await RepairVisualCppRuntimeAsync()) return false;
-        return await RunCommandAsync(new[] { "driver", "install" });
+        bool adoptExisting;
+        string adoptionReason;
+        string? adoptionCandidateInstanceId;
+        try
+        {
+            adoptExisting = ManagedVddOwnershipJournal
+                .RequiresExplicitAdoption(
+                    out adoptionReason,
+                    out adoptionCandidateInstanceId);
+        }
+        catch (Exception error) when (
+            error is IOException or
+                UnauthorizedAccessException or
+                InvalidDataException or
+                InvalidOperationException or
+                System.ComponentModel.Win32Exception)
+        {
+            lastTechnicalOutput = error.ToString();
+            output.Text = lastTechnicalOutput;
+            MessageBox.Show(
+                this,
+                "Vita Moonlight could not safely identify one display device it is allowed to manage. " +
+                error.Message,
+                "Display driver needs attention",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+            return false;
+        }
+
+        if (adoptExisting)
+        {
+            var choice = MessageBox.Show(
+                this,
+                "Windows already has one MTT virtual-display device that is not owned by this Vita Moonlight installation. It may belong to DisplayWizard or another application.\n\n" +
+                "Allow Vita Moonlight to adopt only that exact device? Its current enabled/disabled state will be recorded and restored if Vita Moonlight is uninstalled. Choosing No leaves it unchanged.\n\n" +
+                adoptionReason,
+                "Use the existing virtual display?",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Question);
+            if (choice != DialogResult.Yes) return false;
+            if (adoptionCandidateInstanceId is null)
+            {
+                throw new InvalidOperationException(
+                    "The approved virtual-display candidate identity is unavailable. Refresh display status and try again.");
+            }
+        }
+
+        var arguments = new List<string> { "driver", "install" };
+        if (adoptExisting)
+        {
+            arguments.Add("--adopt-existing-vdd-id");
+            arguments.Add(adoptionCandidateInstanceId!);
+        }
+        return await RunCommandAsync(arguments.ToArray());
     }
 
     private Task<bool> RepairVisualCppRuntimeAsync() =>
@@ -991,13 +1289,16 @@ internal sealed class HostControlPanel : Form
             "runtime ensure-compatible" => "Checking the display runtime…",
             "driver install" => "Repairing the Vita display driver…",
             "driver reload" => "Restarting the Vita display driver…",
+            "backend enable" => "Enabling Vita host features...",
+            "backend disable" => "Pausing Vita host features safely...",
+            "backend status" => "Checking Vita host-feature state...",
             "display list" => "Detecting Windows displays…",
-            "display disable-virtual" => "Turning off the idle Vita display…",
+            "display disable-virtual" => "Restoring the idle physical display state…",
             "session test" => "Testing the Vita display safely…",
             "session status" => "Checking the current display session…",
             "recovery install" => "Repairing sign-in display recovery…",
-            "agent install" => "Repairing rescue shortcuts…",
-            "agent status" => "Checking rescue shortcuts…",
+            "agent install" => "Repairing automatic handoff and recovery…",
+            "agent status" => "Checking automatic handoff and recovery…",
             "emergency recover-display" => "Restoring the physical display…",
             "support export" => "Creating the support report…",
             _ => "Working…",

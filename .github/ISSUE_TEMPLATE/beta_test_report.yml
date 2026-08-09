@@ -22,7 +22,7 @@ body:
     attributes:
       label: Beta release
       description: Enter the exact GitHub release tag shown on the download page.
-      placeholder: v0.14.6-beta.1
+      placeholder: v0.14.8-beta.1
     validations:
       required: true
   - type: dropdown
@@ -62,6 +62,8 @@ body:
         - label: First install
         - label: Upgrade from an older version
         - label: Same-version repair/reinstall
+        - label: Repair/reinstall while Vita host features are paused
+        - label: Interrupted setup retry or direct-uninstall takeover (disposable VM)
         - label: Vita VPK reinstall, removal, and reinstall
         - label: Vita pairing and first stream
         - label: 960x544 SDR virtual-display switching
@@ -73,6 +75,7 @@ body:
         - label: Ctrl+Alt+Shift+F11 emergency display recovery
         - label: Interrupted-stream/sign-out recovery
         - label: Uninstall while keeping shared dependencies
+        - label: Uninstall from deliberately paused state
         - label: Full removal of selected shared dependencies
         - label: Laptop, multi-monitor, HDR, or dock changes
   - type: textarea

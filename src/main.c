@@ -24,6 +24,7 @@
 #include "video.h"
 #include "config.h"
 #include "platform.h"
+#include "crypto.h"
 
 #include "input/vita.h"
 #include "input/touchabsolute.h"
@@ -38,11 +39,8 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/types.h>
-#include <openssl/rand.h>
-#include <openssl/evp.h>
 #include "curl/curl.h"
 
-#include <psp2/kernel/rng.h>
 #include <psp2/kernel/threadmgr.h>
 
 #include <psp2/net/net.h>
@@ -59,6 +57,7 @@
 #include "graphics.h"
 #include "device.h"
 #include "gui/ui.h"
+#include "gui/ui_connect.h"
 #include "gui/ui_diagnostics.h"
 #include "util.h"
 #include "power/vita.h"
@@ -67,7 +66,14 @@
 #include "debug.h"
 #include "check_dir.h"
 
-#define VITA_NET_MEM_SIZE 1 * 1024 * 1024
+/*
+ * moonlight-common requests a 2,129,920-byte video receive buffer with the
+ * compatibility-first 1024-byte packet size. The Vita network library serves
+ * socket buffers from this caller-owned pool, so leave headroom for audio,
+ * ENet control/input, discovery, and HTTP sockets instead of forcing the video
+ * socket to silently step down below its requested burst capacity.
+ */
+#define VITA_NET_MEM_SIZE (4 * 1024 * 1024)
 
 SceNetInitParam net_param = {
   .memory = NULL,
@@ -75,26 +81,74 @@ SceNetInitParam net_param = {
   .flags = 0
 };
 
-void loop_forever(void) {
-  while (connection_is_ready()) {
-    sceKernelDelayThread(100 * 1000);
+typedef struct VitaRuntimeState {
+  bool net_module_loaded;
+  bool net_initialized;
+  bool netctl_initialized;
+  bool curl_initialized;
+  bool crypto_initialized;
+  bool debug_initialized;
+} VitaRuntimeState;
+
+static VitaRuntimeState runtime_state = {0};
+
+static void vita_runtime_shutdown(void) {
+  if (runtime_state.debug_initialized) {
+    vita_debug_shutdown();
+    runtime_state.debug_initialized = false;
   }
+  if (runtime_state.curl_initialized) {
+    curl_global_cleanup();
+    runtime_state.curl_initialized = false;
+  }
+  if (runtime_state.crypto_initialized) {
+    gs_crypto_cleanup();
+    runtime_state.crypto_initialized = false;
+  }
+  if (runtime_state.netctl_initialized) {
+    sceNetCtlTerm();
+    runtime_state.netctl_initialized = false;
+  }
+  if (runtime_state.net_initialized) {
+    sceNetTerm();
+    runtime_state.net_initialized = false;
+  }
+  if (runtime_state.net_module_loaded) {
+    sceSysmoduleUnloadModule(SCE_SYSMODULE_NET);
+    runtime_state.net_module_loaded = false;
+  }
+  free(net_param.memory);
+  net_param.memory = NULL;
 }
 
-static void vita_init() {
+static int startup_failed(const char *message) {
+  printf("\nVita Moonlight could not start.\n%s\n\n"
+         "The app will close without starting a stream.\n", message);
+  /* Leave the actionable error visible before returning safely to LiveArea. */
+  sceKernelDelayThread(3000 * 1000);
+  return EXIT_FAILURE;
+}
+
+static bool vita_workers_shutdown(void) {
+  bool stopped = vita_motion_shutdown();
+  stopped = vitainput_shutdown() && stopped;
+  stopped = vitapower_shutdown() && stopped;
+  return stopped;
+}
+
+static bool vita_init() {
   sceShellUtilInitEvents(0);
 
-  // Seed OpenSSL with Sony-grade random number generator
-  char random_seed[0x40] = {0};
-  sceKernelGetRandomNumber(random_seed, sizeof(random_seed));
-  RAND_seed(random_seed, sizeof(random_seed));
-  OpenSSL_add_all_algorithms();
-
-  // This is only used for PIN codes, doesn't really matter
-  srand(time(NULL));
+  if (gs_crypto_init() != 0) {
+    printf("Pairing crypto init failed!");
+    goto fail;
+  }
+  runtime_state.crypto_initialized = true;
 
   #ifdef __vita__
-  printf("Vita Moonlight %d.%d.%d (%s)\n", VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH, COMPILE_OPTIONS);
+  printf("Vita Moonlight %d.%d.%d build %s (%s)\n",
+         VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH, VITA_BUILD_ID,
+         COMPILE_OPTIONS);
   #endif
 
   int ret;
@@ -103,67 +157,91 @@ static void vita_init() {
   net_param.memory = malloc(net_param.size);
   if (net_param.memory == NULL) {
     printf("Could not allocate net memory!");
-    loop_forever();
+    goto fail;
   }
  
   ret = sceSysmoduleLoadModule(SCE_SYSMODULE_NET);
   if (ret < 0) {
     printf("Net module was unable to load!");
-    loop_forever();
+    goto fail;
   }
+  runtime_state.net_module_loaded = true;
 
   ret = sceNetInit(&net_param);
   if (ret < 0) {
     printf("Net init failed!");
-    loop_forever();
+    goto fail;
   }
+  runtime_state.net_initialized = true;
   
   ret = sceNetCtlInit();
   if (ret < 0) {
     printf("Net Ctl init failed!");
-    loop_forever();
+    goto fail;
   }
+  runtime_state.netctl_initialized = true;
 
   ret = curl_global_init(CURL_GLOBAL_ALL);
-  if (ret < 0) {
+  if (ret != CURLE_OK) {
     printf("CURL init failed!");
-    loop_forever();
+    goto fail;
   }
+  runtime_state.curl_initialized = true;
 
   ret = vita_debug_init();
   if (ret != true) {
     printf("Debug log mutex init failed!");
-    loop_forever();
+    goto fail;
   }
+  runtime_state.debug_initialized = true;
+  return true;
+
+fail:
+  vita_runtime_shutdown();
+  return false;
 }
 
 
 int main(int argc, char* argv[]) {
   psvDebugScreenInit();
-  vita_init();
+  if (!vita_init()) {
+    return startup_failed("A required network or runtime service failed.");
+  }
 
   if (!vitapower_init()) {
-    printf("Failed to init power!");
-    loop_forever();
+    vita_runtime_shutdown();
+    return startup_failed("The Vita power-management worker failed.");
   }
 
   if (!vitainput_init()) {
-    printf("Failed to init input!");
-    loop_forever();
+    vitapower_shutdown();
+    vita_runtime_shutdown();
+    return startup_failed("The Vita input worker failed.");
   }
 
   if (!vita_motion_init()) {
-    printf("Failed to init motion input!");
-    loop_forever();
+    /* Gyro is optional. Keep the rest of the client usable if the motion
+     * service or its synchronization objects are unavailable. */
+    printf("Motion input unavailable; continuing without gyro.\n");
   }
 
   char out_path[MOONLIGHT_PATH_MAX] = {0};
   char out_key_dir[MOONLIGHT_PATH_MAX] = {0};
-  check_and_create_moonlight_dir(out_path, out_key_dir);
+  if (!check_and_create_moonlight_dir(out_path, out_key_dir)) {
+    bool workers_stopped = vita_workers_shutdown();
+    if (workers_stopped) vita_runtime_shutdown();
+    return startup_failed(moonlight_storage_error());
+  }
   config_path = out_path;
   strcpy(config.key_dir, out_key_dir);
-  // Ya no se guarda config antes de inicializar todos los valores
-  config_parse(argc, argv, &config);
+  if (!config_parse(argc, argv, &config)) {
+    bool workers_stopped = vita_workers_shutdown();
+    if (workers_stopped) vita_runtime_shutdown();
+    return startup_failed(
+        "Saved settings could not be read, recovered, or safely written. "
+        "Free Vita storage and preserve moonlight.conf plus its .bak file "
+        "before trying again.");
+  }
   /* Support logs are explicit per-run captures and never resume at startup. */
   config.save_debug_log = false;
   vita_debug_set_logging_enabled(false);
@@ -183,6 +261,19 @@ int main(int argc, char* argv[]) {
 
   gui_loop();
 
-  ui_diagnostics_shutdown();
-  vita_debug_shutdown();
+  bool host_state_released = ui_connect_shutdown();
+  bool boundary_cleanup_ready =
+      ui_connect_stream_boundary_local_cleanup_ready();
+  bool workers_stopped = false;
+  if (host_state_released && boundary_cleanup_ready) {
+    ui_diagnostics_shutdown();
+    workers_stopped = vita_workers_shutdown();
+  }
+  if (workers_stopped) {
+    gui_shutdown();
+    vita_runtime_shutdown();
+  }
+  return workers_stopped && boundary_cleanup_ready && host_state_released
+      ? EXIT_SUCCESS
+      : EXIT_FAILURE;
 }

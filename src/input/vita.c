@@ -28,12 +28,11 @@
 #include <unistd.h>
 #include <math.h>
 #include <sys/types.h>
-#include <openssl/rand.h>
-#include <openssl/evp.h>
 #include <pthread.h>
 
 #include "../connection.h"
 #include "../config.h"
+#include "../debug.h"
 #include "psp2/kernel/threadmgr/thread.h"
 #include "psp2common/types.h"
 #include "vita.h"
@@ -43,6 +42,7 @@
 
 
 #include "touchabsolute.h"
+#include "touch_zone_gesture.h"
 #include "shortcuts.h"
 #include "motion.h"
 #include "../connection_overlay.h"
@@ -52,7 +52,6 @@
 
 #define WIDTH 960
 #define HEIGHT 544
-#define MOUSE_SENSITIVITY 2400.0
 
 const short Y_MAXIMIUM_DEADZONE = -32383;
 const short Y_MINIMUM_DEADZONE = -1024;
@@ -68,7 +67,6 @@ double_click_tracker dc_tracker = {
 };
 
 struct mapping map = {0};
-SceFQuaternion deviceQuat_old = {0.0f, 0.0f, 0.0f, 0.0f};
 
 typedef struct input_data {
     int32_t button;
@@ -128,25 +126,6 @@ inline void move_mouse(TouchData old, TouchData cur) {
 }
 
 
-inline void move_motion(SceMotionState motionState) {
-  const float motion_scalar_x = config.motion_controls_scalar_x;
-  const float motion_scalar_y = config.motion_controls_scalar_y;
-
-  // Get the mouse position.
-  double delta_x = (deviceQuat_old.y-motionState.deviceQuat.y) * (float)MOUSE_SENSITIVITY * motion_scalar_x;
-  double delta_y = (deviceQuat_old.x-motionState.deviceQuat.x) * (float)MOUSE_SENSITIVITY * motion_scalar_y;
-
-  if (delta_x == 0 && delta_y == 0) {
-    return;
-  }
-
-  int x = lround(delta_x * mouse_multiplier);
-  int y = lround(delta_y * mouse_multiplier);
-
-  LiSendMouseMoveEvent(x, y);
-}
-
-
 inline void move_wheel(TouchData old, TouchData cur) {
   int old_y = (old.points[0].y + old.points[1].y) / 2;
   int cur_y = (cur.points[0].y + cur.points[1].y) / 2;
@@ -166,10 +145,10 @@ static SceCtrlData shortcut_pad_old;
  * still consumed when the new virtual controller arrives.
  */
 static bool suppress_remote_input_until_release = false;
+static vita_touch_zone_gesture front_zone_gesture;
 TouchData touch;
 TouchData touch_old, swipe;
 SceTouchData front, back;
-SceMotionState motionState;
 
 int front_state = NO_TOUCH_ACTION;
 short finger_count = 0;
@@ -180,11 +159,6 @@ SceRtcTick current, until;
 
 input_data curr, old;
 int controller_port;
-bool _calibrateGyro = true;
-bool _motionActivated = false;
-bool _motionCalibrated = false;
-int _motionResetCount = 0;
-
 // TODO config
 static int VERTICAL;
 static int HORIZONTAL;
@@ -442,14 +416,6 @@ inline void special(uint32_t defined, uint32_t pressed, uint32_t old_pressed) {
 
 }
 
-float QuatLength(SceFQuaternion v1, SceFQuaternion v2) {
-  float x_diff = v1.x - v2.x;
-  float y_diff = v1.y - v2.y;
-  float z_diff = v1.z - v2.z;
-
-  return sqrt(x_diff * x_diff + y_diff * y_diff + z_diff * z_diff);
-}
-
 inline void check_for_double_click(input_data *curr) {
   uint64_t current_time = sceKernelGetSystemTimeWide();
   uint32_t doubleclick_step_time = 0;
@@ -536,15 +502,33 @@ static bool has_specialkey(int key) {
 bool psbutton_locked = 0;
 void lock_psbutton() {
   if(!psbutton_locked) {
-    sceShellUtilLock((SceShellUtilLockType)SCE_SHELL_UTIL_LOCK_TYPE_PS_BTN | SCE_SHELL_UTIL_LOCK_TYPE_PS_BTN_2);
-    psbutton_locked = 1;
+    int ret = sceShellUtilLock(
+        (SceShellUtilLockType)SCE_SHELL_UTIL_LOCK_TYPE_PS_BTN |
+        SCE_SHELL_UTIL_LOCK_TYPE_PS_BTN_2);
+    if (ret >= 0) {
+      psbutton_locked = 1;
+    } else {
+      vita_debug_event(
+          VITA_DEBUG_LEVEL_WARNING, "input.ps_button",
+          "state=system_fallback reason=lock_failed code=0x%08x",
+          (unsigned int)ret);
+    }
   }
 }
 
 void unlock_psbutton() {
   if(psbutton_locked) {
-    sceShellUtilUnlock((SceShellUtilLockType)SCE_SHELL_UTIL_LOCK_TYPE_PS_BTN | SCE_SHELL_UTIL_LOCK_TYPE_PS_BTN_2);
-    psbutton_locked = 0;
+    int ret = sceShellUtilUnlock(
+        (SceShellUtilLockType)SCE_SHELL_UTIL_LOCK_TYPE_PS_BTN |
+        SCE_SHELL_UTIL_LOCK_TYPE_PS_BTN_2);
+    if (ret >= 0) {
+      psbutton_locked = 0;
+    } else {
+      vita_debug_event(
+          VITA_DEBUG_LEVEL_ERROR, "input.ps_button",
+          "state=locked reason=unlock_failed code=0x%08x",
+          (unsigned int)ret);
+    }
   }
 }
 
@@ -697,9 +681,54 @@ bool in_front_touchzone() {
   return false;
 }
 
+static int front_touchzone_at(int x, int y) {
+  for (int zone = 0; zone < VITA_TOUCH_ZONE_COUNT; zone++) {
+    if (has_specialkey(zone) && IN_SECTION(FRONT_SECTIONS[zone], x, y)) {
+      return zone;
+    }
+  }
+  return VITA_TOUCH_ZONE_NONE;
+}
+
+static void suppress_front_touch_sample(void) {
+  touch.finger = 0;
+  memset(touch.points, 0, sizeof(touch.points));
+}
 
 void process_touchzones() {
-  read_frontscreen();
+  static const uint16_t touchzone_flags[VITA_TOUCH_ZONE_COUNT] = {
+    TOUCHSEC_SPECIAL_NW,
+    TOUCHSEC_SPECIAL_NE,
+    TOUCHSEC_SPECIAL_SW,
+    TOUCHSEC_SPECIAL_SE
+  };
+  int zone_at_contact = VITA_TOUCH_ZONE_NONE;
+  int triggered_zone = VITA_TOUCH_ZONE_NONE;
+
+  if (touch.finger == 1) {
+    zone_at_contact = front_touchzone_at(
+        touch.points[0].x, touch.points[0].y);
+  }
+
+  vita_touch_zone_decision decision = vita_touch_zone_gesture_step(
+      &front_zone_gesture,
+      config.enable_front_touchzones,
+      zone_at_contact,
+      touch.finger,
+      touch.points[0].x,
+      touch.points[0].y,
+      sceKernelGetSystemTimeWide(),
+      &triggered_zone);
+
+  if (decision == VITA_TOUCH_ZONE_SUPPRESS ||
+      decision == VITA_TOUCH_ZONE_TRIGGER) {
+    suppress_front_touch_sample();
+  }
+  if (decision == VITA_TOUCH_ZONE_TRIGGER &&
+      triggered_zone >= 0 && triggered_zone < VITA_TOUCH_ZONE_COUNT) {
+    touch.button |= touchzone_flags[triggered_zone];
+  }
+
   special(config.special_keys.nw,
           is_pressed(INPUT_TYPE_TOUCHSCREEN | TOUCHSEC_SPECIAL_NW),
           is_old_pressed(INPUT_TYPE_TOUCHSCREEN | TOUCHSEC_SPECIAL_NW));
@@ -769,8 +798,6 @@ void process_triggers() {
     curr.rt = (char)right_trigger;
   }
 }
-
-extern bool keyboardsystem_is_open(void);
 
 void process_touch() {
   static int processed_touchscreen_mode = -1;
@@ -872,7 +899,6 @@ inline void vitainput_process(void) {
   memset(&pad, 0, sizeof(pad));
   memset(&touch, 0, sizeof(TouchData));
   memset(&curr, 0, sizeof(input_data));
-  sceCtrlSetSamplingModeExt(SCE_CTRL_MODE_ANALOG_WIDE);
   sceCtrlPeekBufferPositiveExt2(controller_port, &pad, 1);
   SceCtrlData raw_pad;
   memcpy(&raw_pad, &pad, sizeof(SceCtrlData));
@@ -884,10 +910,11 @@ inline void vitainput_process(void) {
   read_backscreen();
 
   if (suppress_remote_input_until_release) {
+    vita_touch_zone_gesture_reset(&front_zone_gesture);
     memcpy(&pad_old, &raw_pad, sizeof(SceCtrlData));
     memcpy(&shortcut_pad_old, &raw_pad, sizeof(SceCtrlData));
     memset(&old, 0, sizeof(input_data));
-    if (raw_pad.buttons == 0) {
+    if (raw_pad.buttons == 0 && front.reportNum == 0 && back.reportNum == 0) {
       suppress_remote_input_until_release = false;
       reset_physical_shortcuts();
     }
@@ -902,6 +929,7 @@ inline void vitainput_process(void) {
   }
   memcpy(&shortcut_pad_old, &raw_pad, sizeof(SceCtrlData));
   if (overlay_was_open) {
+    vita_touch_zone_gesture_reset(&front_zone_gesture);
     stream_overlay_handle_input(&pad, &pad_old);
     if (!stream_overlay_is_open()) {
       suppress_remote_input_until_release = true;
@@ -910,9 +938,7 @@ inline void vitainput_process(void) {
     memset(&old, 0, sizeof(input_data));
     return;
   }
-  if (config.enable_front_touchzones) {
-    process_touchzones();
-  }
+  process_touchzones();
   // --- FIN BLOQUE SPECIAL KEYS/ESQUINAS DEL FRENTE ---
 
   process_buttons();
@@ -923,39 +949,12 @@ inline void vitainput_process(void) {
   }
   process_triggers();
 
-  // --- GESTIÓN DE LIMPIEZA DE INPUT AL ABRIR/CERRAR TECLADO VIRTUAL Y PAUSA ---
-  static bool keyboard_overlay_active = false;
-  static SceCtrlData pad_snapshot = {0};
-  static input_data curr_snapshot = {0};
-
-  // Hook para saber si el teclado virtual está abierto
-
-  bool keyboard_now = keyboardsystem_is_open();
-
-  // --- BLOQUEO Y LIMPIEZA DE INPUT AL ABRIR TECLADO VIRTUAL ---
-  if (keyboard_now && !keyboard_overlay_active) {
-    memcpy(&pad_snapshot, &pad, sizeof(SceCtrlData));
-    memcpy(&curr_snapshot, &curr, sizeof(input_data));
-    memset(&pad, 0, sizeof(SceCtrlData));
-    memset(&curr, 0, sizeof(input_data));
-    // Centrar sticks al bloquear input
-    pad.lx = 128; pad.ly = 128; pad.rx = 128; pad.ry = 128;
-    curr.lx = 128; curr.ly = 128; curr.rx = 128; curr.ry = 128;
-    curr.lt = 0;
-    curr.rt = 0;
-    keyboard_overlay_active = true;
-  } else if (!keyboard_now && keyboard_overlay_active) {
-    memcpy(&pad, &pad_snapshot, sizeof(SceCtrlData));
-    memcpy(&curr, &curr_snapshot, sizeof(input_data));
-    keyboard_overlay_active = false;
-  } else if (keyboard_overlay_active) {
-    memset(&pad, 0, sizeof(SceCtrlData));
-    memset(&curr, 0, sizeof(input_data));
-    pad.lx = 128; pad.ly = 128; pad.rx = 128; pad.ry = 128;
-    curr.lx = 128; curr.ly = 128; curr.rx = 128; curr.ry = 128;
-    curr.lt = 0;
-    curr.rt = 0;
-  }
+  /* The Vita IME is deliberately synchronous: callers clear host input
+   * before opening it and this input tick resumes only after it closes.
+   * Never snapshot and replay controller state here. Replaying a pre-IME
+   * snapshot can synthesize a stale button press if the IME implementation
+   * ever changes its scheduling. The shortcut and menu paths each keep their
+   * own release latch after this function resumes. */
 
   curr.lx = read_analog(map.abs_x);
   curr.ly = read_analog(map.abs_y);
@@ -964,24 +963,39 @@ inline void vitainput_process(void) {
 
   process_touch();
 
-  // --- ENVÍO DE EVENTOS DE GAMEPAD SOLO SI NO hay overlay de teclado activo ---
-  // O si el overlay está activo pero NO están ambos botones del shortcut presionados
-  bool shortcut_both_pressed = (pad.buttons & SCE_CTRL_START) && (pad.buttons & SCE_CTRL_LEFT);
-  if (!keyboard_overlay_active || (keyboard_overlay_active && !shortcut_both_pressed)) {
-    if (memcmp(&curr, &old, sizeof(input_data)) != 0) {
-      LiSendMultiControllerEvent(0, 1, curr.button, curr.lt, curr.rt, curr.lx, -1 * curr.ly, curr.rx, -1 * curr.ry);
-      memcpy(&old, &curr, sizeof(input_data));
-      memcpy(&pad_old, &pad, sizeof(SceCtrlData));
-    }
-    if (memcmp(&touch, &touch_old, sizeof(TouchData)) != 0) {
-      memcpy(&touch_old, &touch, sizeof(TouchData));
-    }
+  if (memcmp(&curr, &old, sizeof(input_data)) != 0) {
+    LiSendMultiControllerEvent(0, 1, curr.button, curr.lt, curr.rt, curr.lx, -1 * curr.ly, curr.rx, -1 * curr.ry);
+    memcpy(&old, &curr, sizeof(input_data));
+    memcpy(&pad_old, &pad, sizeof(SceCtrlData));
+  }
+  if (memcmp(&touch, &touch_old, sizeof(TouchData)) != 0) {
+    memcpy(&touch_old, &touch, sizeof(TouchData));
   }
 }
 
 static uint8_t active_input_thread = 0;
 static pthread_mutex_t input_process_mutex;
 static bool input_mutex_initialized = false;
+static uint32_t input_worker_running = 0;
+static SceUID input_worker_thread = -1;
+static SceUID input_worker_event = -1;
+
+#define INPUT_WORKER_WAKE 0x1U
+
+static bool input_worker_is_running(void) {
+  return __atomic_load_n(&input_worker_running, __ATOMIC_ACQUIRE) != 0;
+}
+
+static void set_input_worker_running(bool running) {
+  __atomic_store_n(
+      &input_worker_running, running ? 1U : 0U, __ATOMIC_RELEASE);
+}
+
+static void wake_input_worker(void) {
+  if (input_worker_event >= 0) {
+    sceKernelSetEventFlag(input_worker_event, INPUT_WORKER_WAKE);
+  }
+}
 
 static void update_front_sections(const CONFIGURATION *input_config) {
   FRONT_SECTIONS[0].left.x = input_config->special_keys.offset;
@@ -1105,20 +1119,34 @@ void vitainput_refresh_touchzones(void) {
     pthread_mutex_lock(&input_process_mutex);
   }
   update_front_sections(&sanitized);
+  vita_touch_zone_gesture_reset(&front_zone_gesture);
   if (input_mutex_initialized) {
     pthread_mutex_unlock(&input_process_mutex);
   }
 }
 
 int vitainput_thread(SceSize args, void *argp) {
-  while (1) {
+  (void)args;
+  (void)argp;
+  while (input_worker_is_running()) {
     pthread_mutex_lock(&input_process_mutex);
-    if (active_input_thread) {
+    bool stream_active = active_input_thread != 0;
+    if (stream_active) {
       vitainput_process();
     }
     pthread_mutex_unlock(&input_process_mutex);
 
-    sceKernelDelayThread(2000); // 2 ms
+    if (stream_active) {
+      sceKernelDelayThread(2000); // 2 ms only while streaming
+    } else {
+      /* Outside a stream there is no input work to do. Block without a
+       * timeout instead of waking and taking the mutex 500 times/second. */
+      unsigned int event_bits = 0;
+      sceKernelWaitEventFlag(
+          input_worker_event, INPUT_WORKER_WAKE,
+          SCE_EVENT_WAITOR | SCE_EVENT_WAITCLEAR_PAT,
+          &event_bits, NULL);
+    }
   }
 
   return 0;
@@ -1134,17 +1162,81 @@ bool vitainput_init() {
   }
   input_mutex_initialized = true;
 
+  input_worker_event = sceKernelCreateEventFlag(
+      "vitainput_event", SCE_EVENT_WAITSINGLE, 0, NULL);
+  if (input_worker_event < 0) {
+    pthread_mutex_destroy(&input_process_mutex);
+    input_mutex_initialized = false;
+    return false;
+  }
+
   SceUID thid = sceKernelCreateThread("vitainput_thread", vitainput_thread, 0, 0x40000, 0, 0, NULL);
   if (thid >= 0) {
+    input_worker_thread = thid;
+    set_input_worker_running(true);
     if (sceKernelStartThread(thid, 0, NULL) >= 0) {
       return true;
     }
+    set_input_worker_running(false);
     sceKernelDeleteThread(thid);
+    input_worker_thread = -1;
   }
 
+  sceKernelDeleteEventFlag(input_worker_event);
+  input_worker_event = -1;
   pthread_mutex_destroy(&input_process_mutex);
   input_mutex_initialized = false;
   return false;
+}
+
+bool vitainput_shutdown(void) {
+  keyboardsystem_close_keyboard();
+  set_input_worker_running(false);
+  wake_input_worker();
+  /* Restore the system escape path before any bounded join can fail. The
+   * worker never locks PS itself, so this is safe while it finishes. */
+  unlock_psbutton();
+
+  SceUID thid = input_worker_thread;
+  if (thid >= 0) {
+    SceUInt timeout = 1000000;
+    int thread_status = 0;
+    int ret = sceKernelWaitThreadEnd(thid, &thread_status, &timeout);
+    if (ret < 0) {
+      vita_debug_event(
+          VITA_DEBUG_LEVEL_ERROR, "input.worker",
+          "state=cleanup_failed phase=wait code=0x%08x",
+          (unsigned int)ret);
+      return false;
+    }
+    ret = sceKernelDeleteThread(thid);
+    if (ret < 0) {
+      vita_debug_event(
+          VITA_DEBUG_LEVEL_ERROR, "input.worker",
+          "state=cleanup_failed phase=delete code=0x%08x",
+          (unsigned int)ret);
+      return false;
+    }
+    input_worker_thread = -1;
+  }
+
+  if (input_worker_event >= 0) {
+    int ret = sceKernelDeleteEventFlag(input_worker_event);
+    if (ret < 0) {
+      vita_debug_event(
+          VITA_DEBUG_LEVEL_ERROR, "input.worker",
+          "state=cleanup_failed phase=delete_event code=0x%08x",
+          (unsigned int)ret);
+      return false;
+    }
+    input_worker_event = -1;
+  }
+
+  if (input_mutex_initialized) {
+    pthread_mutex_destroy(&input_process_mutex);
+    input_mutex_initialized = false;
+  }
+  return true;
 }
 
 void vitainput_config(CONFIGURATION config) {
@@ -1219,6 +1311,17 @@ void vitainput_start(void) {
   memset(&pad_old, 0, sizeof(pad_old));
   memset(&shortcut_pad_old, 0, sizeof(shortcut_pad_old));
   memset(&old, 0, sizeof(old));
+  memset(&touch, 0, sizeof(touch));
+  memset(&touch_old, 0, sizeof(touch_old));
+  memset(&swipe, 0, sizeof(swipe));
+  memset(&front, 0, sizeof(front));
+  memset(&back, 0, sizeof(back));
+  memset(&dc_tracker, 0, sizeof(dc_tracker));
+  vita_touch_zone_gesture_reset(&front_zone_gesture);
+  front_state = NO_TOUCH_ACTION;
+  finger_count = 0;
+  /* A reconnect must not inherit a button held during controller creation. */
+  suppress_remote_input_until_release = true;
   reset_physical_shortcuts();
   uint16_t gamepadMask = 1;
   uint16_t gamepadCapabilities = LI_CCAP_BATTERY_STATE;
@@ -1237,8 +1340,10 @@ void vitainput_start(void) {
   // Keep Xbox mode strictly XInput-compatible. Sunshine's automatic controller
   // selection promotes motion-capable clients to DS4, so gyro and touchpad are
   // only advertised by the PlayStation profile that can represent them.
+  bool motion_ready = vita_motion_begin_stream(
+      controller_type == LI_CTYPE_PS && config.enable_motion_controls);
   if (controller_type == LI_CTYPE_PS) {
-    if (config.enable_motion_controls) {
+    if (motion_ready) {
       gamepadCapabilities |= LI_CCAP_GYRO | LI_CCAP_ACCEL;
     }
     if (config.touchscreen_mode == 1) {
@@ -1247,7 +1352,6 @@ void vitainput_start(void) {
     }
   }
 
-  vita_motion_begin_stream((gamepadCapabilities & (LI_CCAP_GYRO | LI_CCAP_ACCEL)) != 0);
   LiSendControllerArrivalEvent(0, gamepadMask, controller_type, gamepadSupportedButtonFlags, gamepadCapabilities);
 
   int battery_percent = scePowerGetBatteryLifePercent();
@@ -1265,6 +1369,7 @@ void vitainput_start(void) {
     lock_psbutton();
 
   active_input_thread = true;
+  wake_input_worker();
   pthread_mutex_unlock(&input_process_mutex);
 }
 
@@ -1278,11 +1383,39 @@ void vitainput_stop(void) {
   pthread_mutex_lock(&input_process_mutex);
   active_input_thread = false;
   touchabsolute_release_all();
+  /* A tap or custom keyboard/mouse mapping can be interrupted between its
+   * down and up edges. Release every non-controller mapping while Moonlight's
+   * input channel is still alive. Duplicate releases are harmless. */
+  const uint32_t mapped_actions[] = {
+      map.btn_south, map.btn_north, map.btn_east, map.btn_west,
+      map.btn_select, map.btn_start, map.btn_mode,
+      map.btn_thumbl, map.btn_thumbr, map.btn_tl, map.btn_tr,
+      map.btn_tl2, map.btn_tr2, map.btn_dpad_up, map.btn_dpad_down,
+      map.btn_dpad_left, map.btn_dpad_right,
+      config.special_keys.nw, config.special_keys.ne,
+      config.special_keys.sw, config.special_keys.se,
+  };
+  for (unsigned int i = 0;
+       i < sizeof(mapped_actions) / sizeof(mapped_actions[0]); i++) {
+    if (mapped_actions[i] != 0) special(mapped_actions[i], 0, 1);
+  }
+  LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_LEFT);
+  LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_RIGHT);
   // Release all controls and remove the virtual pad while the connection is
   // still alive. This prevents a held button surviving pause or disconnect.
   LiSendMultiControllerEvent(0, 1, 0, 0, 0, 0, 0, 0, 0);
   LiSendMultiControllerEvent(0, 0, 0, 0, 0, 0, 0, 0, 0);
   memset(&old, 0, sizeof(old));
+  memset(&touch, 0, sizeof(touch));
+  memset(&touch_old, 0, sizeof(touch_old));
+  memset(&swipe, 0, sizeof(swipe));
+  memset(&front, 0, sizeof(front));
+  memset(&back, 0, sizeof(back));
+  memset(&dc_tracker, 0, sizeof(dc_tracker));
+  vita_touch_zone_gesture_reset(&front_zone_gesture);
+  front_state = NO_TOUCH_ACTION;
+  finger_count = 0;
+  suppress_remote_input_until_release = true;
   unlock_psbutton();
   reset_psbutton_state();
   reset_physical_shortcuts();

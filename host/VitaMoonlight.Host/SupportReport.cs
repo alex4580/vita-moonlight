@@ -11,7 +11,10 @@ internal sealed record SupportDisplayReport(
     bool Available,
     bool ManagedVitaDisplay,
     bool OtherVirtualDisplay,
-    int OutputTechnology);
+    int OutputTechnology,
+    int? Width,
+    int? Height,
+    int? RefreshRate);
 
 internal sealed record SupportReport(
     int SchemaVersion,
@@ -23,6 +26,16 @@ internal sealed record SupportReport(
     string Architecture,
     bool SupportedPlatform,
     bool Administrator,
+    bool ScheduledTaskAccountReady,
+    string BackendStatus,
+    string BackendDesiredState,
+    bool BackendPreferencePersisted,
+    int BackendIssueCount,
+    IReadOnlyList<string> BackendIssueCodes,
+    int BackendActivePhysicalDisplayCount,
+    int BackendManagedVddDeviceCount,
+    int BackendManagedVddEnabledCount,
+    bool BackendManagedVddActive,
     string HostMode,
     bool SunshineInstalled,
     string? SunshineVersion,
@@ -40,7 +53,9 @@ internal sealed record SupportReport(
     bool ForceSdr,
     bool RecoveryPending,
     bool RecoveryTaskInstalled,
+    string RecoveryTaskStatus,
     bool RescueAgentInstalled,
+    string RescueAgentTaskStatus,
     bool RescueAgentRunning,
     IReadOnlyList<HostModeHotkeyStatus> ModeHotkeys,
     IReadOnlyList<SupportDisplayReport> Displays,
@@ -49,7 +64,7 @@ internal sealed record SupportReport(
 
 internal static class SupportReportExporter
 {
-    internal const int CurrentSchemaVersion = 1;
+    internal const int CurrentSchemaVersion = 3;
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -105,7 +120,10 @@ internal static class SupportReportExporter
                         display.IsAvailable,
                         managed,
                         otherVirtual,
-                        display.OutputTechnology);
+                        display.OutputTechnology,
+                        display.Width,
+                        display.Height,
+                        display.RefreshRate);
                 })
                 .ToArray();
         }
@@ -140,6 +158,16 @@ internal static class SupportReportExporter
             diagnostics.Architecture,
             diagnostics.IsSupportedPlatform,
             diagnostics.IsAdministrator,
+            diagnostics.ScheduledTaskAccountReady,
+            diagnostics.BackendStatus.ToString(),
+            diagnostics.BackendDesiredState.ToString(),
+            diagnostics.BackendPreferencePersisted,
+            diagnostics.BackendIssues.Count,
+            diagnostics.BackendIssueCodes,
+            diagnostics.BackendActivePhysicalDisplayCount,
+            diagnostics.BackendManagedVddDeviceCount,
+            diagnostics.BackendManagedVddEnabledCount,
+            diagnostics.BackendManagedVddActive,
             NormalizeHostMode(diagnostics.HostMode),
             diagnostics.SunshinePath is not null,
             diagnostics.SunshineVersion,
@@ -157,7 +185,9 @@ internal static class SupportReportExporter
             diagnostics.ForceSdr,
             diagnostics.RecoveryPending,
             diagnostics.RecoveryTaskInstalled,
+            diagnostics.RecoveryTaskState.ToString(),
             diagnostics.RescueAgentInstalled,
+            diagnostics.RescueAgentTaskState.ToString(),
             diagnostics.RescueAgentRunning,
             diagnostics.ModeHotkeys,
             NormalizeDisplays(displays),

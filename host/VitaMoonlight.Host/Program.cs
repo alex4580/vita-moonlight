@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Runtime.ExceptionServices;
 using System.Runtime.InteropServices;
 using System.Security.Principal;
 using System.Text.Json;
@@ -13,6 +14,8 @@ internal static class Program
     private const int ExitInvalidArguments = 2;
     private const int ExitMissingRequiredComponent = 3;
     private const int ExitRestartRequired = 4;
+    private const int ExitBackendDisabled = 5;
+    private const int ExitBackendStateError = 6;
 
     [STAThread]
     public static int Main(string[] args)
@@ -23,9 +26,45 @@ internal static class Program
         {
             ClearOperationalPathOverrides();
         }
+        if (string.Equals(
+                command,
+                AudioEndpointRecoveryService.IsolatedWorkerCommand,
+                StringComparison.Ordinal))
+        {
+            // This exact internal action runs in a disposable child process
+            // so stalled Core Audio COM/RPC can be terminated without hanging
+            // stream stop, recovery, Pause, or uninstall. It accepts no
+            // endpoint ID from the command line and touches only protected
+            // journal state, so it remains safe during a maintenance fence.
+            try
+            {
+                return AudioEndpointRecoveryService.RunIsolatedWorker(
+                    remaining);
+            }
+            catch (Exception workerError)
+            {
+                Console.Error.WriteLine(workerError.Message);
+                return ExitFailure;
+            }
+        }
+        if (TryDescribeUnrelatedSunshineHook(
+                command,
+                remaining,
+                out var ignoredHookMessage))
+        {
+            // This path is deliberately before the installer-maintenance gate
+            // and all machine-state access. It is a proven no-op for a
+            // non-Vita Sunshine client and must never block that stream.
+            Console.WriteLine(ignoredHookMessage);
+            return ExitSuccess;
+        }
         TryClearLastCommandError();
         try
         {
+            using var maintenanceAccess =
+                InstallerMaintenanceFence.AuthorizeCommand(
+                    command,
+                    remaining);
             return command switch
             {
                 "gui" => RunControlPanel(),
@@ -37,6 +76,9 @@ internal static class Program
                 "runtime" => RuntimeCommand(remaining),
                 "dependency" => DependencyCommand(remaining),
                 "state" => StateCommand(remaining),
+                "maintenance" => MaintenanceCommand(remaining),
+                "deferred-setup" => DeferredSetupCommand(remaining),
+                "backend" => BackendCommand(remaining),
                 "driver" => DriverCommand(remaining),
                 "display" => DisplayCommand(remaining),
                 "session" => SessionCommand(remaining),
@@ -53,6 +95,9 @@ internal static class Program
         catch (HostRestartRequiredException error)
         {
             Console.Error.WriteLine($"Restart required: {error.Message}");
+            TryWriteLastCommandError("Restart required: " + error.Message);
+            TryWriteMaintenanceHelperError(
+                "Restart required: " + error.Message);
             return ExitRestartRequired;
         }
         catch (Exception error)
@@ -60,6 +105,7 @@ internal static class Program
             var errorDetails = FormatErrorDetails(error);
             Console.Error.WriteLine($"Error: {errorDetails}");
             TryWriteLastCommandError(errorDetails);
+            TryWriteMaintenanceHelperError(errorDetails);
             if (Environment.GetEnvironmentVariable("VITA_MOONLIGHT_DEBUG") == "1")
             {
                 Console.Error.WriteLine(error);
@@ -106,10 +152,32 @@ internal static class Program
         return ExitSuccess;
     }
 
-    private static int Configure(string[] args)
+    private static int Configure(
+        string[] args,
+        bool allowDeferredSetupTransition = false)
     {
         EnsureWindows();
         EnsureAdministrator("Configuring the streaming host");
+        using var operation = BackendLifecycleStateStore.AcquireLock();
+        BackendLifecycleStateStore.RequireNoUninstallInProgress();
+        return ConfigureLocked(
+            args,
+            operation,
+            allowDeferredSetupTransition);
+    }
+
+    private static int ConfigureLocked(
+        string[] args,
+        BackendOperationLease operation,
+        bool allowDeferredSetupTransition = false)
+    {
+        operation.RequireActive();
+        BackendLifecycleStateStore.RequireNoUninstallInProgress();
+        if (!allowDeferredSetupTransition)
+        {
+            EnsureBackendEnabled(
+                "Host configuration is paused. Run `backend enable` first");
+        }
         var previous = HostSettings.Load();
         var hostMode = GetOption(args, "--host") ?? previous.HostMode;
         if (!hostMode.Equals("sunshine", StringComparison.OrdinalIgnoreCase) &&
@@ -118,16 +186,43 @@ internal static class Program
             throw new ArgumentException("--host must be `sunshine` or `apollo`.");
         }
 
+        var hostModeChanged = !hostMode.Equals(
+            previous.HostMode,
+            StringComparison.OrdinalIgnoreCase);
+        var configuredDirectory = GetOption(args, "--config-dir");
+        var configuredDisplayMatch = GetOption(args, "--display-match");
+
         var settings = previous with
         {
             HostMode = hostMode.ToLowerInvariant(),
-            SunshineConfigDirectory = GetOption(args, "--config-dir") ?? previous.SunshineConfigDirectory,
+            SunshineConfigDirectory = configuredDirectory ??
+                (hostModeChanged ? null : previous.SunshineConfigDirectory),
             SunshineApplicationName = GetOption(args, "--app") ?? previous.SunshineApplicationName,
             DisplayWizardPath = previous.DisplayWizardPath,
-            DisplayMatch = GetOption(args, "--display-match") ?? previous.DisplayMatch,
+            DisplayMatch = configuredDisplayMatch ??
+                (hostModeChanged ? null : previous.DisplayMatch),
             IntegrateAllSunshineApps = GetOptionalBool(args, "--all-apps") ?? previous.IntegrateAllSunshineApps,
             ForceSdr = GetOptionalBool(args, "--force-sdr") ?? previous.ForceSdr,
         };
+
+        if (settings.HostMode == "apollo")
+        {
+            if (StreamingHostLocator.FindApolloExecutable() is null)
+            {
+                throw new InvalidOperationException(
+                    "Apollo was not found. Apollo is an experimental CLI-only path in this beta and is never installed by Vita Moonlight Host.");
+            }
+            if (string.IsNullOrWhiteSpace(settings.DisplayMatch))
+            {
+                throw new InvalidOperationException(
+                    "Experimental Apollo configuration requires an explicit --display-match value for Apollo's virtual display. Automatic selection is intentionally disabled so another virtual display cannot be hijacked.");
+            }
+            if (StreamingHostLocator.IsApolloRunning())
+            {
+                throw new InvalidOperationException(
+                    "Exit Apollo from its tray icon before changing its configuration. Apollo support is experimental in this beta.");
+            }
+        }
 
         var verifyNativeMode = false;
         if (settings.HostMode == "sunshine")
@@ -154,18 +249,56 @@ internal static class Program
                     "Open Get started and choose Set up or repair this PC first.");
             }
 
-            var modesChanged = wizard.EnsureVitaCompatibilityModes();
-            var verificationCurrent = DriverNativeModeVerification.IsCurrent(out _);
-            if (RequiresNativeModeVerification(modesChanged, verificationCurrent))
+            using (var transaction = DisplayTransactionLock.Acquire())
             {
-                wizard.ReloadDriver();
-                verifyNativeMode = true;
+                BackendLifecycleStateStore.RequireNoUninstallInProgress();
+                var modesChanged =
+                    wizard.EnsureVitaCompatibilityModes(transaction);
+                var verificationCurrent =
+                    DriverNativeModeVerification.IsCurrent(out _);
+                if (RequiresNativeModeVerification(
+                        modesChanged,
+                        verificationCurrent))
+                {
+                    verifyNativeMode = true;
+                }
             }
             settings = settings with { DisplayWizardPath = wizard.ExecutablePath };
         }
 
+        var removeLegacyApolloIntegration = false;
+        if (settings.HostMode == "sunshine")
+        {
+            var ownershipState = SunshineOwnershipJournal.Load();
+            if (previous.HostMode.Equals(
+                    "apollo",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                var previousConfigurationDirectory =
+                    SunshineConfigurator.ResolveConfigurationDirectory(
+                        previous.SunshineConfigDirectory,
+                        "apollo");
+                if (SunshineOwnershipJournal.TagExistingLocation(
+                        ownershipState,
+                        previousConfigurationDirectory,
+                        "apollo"))
+                {
+                    SunshineOwnershipJournal.Save(ownershipState);
+                }
+            }
+            removeLegacyApolloIntegration =
+                SunshineOwnershipJournal.HasLocationForHost(
+                    ownershipState,
+                    "apollo");
+            if (removeLegacyApolloIntegration &&
+                StreamingHostLocator.IsApolloRunning())
+            {
+                throw new InvalidOperationException(
+                    "Exit Apollo from its tray icon before migrating this PC to the supported Sunshine configuration. Apollo itself and unrelated Apollo settings will be preserved.");
+            }
+        }
+
         var companionPath = GetOption(args, "--companion") ?? Path.Combine(AppContext.BaseDirectory, "VitaMoonlight.Host.exe");
-        settings.Save();
         if (verifyNativeMode)
         {
             var verificationResult = PrimeDriverOrReport("prepared");
@@ -174,15 +307,43 @@ internal static class Program
                 return verificationResult;
             }
         }
-        var result = SunshineConfigurator.Configure(settings, Path.GetFullPath(companionPath));
+        DateTimeOffset? inventoryNotBeforeUtc = null;
+        if (settings.HostMode == "sunshine" &&
+            settings.IntegrateAllSunshineApps)
+        {
+            if (!DriverNativeModeVerification.TryGetCurrent(
+                    out var verification,
+                    out var verificationMessage) ||
+                verification is null)
+            {
+                throw new InvalidOperationException(
+                    "The Vita virtual display cannot be bound safely because its native-mode verification is not current: " +
+                    verificationMessage);
+            }
+            inventoryNotBeforeUtc = verification.VerifiedAt;
+        }
+        var result = SunshineConfigurator.Configure(
+            settings,
+            Path.GetFullPath(companionPath),
+            inventoryNotBeforeUtc);
+        if (removeLegacyApolloIntegration)
+        {
+            SunshineConfigurator.RemoveManagedIntegrationForHost("apollo");
+        }
+        // Commit the selected host/settings only after the corresponding host
+        // files and any legacy-host cleanup have succeeded. A failed or killed
+        // migration therefore remains retryable from the previous selection.
+        settings.Save();
         Console.WriteLine($"Configured {settings.HostMode} in {result.ConfigurationDirectory}");
         Console.WriteLine($"Moonlight application: {result.ApplicationName}");
-        Console.WriteLine(result.UsesNativeDisplayManagement
-            ? $"Virtual-display integration: Sunshine native lifecycle ({result.CoveredApplicationCount} application(s))"
+        Console.WriteLine(result.UsesAuthenticatedStreamBoundary
+            ? "Virtual-display integration: authenticated Vita handoff for Sunshine launch and resume"
             : $"Virtual-display integration: prep hook ({result.CoveredApplicationCount} application(s))");
         Console.WriteLine($"Force SDR: {(settings.ForceSdr ? "enabled" : "disabled")}");
         Console.WriteLine($"Original apps backup: {result.BackupPath}");
-        Console.WriteLine("Restart the streaming host, then select the configured application on the Vita.");
+        Console.WriteLine(settings.HostMode == "apollo"
+            ? "Experimental Apollo configuration written. Restart Apollo from its tray icon, then select the configured application on the Vita."
+            : "Restart Sunshine, then select the configured application on the Vita.");
         return ExitSuccess;
     }
 
@@ -199,9 +360,10 @@ internal static class Program
         if (action == "disable-virtual")
         {
             EnsureAdministrator("Disabling the idle virtual display");
-            Console.WriteLine(displays.DisableManagedVirtualDisplays()
-                ? "The idle Vita virtual display was disabled. Your physical display layout remains active."
-                : "No active Vita virtual display needed to be disabled.");
+            var restored = new SessionManager().RecoverToIdle();
+            Console.WriteLine(restored
+                ? "The Vita session was restored to the physical desktop and its virtual display device was disabled."
+                : "The physical desktop is active and the idle Vita virtual display device is disabled.");
             return ExitSuccess;
         }
         if (action != "list")
@@ -212,6 +374,13 @@ internal static class Program
         foreach (var display in displays.ListDisplays())
         {
             Console.WriteLine($"[{display.PathIndex}] {(display.IsActive ? "active" : "inactive"),-8} {(display.IsAvailable ? "available" : "unavailable"),-11} {display.FriendlyName}");
+            if (display.Width is not null &&
+                display.Height is not null &&
+                display.RefreshRate is not null)
+            {
+                Console.WriteLine(
+                    $"    mode {display.Width}x{display.Height}@{display.RefreshRate}");
+            }
             Console.WriteLine($"    {display.DevicePath}");
         }
         return ExitSuccess;
@@ -224,6 +393,8 @@ internal static class Program
         if (action == "ensure-compatible")
         {
             EnsureAdministrator("Installing or updating Sunshine");
+            EnsureBackendEnabled(
+                "Vita host features are paused. Enable them before changing Vita-managed Sunshine integration");
             var installer = GetOption(args, "--installer")
                 ?? throw new ArgumentException("host ensure-compatible requires --installer PATH.");
             var result = SunshineCompatibility.EnsureCompatible(installer);
@@ -240,7 +411,41 @@ internal static class Program
         {
             case "restart":
                 EnsureAdministrator("Restarting Sunshine");
+                EnsureBackendEnabled(
+                    "Vita host features are paused. Enable them before a Vita-requested Sunshine restart");
+                var inventoryNotBefore = DateTimeOffset.UtcNow;
                 WindowsServiceManager.Restart(StreamingHostLocator.FindSunshineServiceName(), "Sunshine");
+                var settings = HostSettings.Load();
+                if (settings.IntegrateAllSunshineApps)
+                {
+                    // Supported authenticated handoff keeps the exact VDD
+                    // disabled while idle, so a Sunshine INFO inventory is
+                    // neither available nor authoritative. Verify the exact
+                    // journal-owned PnP device instead; stream preflight will
+                    // enable it before Sunshine probes the active output.
+                    _ = ManagedVddOwnershipJournal
+                        .RequireOwnedPresentDevices(required: true);
+                }
+                else
+                {
+                    var configDirectory = SunshineConfigurator
+                        .ResolveConfigurationDirectory(
+                            settings.SunshineConfigDirectory,
+                            "sunshine");
+                    var displayDeviceId = SunshineConfigurator
+                        .WaitForManagedDisplayDeviceId(
+                            Path.Combine(configDirectory, "sunshine.log"),
+                            displayMatch: null,
+                            timeoutMilliseconds: 30000,
+                            pollMilliseconds: 250,
+                            inventoryNotBeforeUtc: inventoryNotBefore);
+                    if (displayDeviceId is null)
+                    {
+                        throw new InvalidOperationException(
+                            "Sunshine restarted, but its new process did not enumerate the legacy managed virtual display within 30 seconds. " +
+                            "Keep a physical display enabled, repair the Vita display driver, and try setup again.");
+                    }
+                }
                 Console.WriteLine("Sunshine restarted. It will now detect the installed ViGEmBus driver and the updated Vita configuration.");
                 return ExitSuccess;
             case "status":
@@ -314,38 +519,98 @@ internal static class Program
         }
 
         EnsureAdministrator("Virtual display driver setup");
-        var wizard = action == "uninstall"
-            ? DisplayWizardAdapter.LocateBundledForUninstall()
-            : DisplayWizardAdapter.LocateBundled();
-
+        if (action is "install" or "reload")
+        {
+            EnsureBackendEnabled(
+                "Virtual display maintenance is paused. Run `backend enable` first");
+        }
         switch (action)
         {
             case "install":
-                var runtimeInstaller =
-                    GetOption(args, "--runtime-installer") ??
-                    Path.Combine(
-                        AppContext.BaseDirectory,
-                        "tools",
-                        "DisplayWizard",
-                        "VC_redist.x64.exe");
-                var runtimeResult =
-                    VisualCppRuntimeCompatibility.EnsureCompatible(runtimeInstaller);
-                if (runtimeResult.RestartRequired)
                 {
-                    return ExitRestartRequired;
+                    var expectedExistingDeviceInstanceId =
+                        GetExpectedVddAdoptionInstanceId(args);
+                    var runtimeInstaller =
+                        GetOption(args, "--runtime-installer") ??
+                        Path.Combine(
+                            AppContext.BaseDirectory,
+                            "tools",
+                            "DisplayWizard",
+                            "VC_redist.x64.exe");
+                    var runtimeResult =
+                        VisualCppRuntimeCompatibility.EnsureCompatible(runtimeInstaller);
+                    if (runtimeResult.RestartRequired)
+                    {
+                        return ExitRestartRequired;
+                    }
+                    return PrimeDriverOrReport(
+                        "installed",
+                        installDriver: true,
+                        expectedExistingDeviceInstanceId:
+                            expectedExistingDeviceInstanceId);
                 }
-                wizard.InstallDriver();
-                return PrimeDriverOrReport("installed");
             case "reload":
-                wizard.EnsureVitaCompatibilityModes();
-                wizard.ReloadDriver();
-                return PrimeDriverOrReport("reloaded");
+                {
+                    return PrimeDriverOrReport("reloaded");
+                }
+            case "adopt-idle":
+                {
+                    var ownerProcessId = GetRequiredInt(
+                        args,
+                        "--adoption-owner-pid");
+                    var expectedExistingDeviceInstanceId =
+                        InstallerMaintenanceFence
+                            .RequireStagedVddAdoptionCandidateForOwner(
+                                ownerProcessId);
+                    var suspendBeforeLease =
+                        DisplaySuspendIntentStore.Inspect();
+                    using var transaction =
+                        DisplayTransactionLock.Acquire();
+                    DisplaySuspendIntentStore
+                        .RequireClearForDisplayMutationLocked(
+                            transaction,
+                            suspendBeforeLease,
+                            "Approved virtual-display adoption");
+                    BackendLifecycleStateStore
+                        .RequireNoUninstallInProgress();
+                    var adoption = ManagedVddOwnershipJournal
+                        .PrepareInstallLocked(
+                            transaction,
+                            expectedExistingDeviceInstanceId);
+                    if (adoption.Action !=
+                            ManagedVddInstallAction.UseOwnedInstance ||
+                        adoption.Device?.Ownership !=
+                            ManagedVddOwnershipKind.Adopted)
+                    {
+                        throw new InvalidOperationException(
+                            "The approved existing virtual display was not adopted. No different device was created or changed.");
+                    }
+                    var idle = ManagedVirtualDisplayRuntime
+                        .ReconcileIdleLocked(
+                            transaction,
+                            requireManagedDevice: true);
+                    DisplaySuspendIntentStore
+                        .RequireClearAfterDisplayMutationLocked(
+                            transaction,
+                            "Approved virtual-display adoption");
+                    Console.WriteLine(
+                        $"Adopted exact virtual-display instance {adoption.Device.InstanceId}, recorded its enabled baseline, and safely disabled it while Vita host features remain paused. Physical display(s): {string.Join(", ", idle.PhysicalDisplays)}.");
+                    return ExitSuccess;
+                }
             case "uninstall":
-                var restartRequired = wizard.UninstallDriver();
-                Console.WriteLine(restartRequired
-                    ? "The Vita virtual display driver was removed. Windows requires a restart to finish cleanup."
-                    : "The Vita virtual display driver and its managed configuration were removed.");
-                return restartRequired ? ExitRestartRequired : ExitSuccess;
+                {
+                    var wizard =
+                        DisplayWizardAdapter.LocateBundledForUninstall();
+                    bool restartRequired;
+                    using (var transaction = DisplayTransactionLock.Acquire())
+                    {
+                        restartRequired = wizard.UninstallDriver(transaction);
+                    }
+                    Console.WriteLine(restartRequired
+                        ? "The Vita virtual display driver was removed. Windows requires a restart to finish cleanup."
+                        : "The Vita virtual display driver and its managed configuration were removed.");
+                    return restartRequired ? ExitRestartRequired : ExitSuccess;
+                }
             default:
                 return InvalidCommand($"driver {action}");
         }
@@ -387,14 +652,383 @@ internal static class Program
         return ExitSuccess;
     }
 
-    private static int PrimeDriverOrReport(string action)
+    private static int MaintenanceCommand(string[] args)
+    {
+        EnsureWindows();
+        var action = args.FirstOrDefault()?.ToLowerInvariant() ?? "status";
+        switch (action)
+        {
+            case "begin":
+                EnsureMaintenanceAdministrator(
+                    "Beginning installer maintenance");
+                var ownerProcessId = GetRequiredInt(
+                    args,
+                    "--owner-pid");
+                var state = InstallerMaintenanceFence.Begin(ownerProcessId);
+                Console.WriteLine(
+                    $"Installer maintenance is owned by live process {state.OwnerProcessId}.");
+                return ExitSuccess;
+            case "end":
+                EnsureMaintenanceAdministrator(
+                    "Ending installer maintenance");
+                var endingOwnerProcessId = GetRequiredInt(
+                    args,
+                    "--owner-pid");
+                Console.WriteLine(
+                    InstallerMaintenanceFence.End(endingOwnerProcessId)
+                        ? "Installer maintenance ended."
+                        : "No installer maintenance fence remained.");
+                return ExitSuccess;
+            case "status":
+                var status = InstallerMaintenanceFence.Inspect();
+                if (status is null)
+                {
+                    Console.WriteLine("No installer maintenance is active.");
+                    return ExitMissingRequiredComponent;
+                }
+                Console.WriteLine(
+                    $"Installer maintenance owner: process {status.State.OwnerProcessId} " +
+                    $"({(status.OwnerIsAlive ? "running" : "not running")}), " +
+                    $"began {status.State.BeganAtUtc.LocalDateTime:g}.");
+                return status.OwnerIsAlive
+                    ? ExitSuccess
+                    : ExitFailure;
+            case "backend-was-enabled":
+            case "rescue-task-was-present":
+            case "recovery-task-was-present":
+                EnsureMaintenanceAdministrator(
+                    "Reading the protected installer-maintenance snapshot");
+                var snapshotOwnerProcessId = GetRequiredInt(
+                    args,
+                    "--owner-pid");
+                var snapshot = InstallerMaintenanceFence.GetSnapshotForOwner(
+                    snapshotOwnerProcessId);
+                var required = action switch
+                {
+                    "backend-was-enabled" => snapshot.BackendWasEnabled,
+                    "rescue-task-was-present" =>
+                        snapshot.RescueAgentTaskWasPresent,
+                    _ => snapshot.RecoveryTaskWasPresent,
+                };
+                Console.WriteLine(required ? "present" : "not present");
+                return required
+                    ? ExitSuccess
+                    : ExitMissingRequiredComponent;
+            case "vdd-adoption-required":
+                EnsureMaintenanceAdministrator(
+                    "Checking whether the existing virtual display needs explicit adoption");
+                var adoptionOwnerProcessId = GetRequiredInt(
+                    args,
+                    "--owner-pid");
+                _ = InstallerMaintenanceFence.GetSnapshotForOwner(
+                    adoptionOwnerProcessId);
+                var adoptionRequired = ManagedVddOwnershipJournal
+                    .RequiresExplicitAdoption(
+                        out var adoptionReason,
+                        out var adoptionCandidateInstanceId);
+                InstallerMaintenanceFence
+                    .StageVddAdoptionCandidateForOwner(
+                        adoptionOwnerProcessId,
+                        adoptionRequired
+                            ? adoptionCandidateInstanceId
+                            : null);
+                Console.WriteLine(adoptionReason);
+                return adoptionRequired
+                    ? ExitSuccess
+                    : ExitMissingRequiredComponent;
+            case "suspend-safeguards":
+                EnsureMaintenanceAdministrator(
+                    "Suspending Vita recovery safeguards for setup");
+                var suspendOwnerProcessId = GetRequiredInt(
+                    args,
+                    "--owner-pid");
+                InstallerMaintenanceFence.SuspendSafeguardsForOwner(
+                    suspendOwnerProcessId);
+                Console.WriteLine(
+                    "The exact installed Vita recovery safeguards are suspended for setup.");
+                return ExitSuccess;
+            case "restore-safeguards":
+                EnsureMaintenanceAdministrator(
+                    "Restoring Vita recovery safeguards after setup");
+                var restoreOwnerProcessId = GetRequiredInt(
+                    args,
+                    "--owner-pid");
+                InstallerMaintenanceFence.RestoreSafeguardsForOwner(
+                    restoreOwnerProcessId);
+                Console.WriteLine(
+                    "The exact installed Vita recovery safeguards match the protected setup snapshot.");
+                return ExitSuccess;
+            default:
+                return InvalidCommand($"maintenance {action}");
+        }
+    }
+
+    private static int BackendCommand(string[] args)
+    {
+        EnsureWindows();
+        var action = args.FirstOrDefault()?.ToLowerInvariant() ?? "status";
+        BackendLifecycleReport report;
+        switch (action)
+        {
+            case "enable":
+                EnsureAdministrator("Enabling Vita Moonlight background functions");
+                using (var operation = BackendLifecycleStateStore.AcquireLock())
+                {
+                    var pendingSetup = DeferredHostSetupStore.Load();
+                    if (pendingSetup?.HostMode == "apollo")
+                    {
+                        throw new InvalidOperationException(
+                            "This paused installation contains an older experimental Apollo setup plan. Run the current installer with its recommended Sunshine option to replace that plan before enabling Vita host features. Apollo itself and unrelated settings will be preserved.");
+                    }
+                    report = BackendLifecycleManager.EnableLocked(operation);
+                    PrintBackendReport(report, HasFlag(args, "--json"));
+                    if (report.Status != BackendLifecycleStatus.Enabled)
+                    {
+                        return ExitFailure;
+                    }
+                    return CompleteDeferredHostSetupAfterEnable(operation);
+                }
+            case "disable":
+                EnsureAdministrator("Disabling Vita Moonlight background functions");
+                report = BackendLifecycleManager.Disable();
+                PrintBackendReport(report, HasFlag(args, "--json"));
+                return report.Status == BackendLifecycleStatus.Disabled
+                    ? ExitSuccess
+                    : ExitFailure;
+            case "status":
+                report = BackendLifecycleManager.Inspect();
+                PrintBackendReport(report, HasFlag(args, "--json"));
+                if (HasFlag(args, "--intent-exit-code"))
+                {
+                    return BackendLifecycleManager.ReadPreference().State switch
+                    {
+                        BackendPreferenceState.Enabled => ExitSuccess,
+                        BackendPreferenceState.Disabled => ExitBackendDisabled,
+                        _ => ExitBackendStateError,
+                    };
+                }
+                if (HasFlag(args, "--require-enabled") &&
+                    report.Status != BackendLifecycleStatus.Enabled)
+                {
+                    return ExitMissingRequiredComponent;
+                }
+                return report.Status is BackendLifecycleStatus.Error or
+                    BackendLifecycleStatus.Partial
+                    ? ExitFailure
+                    : ExitSuccess;
+            default:
+                return InvalidCommand($"backend {action}");
+        }
+    }
+
+    private static int DeferredSetupCommand(string[] args)
+    {
+        EnsureWindows();
+        EnsureAdministrator("Saving deferred Vita host setup");
+        var action = args.FirstOrDefault()?.ToLowerInvariant() ?? "status";
+        switch (action)
+        {
+            case "save":
+                var hostMode = GetOption(args, "--host")
+                    ?? throw new ArgumentException(
+                        "deferred-setup save requires --host sunshine.");
+                if (!hostMode.Equals(
+                        "sunshine",
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new ArgumentException(
+                        "Deferred public-beta setup supports Sunshine only. Apollo remains an experimental explicit CLI configuration path.");
+                }
+                var installVirtualDisplay =
+                    GetOptionalBool(args, "--virtual-driver") ?? false;
+                var existingDeviceAdoptionInstanceId =
+                    GetExpectedVddAdoptionInstanceId(args);
+                DeferredHostSetupStore.Save(
+                    hostMode,
+                    installVirtualDisplay,
+                    existingDeviceAdoptionInstanceId);
+                Console.WriteLine(
+                    "Saved the protected setup work which will run the next time Vita host features are enabled.");
+                return ExitSuccess;
+            case "clear":
+                DeferredHostSetupStore.Delete();
+                Console.WriteLine("No deferred Vita host setup remains.");
+                return ExitSuccess;
+            case "status":
+                var plan = DeferredHostSetupStore.Load();
+                Console.WriteLine(plan is null
+                    ? "No deferred Vita host setup remains."
+                    : $"Deferred Vita host setup: {plan.HostMode}, virtual display {(plan.InstallVirtualDisplay ? "install/repair" : "keep existing")}, existing-device adoption {(plan.ExistingDeviceAdoptionInstanceId is null ? "not required" : "bound to " + plan.ExistingDeviceAdoptionInstanceId)}.");
+                return plan is null
+                    ? ExitMissingRequiredComponent
+                    : ExitSuccess;
+            default:
+                return InvalidCommand($"deferred-setup {action}");
+        }
+    }
+
+    private static int CompleteDeferredHostSetupAfterEnable(
+        BackendOperationLease operation)
+    {
+        operation.RequireActive();
+        BackendLifecycleStateStore.RequireNoUninstallInProgress();
+        var plan = DeferredHostSetupStore.Load();
+        if (plan is null) return ExitSuccess;
+
+        try
+        {
+            // The caller keeps the backend operation lease from the first
+            // Enable transition through plan deletion. A second Enable and
+            // uninstall therefore cannot install, configure, or remove the
+            // same integration concurrently.
+            if (plan.HostMode == "sunshine")
+            {
+                var sunshineInstaller = Path.Combine(
+                    AppContext.BaseDirectory,
+                    "tools",
+                    "Sunshine",
+                    "Sunshine-Windows-AMD64-installer.msi");
+                var sunshineResult =
+                    SunshineCompatibility.EnsureCompatible(
+                        sunshineInstaller);
+                if (sunshineResult.RestartRequired)
+                {
+                    throw new HostRestartRequiredException(
+                        "Sunshine was updated. Restart Windows, then enable Vita host features again to finish the deferred setup.");
+                }
+            }
+
+            if (plan.InstallVirtualDisplay)
+            {
+                var runtimeInstaller = Path.Combine(
+                    AppContext.BaseDirectory,
+                    "tools",
+                    "DisplayWizard",
+                    "VC_redist.x64.exe");
+                var runtimeResult =
+                    VisualCppRuntimeCompatibility.EnsureCompatible(
+                        runtimeInstaller);
+                if (runtimeResult.RestartRequired)
+                {
+                    throw new HostRestartRequiredException(
+                        "The virtual-display runtime was updated. Restart Windows, then enable Vita host features again to finish the deferred setup.");
+                }
+
+                var driverResult = PrimeDriverOrReport(
+                    "installed",
+                    installDriver: true,
+                    expectedExistingDeviceInstanceId:
+                        plan.ExistingDeviceAdoptionInstanceId);
+                if (driverResult != ExitSuccess)
+                {
+                    throw new InvalidOperationException(
+                        "Deferred virtual-display verification did not complete successfully.");
+                }
+            }
+
+            if (plan.HostMode == "sunshine")
+            {
+                WindowsServiceManager.Restart(
+                    StreamingHostLocator.FindSunshineServiceName(),
+                    "Sunshine");
+            }
+            var configureResult = ConfigureLocked(
+                ["--host", plan.HostMode],
+                operation,
+                allowDeferredSetupTransition: true);
+            if (configureResult != ExitSuccess)
+            {
+                throw new InvalidOperationException(
+                    "Deferred streaming-host configuration did not complete successfully.");
+            }
+            if (plan.HostMode == "sunshine")
+            {
+                WindowsServiceManager.Restart(
+                    StreamingHostLocator.FindSunshineServiceName(),
+                    "Sunshine");
+            }
+
+            DeferredHostSetupStore.DeleteLocked(operation);
+            Console.WriteLine(
+                "Completed the setup work deferred while Vita host features were paused.");
+            return ExitSuccess;
+        }
+        catch (Exception setupFailure)
+        {
+            try
+            {
+                var rollback = BackendLifecycleManager.DisableLocked(
+                    operation,
+                    allowUninstallRollback: false);
+                if (rollback.Status != BackendLifecycleStatus.Disabled)
+                {
+                    throw new InvalidOperationException(
+                        "Windows could not completely return Vita host features to their paused state: " +
+                        string.Join(" ", rollback.Issues));
+                }
+            }
+            catch (Exception rollbackError)
+            {
+                throw new AggregateException(
+                    "Deferred host setup failed, and Vita host features could not be completely paused again.",
+                    setupFailure,
+                    rollbackError);
+            }
+
+            ExceptionDispatchInfo.Capture(setupFailure).Throw();
+            return ExitFailure;
+        }
+    }
+
+    private static void PrintBackendReport(
+        BackendLifecycleReport report,
+        bool json)
+    {
+        if (json)
+        {
+            Console.WriteLine(JsonSerializer.Serialize(report, JsonOptions));
+            return;
+        }
+
+        Console.WriteLine($"Vita host features: {report.Status}");
+        Console.WriteLine($"Requested state: {report.DesiredState}");
+        Console.WriteLine(report.PreferencePersisted
+            ? $"Preference saved for this PC: {report.UpdatedAtUtc?.LocalDateTime:g}"
+            : "No saved preference; existing installations default to enabled.");
+        if (report.Components is not null)
+        {
+            Console.WriteLine(
+                $"Recovery task: {(report.Components.RecoveryTaskInstalled ? "installed" : "not installed")}");
+            Console.WriteLine(
+                $"Rescue agent: {(report.Components.RescueAgentTaskInstalled ? "installed" : "not installed")}, " +
+                $"{(report.Components.RescueAgentRunning ? "running" : "stopped")}");
+            Console.WriteLine(
+                $"Vita display device: {(report.Components.ManagedVirtualDisplayInstalled ? "installed" : "not installed")}, " +
+                $"{(report.Components.ManagedVirtualDisplayEnabled ? "enabled" : "disabled")}, " +
+                $"{(report.Components.ManagedVirtualDisplayActive ? "active" : "inactive")}");
+            Console.WriteLine(
+                "Shared Sunshine: left unchanged by Vita host-feature pause/enable.");
+        }
+        foreach (var issue in report.Issues)
+        {
+            Console.WriteLine($"Attention: {issue}");
+        }
+    }
+
+    private static int PrimeDriverOrReport(
+        string action,
+        bool installDriver = false,
+        string? expectedExistingDeviceInstanceId = null)
     {
         try
         {
-            var mode = new SessionManager().PrimeNativeMode();
-            new DisplayTopologyService().DisableManagedVirtualDisplays();
+            var mode = new SessionManager()
+                .PrimeNativeModeForDriverMaintenanceOnly(
+                    installDriver,
+                    expectedExistingDeviceInstanceId);
             Console.WriteLine(
-                $"Virtual display driver {action} and verified at {mode.Width}x{mode.Height}@{mode.Fps}. " +
+                $"Virtual display driver {action} and verified at " +
+                $"{mode.Width}x{mode.Height}@{mode.DesktopRefreshRate}. " +
                 "The idle virtual display is disabled.");
             return ExitSuccess;
         }
@@ -429,6 +1063,25 @@ internal static class Program
         }
         try
         {
+            // A hardware ID is not ownership. Readiness must resolve the
+            // exact protected instance used by stream start/stop; otherwise a
+            // third-party MTT node could appear healthy here and fail only
+            // after the Vita has already attempted to connect.
+            var managedDevice = ManagedVddOwnershipJournal
+                .RequireOwnedPresentDevices(required: true)
+                .Single();
+            if (!managedDevice.Enabled)
+            {
+                message =
+                    "Virtual display driver: ready and safely disabled while idle.";
+                return true;
+            }
+            if (!File.Exists(HostStatePaths.RecoveryFile))
+            {
+                message =
+                    "Virtual display driver: the managed device is enabled without an active journaled stream. Run Repair Vita display driver to return it to the safe idle state.";
+                return false;
+            }
             var display = new DisplayTopologyService().ListDisplays().FirstOrDefault(candidate =>
                 candidate.IsAvailable && DisplayTopologyService.IsManagedVirtualDisplay(candidate));
             if (display is null)
@@ -437,10 +1090,16 @@ internal static class Program
                     "Virtual display driver: installed, but Windows has not enumerated the display. Restart Windows.";
                 return false;
             }
-            message = $"Virtual display driver: ready ({display.FriendlyName}).";
+            message =
+                $"Virtual display driver: active for a journaled stream ({display.FriendlyName}).";
             return true;
         }
-        catch (Exception error) when (error is InvalidOperationException or Win32Exception)
+        catch (Exception error) when (
+            error is IOException or
+                UnauthorizedAccessException or
+                InvalidDataException or
+                InvalidOperationException or
+                Win32Exception)
         {
             message = $"Virtual display driver: not ready ({error.Message}).";
             return false;
@@ -451,38 +1110,88 @@ internal static class Program
     {
         EnsureWindows();
         var action = args.FirstOrDefault()?.ToLowerInvariant() ?? "status";
+        VitaStreamMode? hookStreamMode = null;
+        if (action == "hook-start")
+        {
+            var width = GetRequiredInt(args, "--width");
+            var height = GetRequiredInt(args, "--height");
+            var streamFps = GetRequiredInt(args, "--fps");
+            if (!VitaDisplayModes.TryGetSupportedStreamMode(
+                    width,
+                    height,
+                    streamFps,
+                    out var recognizedMode))
+            {
+                // Sunshine applications can be launched by non-Vita clients.
+                // A prep hook must not block those sessions or change their
+                // display merely because their mode is outside our contract.
+                Console.WriteLine(
+                    $"Sunshine client mode {width}x{height} at {streamFps} FPS " +
+                    "is not a Vita mode; the host display was left unchanged.");
+                return ExitSuccess;
+            }
+            hookStreamMode = recognizedMode;
+        }
         if (action != "status")
         {
             EnsureAdministrator(
                 "Managing the Vita streaming display session");
         }
         var manager = new SessionManager();
+        if (action is "start" or "test" or "mode" || hookStreamMode is not null)
+        {
+            EnsureBackendReadyForStreaming();
+        }
         switch (action)
         {
+            case "hook-start":
+                var hookResult = manager.Start(
+                    hookStreamMode!.Value.DesktopMode.Width,
+                    hookStreamMode.Value.DesktopMode.Height,
+                    hookStreamMode.Value.StreamFps);
+                Console.WriteLine(
+                    $"Vita hook display active: {hookResult.DisplayName} at " +
+                    $"{hookResult.Width}x{hookResult.Height}@{hookResult.DesktopRefreshRate} Hz " +
+                    $"(stream {hookResult.StreamFps} FPS)");
+                return ExitSuccess;
             case "start":
                 var result = manager.Start(
                     GetRequiredInt(args, "--width"),
                     GetRequiredInt(args, "--height"),
                     GetRequiredInt(args, "--fps"));
-                Console.WriteLine($"Streaming display active: {result.DisplayName} at {result.Width}x{result.Height}@{result.Fps}");
+                Console.WriteLine(
+                    $"Streaming display active: {result.DisplayName} at " +
+                    $"{result.Width}x{result.Height}@{result.DesktopRefreshRate} Hz " +
+                    $"(stream {result.StreamFps} FPS)");
                 return ExitSuccess;
             case "test":
                 var seconds = GetOptionalInt(args, "--seconds", 15, 5, 120);
+                SessionStartResult? testResult = null;
+                var restoredOwnTest = false;
                 try
                 {
-                    var testResult = manager.Start(
+                    testResult = manager.Start(
                         GetRequiredInt(args, "--width"),
                         GetRequiredInt(args, "--height"),
                         GetRequiredInt(args, "--fps"));
-                    Console.WriteLine($"Test display active: {testResult.DisplayName} at {testResult.Width}x{testResult.Height}@{testResult.Fps}");
+                    Console.WriteLine(
+                        $"Test display active: {testResult.DisplayName} at " +
+                        $"{testResult.Width}x{testResult.Height}@{testResult.DesktopRefreshRate} Hz " +
+                        $"(stream {testResult.StreamFps} FPS)");
                     Console.WriteLine($"Restoring the original display layout in {seconds} seconds...");
                     Thread.Sleep(TimeSpan.FromSeconds(seconds));
                 }
                 finally
                 {
-                    manager.RestoreIfPending();
+                    if (testResult is not null)
+                    {
+                        restoredOwnTest = manager.RestoreIfPending(
+                            testResult.RecoveryCapturedAt);
+                    }
                 }
-                Console.WriteLine("Display test completed and the original topology was restored.");
+                Console.WriteLine(restoredOwnTest
+                    ? "Display test completed and the original topology was restored."
+                    : "Display test completed after its transaction had already ended; any newer session was left unchanged.");
                 return ExitSuccess;
             case "mode":
                 var modeResult = manager.ChangeMode(
@@ -493,14 +1202,19 @@ internal static class Program
                     $"Streaming display mode changed: {modeResult.DisplayName} at {modeResult.Mode}");
                 return ExitSuccess;
             case "stop":
-            case "recover":
                 Console.WriteLine(manager.RestoreIfPending()
                     ? "Original display topology restored."
                     : "No pending display recovery was found.");
                 return ExitSuccess;
+            case "recover":
+                Console.WriteLine(manager.RecoverToIdle()
+                    ? "Original display topology restored and the idle Vita display was disabled."
+                    : "Physical display verified and the idle Vita display was disabled.");
+                return ExitSuccess;
             case "recover-upgrade":
                 var safeRecovery =
-                    UninstallManager.RecoverPhysicalAndDiscardPendingTransaction();
+                    UninstallManager
+                        .RecoverPhysicalAndDiscardPendingTransactionForRecoveryUpgradeOnly();
                 Console.WriteLine(
                     $"Confirmed physical-only display topology: " +
                     $"{string.Join(", ", safeRecovery.PhysicalDisplays)}.");
@@ -526,6 +1240,8 @@ internal static class Program
         {
             case "install":
                 EnsureAdministrator("Installing the automatic display-recovery safeguard");
+                EnsureBackendEnabled(
+                    "Automatic recovery is paused. Run `backend enable` first");
                 RecoveryTaskManager.Install(Environment.ProcessPath
                     ?? Path.Combine(AppContext.BaseDirectory, "VitaMoonlight.Host.exe"));
                 Console.WriteLine("The automatic logon recovery task is installed.");
@@ -536,10 +1252,40 @@ internal static class Program
                 Console.WriteLine("The automatic logon recovery task was removed.");
                 return ExitSuccess;
             case "status":
-                Console.WriteLine(RecoveryTaskManager.IsInstalled()
-                    ? "The automatic logon recovery task is installed."
-                    : "The automatic logon recovery task is not installed.");
-                return RecoveryTaskManager.IsInstalled() ? ExitSuccess : ExitMissingRequiredComponent;
+                var recoveryProbe = RecoveryTaskManager.GetInstallationState();
+                Console.WriteLine(recoveryProbe.State switch
+                {
+                    ExactScheduledTaskState.Present =>
+                        "The automatic logon recovery task is installed.",
+                    ExactScheduledTaskState.Missing =>
+                        "The automatic logon recovery task is not installed.",
+                    _ =>
+                        "Windows could not inspect the exact automatic recovery task: " +
+                        (recoveryProbe.Error ?? "unknown Task Scheduler error"),
+                });
+                return recoveryProbe.State switch
+                {
+                    ExactScheduledTaskState.Present => ExitSuccess,
+                    ExactScheduledTaskState.Missing => ExitMissingRequiredComponent,
+                    _ => ExitFailure,
+                };
+            case "task-status":
+                var exactRecoveryProbe =
+                    RecoveryTaskManager.GetInstallationState();
+                Console.WriteLine(exactRecoveryProbe.State switch
+                {
+                    ExactScheduledTaskState.Present => "present",
+                    ExactScheduledTaskState.Missing => "missing",
+                    _ => "unknown: " +
+                        (exactRecoveryProbe.Error ?? "Task Scheduler error"),
+                });
+                return exactRecoveryProbe.State switch
+                {
+                    ExactScheduledTaskState.Present => ExitSuccess,
+                    ExactScheduledTaskState.Missing =>
+                        ExitMissingRequiredComponent,
+                    _ => ExitFailure,
+                };
             default:
                 return InvalidCommand($"recovery {action}");
         }
@@ -557,6 +1303,8 @@ internal static class Program
                 return HostRecoveryAgentManager.Run(HasFlag(args, "--background"));
             case "install":
                 EnsureAdministrator("Installing the stream rescue agent");
+                EnsureBackendEnabled(
+                    "The stream rescue agent is paused. Run `backend enable` first");
                 HostRecoveryAgentManager.Install(Environment.ProcessPath
                     ?? Path.Combine(AppContext.BaseDirectory, "VitaMoonlight.Host.exe"));
                 Console.WriteLine("The stream rescue agent is installed and running.");
@@ -567,11 +1315,23 @@ internal static class Program
                 Console.WriteLine("The stream rescue agent was removed.");
                 return ExitSuccess;
             case "status":
-                var installed = HostRecoveryAgentManager.IsInstalled();
+                var agentProbe = HostRecoveryAgentManager.GetInstallationState();
+                var installed = agentProbe.State == ExactScheduledTaskState.Present;
                 var running = HostRecoveryAgentManager.IsRunning();
                 var modeHotkeys = HostRecoveryAgentManager.GetModeHotkeyReadiness();
-                Console.WriteLine($"Stream rescue task: {(installed ? "installed" : "not installed")}");
+                Console.WriteLine($"Stream rescue task: {agentProbe.State switch
+                {
+                    ExactScheduledTaskState.Present => "installed",
+                    ExactScheduledTaskState.Missing => "not installed",
+                    _ => "inspection failed: " +
+                        (agentProbe.Error ?? "unknown Task Scheduler error"),
+                }}");
                 Console.WriteLine($"Stream rescue agent: {(running ? "running" : "not running")}");
+                if (modeHotkeys.Count == 0)
+                {
+                    Console.WriteLine(
+                        "Display mode control: authenticated Vita launch/resume preflight (legacy F8-F10 shortcuts are not registered).");
+                }
                 foreach (var modeHotkey in modeHotkeys)
                 {
                     Console.WriteLine(
@@ -582,9 +1342,28 @@ internal static class Program
                 {
                     Console.WriteLine($"Last rescue: {last.Timestamp.LocalDateTime:g} {last.Action} {(last.Success ? "succeeded" : "failed")} - {last.Message}");
                 }
-                return installed && running && modeHotkeys.All(status => status.Ready)
-                    ? ExitSuccess
-                    : ExitMissingRequiredComponent;
+                return agentProbe.State == ExactScheduledTaskState.Unknown
+                    ? ExitFailure
+                    : installed && running && modeHotkeys.All(status => status.Ready)
+                        ? ExitSuccess
+                        : ExitMissingRequiredComponent;
+            case "task-status":
+                var exactAgentProbe =
+                    HostRecoveryAgentManager.GetInstallationState();
+                Console.WriteLine(exactAgentProbe.State switch
+                {
+                    ExactScheduledTaskState.Present => "present",
+                    ExactScheduledTaskState.Missing => "missing",
+                    _ => "unknown: " +
+                        (exactAgentProbe.Error ?? "Task Scheduler error"),
+                });
+                return exactAgentProbe.State switch
+                {
+                    ExactScheduledTaskState.Present => ExitSuccess,
+                    ExactScheduledTaskState.Missing =>
+                        ExitMissingRequiredComponent,
+                    _ => ExitFailure,
+                };
             default:
                 return InvalidCommand($"agent {action}");
         }
@@ -598,9 +1377,6 @@ internal static class Program
         HostRescueStatus result;
         switch (action)
         {
-            case "close-foreground":
-                result = HostRecoveryActions.CloseForegroundApplication();
-                break;
             case "recover-display":
             case "reset-display-driver":
                 result = HostRecoveryActions.RecoverDisplayAndStreamingHost();
@@ -626,12 +1402,41 @@ internal static class Program
                 $"Removed {cleanup.RemovedHooks} exact Vita-owned Sunshine preparation hook(s).");
             return ExitSuccess;
         }
+        if (action == "finalize-owned")
+        {
+            var finalization = UninstallManager.FinalizeOwnedState(
+                restoreSunshine: !HasFlag(args, "--sunshine-removed"),
+                restoreManagedVdd: !HasFlag(args, "--vdd-removed"));
+            Console.WriteLine(
+                $"Confirmed physical-only display topology: {string.Join(", ", finalization.PhysicalDisplays)}.");
+            Console.WriteLine(finalization.RescueAgentRemoved
+                ? "Removed the Vita Moonlight stream-rescue task and agent."
+                : "No Vita Moonlight stream-rescue task or agent remained.");
+            Console.WriteLine(finalization.RecoveryTaskRemoved
+                ? "Removed the Vita Moonlight automatic recovery task."
+                : "No Vita Moonlight automatic recovery task remained.");
+            Console.WriteLine(
+                $"Removed {finalization.StateCleanup.RemovedFiles} exact Vita-owned state file(s) " +
+                $"and {finalization.StateCleanup.RemovedDirectories} empty state directory/directories.");
+            if (finalization.StateCleanup.RetainedEntries.Count > 0)
+            {
+                Console.WriteLine(
+                    "Retained unrecognized or untrusted state entries for safety: " +
+                    string.Join(", ", finalization.StateCleanup.RetainedEntries));
+            }
+            foreach (var warning in finalization.Warnings)
+            {
+                Console.Error.WriteLine("Uninstall warning: " + warning);
+            }
+            return ExitSuccess;
+        }
         if (action != "prepare")
         {
             return InvalidCommand($"uninstall {action}");
         }
 
-        var result = UninstallManager.Prepare();
+        var result = UninstallManager.Prepare(
+            beginUninstallTransaction: HasFlag(args, "--begin"));
         Console.WriteLine(
             $"Confirmed physical-only display topology: {string.Join(", ", result.PhysicalDisplays)}.");
         Console.WriteLine(result.ClearedSavedTransaction
@@ -656,9 +1461,21 @@ internal static class Program
             Console.WriteLine($"Windows:       {Status(report.IsWindows, report.OperatingSystem)}");
             Console.WriteLine($"Platform:      {Status(report.IsSupportedPlatform, report.Architecture)}");
             Console.WriteLine($"Administrator: {Status(report.IsAdministrator, report.IsAdministrator ? "yes" : "no (required for setup)")}");
+            Console.WriteLine($"Task account:  {Status(report.ScheduledTaskAccountReady, report.ScheduledTaskAccountMessage)}");
+            var backendDescription = report.BackendStatus switch
+            {
+                BackendLifecycleStatus.Enabled => "enabled",
+                BackendLifecycleStatus.Disabled => "paused by you; installed components and pairing are kept",
+                BackendLifecycleStatus.Partial =>
+                    $"{report.BackendDesiredState.ToString().ToLowerInvariant()} is only partly applied",
+                _ => "protected lifecycle state could not be verified",
+            };
+            Console.WriteLine($"Vita features: {Status(
+                report.BackendStatus is BackendLifecycleStatus.Enabled or BackendLifecycleStatus.Disabled,
+                backendDescription)}");
             Console.WriteLine($"Host mode:     {report.HostMode}");
             Console.WriteLine($"App coverage:  {(report.IntegrateAllSunshineApps ? "every Sunshine app" : "Vita Moonlight app only")}");
-            Console.WriteLine($"Display lifecycle: {Status(report.NativeDisplayLifecycleReady, report.NativeDisplayLifecycleReady ? "native disconnect recovery enabled" : "run Set up or repair this PC")}");
+            Console.WriteLine($"Display lifecycle: {Status(report.NativeDisplayLifecycleReady, report.NativeDisplayLifecycleReady ? "authenticated automatic handoff enabled" : "run Set up or repair this PC")}");
             Console.WriteLine($"Color mode:    {(report.ForceSdr ? "force SDR for Vita sessions" : "leave Windows color mode unchanged")}");
             Console.WriteLine($"Sunshine:      {Status(report.SunshinePath is not null, report.SunshinePath ?? "not found")}");
             Console.WriteLine($"Sunshine version: {Status(
@@ -666,44 +1483,79 @@ internal static class Program
                 report.SunshineVersion is null
                     ? $"not detected (requires {SunshineCompatibility.MinimumVersionText}+)"
                     : $"{report.SunshineVersion} (requires {SunshineCompatibility.MinimumVersionText}+)")}");
-            Console.WriteLine($"Apollo:        {Status(report.ApolloPath is not null, report.ApolloPath ?? "not found")}");
+            Console.WriteLine($"Apollo:        {(report.ApolloPath is null ? "not found" : report.ApolloPath + " (detected; experimental and not public-beta qualified)")}");
             Console.WriteLine($"ViGEmBus:      {Status(report.ViGEmBusInstalled, report.ViGEmBusInstalled ? "installed" : "not detected")}");
             Console.WriteLine($"ViGEmBus state:{Status(report.ViGEmBusRunning, report.ViGEmBusRunning ? "running" : report.ViGEmBusInstalled ? "installed but not running" : "unavailable")}");
             Console.WriteLine($"Sunshine gamepad: {Status(!report.SunshineNeedsRestart, report.SunshineNeedsRestart ? "restart required - startup did not see ViGEmBus" : "ready")}");
-            Console.WriteLine($"Driver bundle: {Status(report.DisplayWizardPath is not null, report.DisplayWizardPath ?? "not found (not needed for Apollo)")}");
+            Console.WriteLine($"Driver bundle: {Status(report.DisplayWizardPath is not null, report.DisplayWizardPath ?? "not found")}");
             Console.WriteLine($"VDD runtime:   {Status(
-                report.VisualCppRuntimeSupported || report.HostMode == "apollo",
-                report.HostMode == "apollo"
-                    ? "not needed for Apollo"
-                    : report.VisualCppRuntimeSupported
-                        ? $"Microsoft Visual C++ {report.VisualCppRuntimeVersion}"
-                        : $"missing or older than {VisualCppRuntimeCompatibility.MinimumVersionText}")}");
-            Console.WriteLine($"Virtual display: {Status(report.VirtualDisplayDriverInstalled || report.HostMode == "apollo", report.HostMode == "apollo" ? "provided by Apollo" : report.VirtualDisplayDriverInstalled ? "signed driver installed" : "not detected")}");
-            Console.WriteLine($"Vita display modes: {Status(report.VirtualDisplayModesReady || report.HostMode == "apollo", report.HostMode == "apollo" ? "provided by Apollo" : report.VirtualDisplayModesReady ? "provisioned; native 960x544 verified" : "missing or unverified - repair display driver")}");
+                report.VisualCppRuntimeSupported,
+                report.VisualCppRuntimeSupported
+                    ? $"Microsoft Visual C++ {report.VisualCppRuntimeVersion}"
+                    : $"missing or older than {VisualCppRuntimeCompatibility.MinimumVersionText}")}");
+            Console.WriteLine($"Virtual display: {Status(report.VirtualDisplayDriverInstalled, report.VirtualDisplayDriverInstalled ? "signed managed driver installed" : "not detected")}");
+            Console.WriteLine($"Vita display modes: {Status(report.VirtualDisplayModesReady, report.VirtualDisplayModesReady ? "provisioned; native 960x544 verified" : "missing or unverified - repair display driver")}");
             Console.WriteLine($"Recovery:      {Status(!report.RecoveryPending, report.RecoveryPending ? "pending - run session recover" : "none")}");
-            Console.WriteLine($"Recovery task: {Status(report.RecoveryTaskInstalled, report.RecoveryTaskInstalled ? "installed" : "not installed")}");
+            var recoveryTaskDescription = report.BackendStatus == BackendLifecycleStatus.Disabled
+                ? "paused and removed as requested"
+                : report.RecoveryTaskState switch
+                {
+                    ExactScheduledTaskState.Present => "installed",
+                    ExactScheduledTaskState.Missing => "not installed",
+                    _ => "Windows could not inspect the exact task",
+                };
+            Console.WriteLine($"Recovery task: {Status(
+                report.BackendStatus == BackendLifecycleStatus.Disabled ||
+                report.RecoveryTaskState == ExactScheduledTaskState.Present,
+                recoveryTaskDescription)}");
             var rescueDescription = report.RescueAgentInstalled && report.RescueAgentRunning
                 ? "installed and running"
+                : report.BackendStatus == BackendLifecycleStatus.Disabled
+                    ? "paused and removed as requested"
+                    : report.RescueAgentTaskState == ExactScheduledTaskState.Unknown
+                        ? "Windows could not inspect the exact task"
                 : !report.RescueAgentInstalled && report.RescueAgentRunning
                     ? "orphan agent running; scheduled task missing - repair required"
                     : report.RescueAgentInstalled
                         ? "installed but not running"
                         : "not installed";
-            Console.WriteLine($"Stream rescue: {Status(report.RescueAgentInstalled && report.RescueAgentRunning, rescueDescription)}");
-            var modeHotkeyDescription = string.Join(
-                ", ",
-                report.ModeHotkeys.Select(status =>
-                    $"{status.Mode} {(status.Ready ? "ready" : "unavailable")}"));
-            Console.WriteLine($"Display mode controls: {Status(report.ModeHotkeysReady, modeHotkeyDescription)}");
+            Console.WriteLine($"Stream rescue: {Status(
+                report.BackendStatus == BackendLifecycleStatus.Disabled ||
+                report.RescueAgentInstalled && report.RescueAgentRunning,
+                rescueDescription)}");
+            var modeHotkeyDescription = report.ModeHotkeys.Count == 0
+                ? "authenticated Vita launch/resume preflight; legacy F8-F10 shortcuts are not registered"
+                : string.Join(
+                    ", ",
+                    report.ModeHotkeys.Select(status =>
+                        $"{status.Mode} {(status.Ready ? "ready" : "unavailable")}"));
+            Console.WriteLine($"Display mode controls: {Status(
+                report.BackendStatus == BackendLifecycleStatus.Disabled || report.ModeHotkeysReady,
+                report.BackendStatus == BackendLifecycleStatus.Disabled
+                    ? "paused; restored when Vita host features are enabled"
+                    : modeHotkeyDescription)}");
+            foreach (var issue in report.BackendIssues.Take(3))
+            {
+                Console.WriteLine($"Host-feature attention: {issue}");
+            }
             Console.WriteLine();
             Console.WriteLine(report.Recommendation);
         }
 
-        return report.IsSupportedPlatform && report.HasSelectedStreamingHost &&
-            (report.HostMode != "sunshine" || report.SunshineVersionSupported) &&
+        if (report.BackendStatus == BackendLifecycleStatus.Disabled)
+        {
+            return report.IsSupportedPlatform && !report.RecoveryPending
+                ? ExitSuccess
+                : ExitMissingRequiredComponent;
+        }
+
+        return report.BackendStatus == BackendLifecycleStatus.Enabled &&
+            report.IsSupportedPlatform && report.HasSelectedStreamingHost &&
+            report.ScheduledTaskAccountReady &&
+            report.SunshineVersionSupported &&
             report.HasDisplaySupport && report.NativeDisplayLifecycleReady &&
             report.ViGEmBusInstalled && report.ViGEmBusRunning && !report.SunshineNeedsRestart && !report.RecoveryPending &&
-            (report.HostMode == "apollo" || report.VisualCppRuntimeSupported) &&
+            report.VisualCppRuntimeSupported &&
             report.RescueAgentInstalled && report.RescueAgentRunning && report.ModeHotkeysReady
             ? ExitSuccess
             : ExitMissingRequiredComponent;
@@ -793,6 +1645,403 @@ internal static class Program
                 "Client"),
             "Windows ARM64 was accepted as a supported release target.");
         Require(
+            DisplayWizardAdapter.IsManagedDeviceEnabled(0x00000008, 0) &&
+            !DisplayWizardAdapter.IsManagedDeviceEnabled(0, 0) &&
+            !DisplayWizardAdapter.IsManagedDeviceEnabled(0x00000008, 10) &&
+            !DisplayWizardAdapter.IsManagedDeviceEnabled(0x00000008, 22) &&
+            !DisplayWizardAdapter.IsManagedDeviceEnabled(0x00000008, 31),
+            "Managed virtual display enabled-state classification failed.");
+        var unmanagedSunshine = new SunshineBackendSnapshot(
+            SunshineBackendKind.None,
+            null,
+            null,
+            null,
+            null,
+            false);
+        var disabledBackendState = BackendLifecycleStateStore.Create(
+            BackendDesiredState.Disabled,
+            restoreRecoveryTask: true,
+            restoreRescueAgent: true,
+            managedVirtualDisplayInstancesToRestore: [@"ROOT\DISPLAY\0001"],
+            unmanagedSunshine);
+        var disabledBackendComponents = new BackendLifecycleComponents(
+            RecoveryTaskInstalled: false,
+            RescueAgentTaskInstalled: false,
+            RescueAgentRunning: false,
+            RecoveryPending: false,
+            ActivePhysicalDisplayCount: 1,
+            ManagedVirtualDisplayInstalled: true,
+            ManagedVirtualDisplayEnabled: false,
+            ManagedVirtualDisplayActive: false,
+            ManagedVirtualDisplayDevices:
+            [
+                new ManagedVddDeviceStatus(
+                    @"ROOT\DISPLAY\0001",
+                    Present: true,
+                    Enabled: false,
+                    DeviceStatus: 0,
+                    ProblemCode: 22),
+            ],
+            new SunshineBackendObservation(
+                SunshineBackendKind.None,
+                Exists: false,
+                Running: false,
+                ServiceStartType: null,
+                DelayedAutoStart: null,
+                Error: null));
+        Require(
+            BackendLifecycleManager.Evaluate(
+                disabledBackendState,
+                disabledBackendComponents).Status ==
+            BackendLifecycleStatus.Disabled,
+            "A fully paused backend was not classified as Disabled.");
+        Require(
+            BackendLifecycleManager.Evaluate(
+                disabledBackendState,
+                disabledBackendComponents with
+                {
+                    ManagedVirtualDisplayEnabled = true,
+                    ManagedVirtualDisplayDevices =
+                    [
+                        new ManagedVddDeviceStatus(
+                            @"ROOT\DISPLAY\0001",
+                            Present: true,
+                            Enabled: true,
+                            DeviceStatus: 8,
+                            ProblemCode: 0),
+                    ],
+                }).Status == BackendLifecycleStatus.Partial,
+            "A partially paused backend was not classified as Partial.");
+        Require(
+            BackendLifecycleManager.Evaluate(
+                disabledBackendState,
+                disabledBackendComponents,
+                ["synthetic inspection error"]).Status ==
+            BackendLifecycleStatus.Error,
+            "A backend inspection failure was not classified as Error.");
+        var statePayload =
+            BackendLifecycleStateStore.SerializeStateForTest(
+                disabledBackendState);
+        Require(
+            BackendLifecycleStateStore.ComputeSha256ForTest(statePayload) ==
+            BackendLifecycleStateStore.ComputeSha256ForTest(statePayload),
+            "Backend lifecycle integrity hashing is not deterministic.");
+        Require(
+            InstallerMaintenanceFence.IsMutatingCommand(
+                "backend",
+                ["enable"]) &&
+            InstallerMaintenanceFence.IsMutatingCommand(
+                "session",
+                ["start"]) &&
+            InstallerMaintenanceFence.IsMutatingCommand(
+                "recovery",
+                ["install"]) &&
+            !InstallerMaintenanceFence.IsMutatingCommand(
+                "backend",
+                ["status"]) &&
+            !InstallerMaintenanceFence.IsMutatingCommand(
+                "agent",
+                ["run", "--background"]),
+            "Installer-maintenance mutation classification is unsafe.");
+        Require(
+            InstallerMaintenanceFence.RequiresSerializedAccessForTest(
+                "backend",
+                ["status", "--maintenance-owner-pid", "1234"],
+                fencePresent: true) &&
+            !InstallerMaintenanceFence.RequiresSerializedAccessForTest(
+                "backend",
+                ["status"],
+                fencePresent: true) &&
+            InstallerMaintenanceFence.RequiresSerializedAccessForTest(
+                "backend",
+                ["enable"],
+                fencePresent: false) &&
+            !InstallerMaintenanceFence.RequiresSerializedAccessForTest(
+                "maintenance",
+                ["begin", "--owner-pid", "1234"],
+                fencePresent: true) &&
+            !InstallerMaintenanceFence.RequiresSerializedAccessForTest(
+                "maintenance",
+                ["recovery-task-was-present", "--owner-pid", "1234"],
+                fencePresent: true),
+            "Owner-tagged status probes do not enter serialized maintenance access.");
+        Require(
+            InstallerMaintenanceFence.IsOwnerlessPhysicalRecoveryForTest(
+                "session",
+                ["recover"]) &&
+            !InstallerMaintenanceFence.IsOwnerlessPhysicalRecoveryForTest(
+                "session",
+                ["start"]),
+            "Exact physical recovery is not available safely during interrupted maintenance.");
+        Require(
+            InstallerMaintenanceFence
+                .MustBootstrapBeforeProtectedStateForTest(
+                    protectionInitialized: false) &&
+            !InstallerMaintenanceFence
+                .MustBootstrapBeforeProtectedStateForTest(
+                    protectionInitialized: true),
+            "Legacy installer maintenance can touch protected state before its typed recovery bootstrap.");
+        Require(
+            InstallerMaintenanceFence.ManagedVddBootstrapAllowedForTest(
+                BackendPreferenceState.Enabled,
+                existingBackendWasEnabled: null) &&
+            !InstallerMaintenanceFence.ManagedVddBootstrapAllowedForTest(
+                BackendPreferenceState.Disabled,
+                existingBackendWasEnabled: null) &&
+            InstallerMaintenanceFence.ManagedVddBootstrapAllowedForTest(
+                BackendPreferenceState.Disabled,
+                existingBackendWasEnabled: true) &&
+            !InstallerMaintenanceFence.ManagedVddBootstrapAllowedForTest(
+                BackendPreferenceState.Enabled,
+                existingBackendWasEnabled: false),
+            "Installer managed-VDD recovery does not preserve the durable enabled/paused snapshot across an interrupted upgrade.");
+        var olderMaintenanceState = new InstallerMaintenanceState(
+            1,
+            1234,
+            DateTimeOffset.UtcNow.AddMinutes(-2),
+            DateTimeOffset.UtcNow.AddMinutes(-1),
+            BackendWasEnabled: false,
+            RescueAgentTaskWasPresent: false,
+            RecoveryTaskWasPresent: false);
+        var newerMaintenanceState = olderMaintenanceState with
+        {
+            OwnerProcessId = 5678,
+            OwnerStartedAtUtc = DateTimeOffset.UtcNow.AddSeconds(-30),
+            BeganAtUtc = DateTimeOffset.UtcNow,
+        };
+        Require(
+            InstallerMaintenanceFence.SelectNewestValidStateForTest(
+                olderMaintenanceState,
+                newerMaintenanceState,
+                anyRecordExists: true) == newerMaintenanceState &&
+            InstallerMaintenanceFence.CanRepairInterruptedFirstPublicationForTest(
+                primaryExists: false,
+                primary: null,
+                backupExists: true,
+                backup: null),
+            "Installer-maintenance redundant selection or torn first-publication recovery failed.");
+        Require(
+            InstallerMaintenanceFence.CanEndForTest(
+                backendIsEnabled: true,
+                backendWasEnabled: true,
+                rescueAgentTaskWasPresent: true,
+                recoveryTaskWasPresent: true,
+                ExactScheduledTaskState.Present,
+                ExactScheduledTaskState.Present) &&
+            !InstallerMaintenanceFence.CanEndForTest(
+                backendIsEnabled: true,
+                backendWasEnabled: true,
+                rescueAgentTaskWasPresent: true,
+                recoveryTaskWasPresent: true,
+                ExactScheduledTaskState.Missing,
+                ExactScheduledTaskState.Present) &&
+            InstallerMaintenanceFence.CanEndForTest(
+                backendIsEnabled: false,
+                backendWasEnabled: true,
+                rescueAgentTaskWasPresent: true,
+                recoveryTaskWasPresent: true,
+                ExactScheduledTaskState.Missing,
+                ExactScheduledTaskState.Missing) &&
+            !InstallerMaintenanceFence.CanEndForTest(
+                backendIsEnabled: false,
+                backendWasEnabled: false,
+                rescueAgentTaskWasPresent: false,
+                recoveryTaskWasPresent: false,
+                ExactScheduledTaskState.Present,
+                ExactScheduledTaskState.Missing) &&
+            !InstallerMaintenanceFence.CanEndForTest(
+                backendIsEnabled: true,
+                backendWasEnabled: false,
+                rescueAgentTaskWasPresent: false,
+                recoveryTaskWasPresent: false,
+                ExactScheduledTaskState.Missing,
+                ExactScheduledTaskState.Missing),
+            "Installer maintenance can clear without satisfying its durable safeguard obligations.");
+        Require(
+            BackendLifecycleStateStore.ClassifyUninstallMarkerForTest(null) ==
+                UninstallTransactionStage.None &&
+            BackendLifecycleStateStore.ClassifyUninstallMarkerForTest(
+                "vita-moonlight-uninstall-in-progress-v1") ==
+                UninstallTransactionStage.InProgress &&
+            BackendLifecycleStateStore.ClassifyUninstallMarkerForTest(
+                "vita-moonlight-uninstall-finalized-v1") ==
+                UninstallTransactionStage.Finalized &&
+            BackendLifecycleStateStore.ClassifyUninstallMarkerForTest(
+                "torn") == UninstallTransactionStage.Invalid,
+            "Uninstall transaction stage classification failed closed.");
+        var managedSunshine = new SunshineBackendSnapshot(
+            SunshineBackendKind.Service,
+            "SunshineService",
+            SunshineBackendController.ServiceAutoStart,
+            true,
+            null,
+            true);
+        Require(
+            SunshineBackendController.MatchesDesiredState(
+                BackendDesiredState.Disabled,
+                managedSunshine,
+                new SunshineBackendObservation(
+                    SunshineBackendKind.Service,
+                    Exists: true,
+                    Running: false,
+                    SunshineBackendController.ServiceDisabled,
+                    DelayedAutoStart: true,
+                    Error: null)) &&
+            SunshineBackendController.MatchesDesiredState(
+                BackendDesiredState.Enabled,
+                managedSunshine,
+                new SunshineBackendObservation(
+                    SunshineBackendKind.Service,
+                    Exists: true,
+                    Running: true,
+                    SunshineBackendController.ServiceAutoStart,
+                    DelayedAutoStart: true,
+                Error: null)),
+            "Legacy Sunshine snapshot compatibility validation failed.");
+        var uninstallHandoffState =
+            BackendLifecycleStateStore.WithNextRevision(
+                disabledBackendState with
+                {
+                    Sunshine = managedSunshine,
+                },
+                BackendDesiredState.Disabled,
+                BackendLifecycleStatus.Partial,
+                "temporary uninstall handoff");
+        Require(
+            uninstallHandoffState.DesiredState ==
+                BackendDesiredState.Disabled &&
+            uninstallHandoffState.RestoreRecoveryTask &&
+            uninstallHandoffState.RestoreRescueAgent &&
+            uninstallHandoffState.ManagedVirtualDisplayInstancesToRestore
+                .SequenceEqual([@"ROOT\DISPLAY\0001"]) &&
+            uninstallHandoffState.Sunshine == managedSunshine,
+            "Uninstall handoff state lost the disabled intent or original restore snapshot.");
+        var suspendIntent = new DisplaySuspendIntentState(
+            1,
+            Guid.NewGuid().ToString("N"),
+            1234,
+            DateTimeOffset.UtcNow.AddMinutes(-1),
+            DateTimeOffset.UtcNow);
+        Require(
+            DisplaySuspendIntentStore.ClassifyForTest(
+                recordExists: false,
+                state: null,
+                ownerIsAlive: null) ==
+                DisplaySuspendIntentDisposition.Missing &&
+            DisplaySuspendIntentStore.ClassifyForTest(
+                recordExists: true,
+                suspendIntent,
+                ownerIsAlive: true) ==
+                DisplaySuspendIntentDisposition.Active &&
+            DisplaySuspendIntentStore.ClassifyForTest(
+                recordExists: true,
+                suspendIntent,
+                ownerIsAlive: null) ==
+                DisplaySuspendIntentDisposition.Active &&
+            DisplaySuspendIntentStore.ClassifyForTest(
+                recordExists: true,
+                suspendIntent,
+                ownerIsAlive: false) ==
+                DisplaySuspendIntentDisposition.Stale &&
+            DisplaySuspendIntentStore.ClassifyForTest(
+                recordExists: true,
+                state: null,
+                ownerIsAlive: false) ==
+                DisplaySuspendIntentDisposition.Stale,
+            "Windows suspend intent classification did not fail physical-safe.");
+        Require(
+            !DisplaySuspendIntentStore.BlocksDisplayMutationForTest(
+                DisplaySuspendIntentDisposition.Missing,
+                DisplaySuspendIntentDisposition.Missing) &&
+            DisplaySuspendIntentStore.BlocksDisplayMutationForTest(
+                DisplaySuspendIntentDisposition.Missing,
+                DisplaySuspendIntentDisposition.Active) &&
+            DisplaySuspendIntentStore.BlocksDisplayMutationForTest(
+                DisplaySuspendIntentDisposition.Active,
+                DisplaySuspendIntentDisposition.Missing) &&
+            DisplaySuspendIntentStore.BlocksDisplayMutationForTest(
+                DisplaySuspendIntentDisposition.Stale,
+                DisplaySuspendIntentDisposition.Missing),
+            "A Windows suspend transition can escape the before/after display-lease fence.");
+        Require(
+            ResumeTopologyClassifier.Classify(
+                activePhysicalPaths: 1,
+                activeManagedVirtualPaths: 0,
+                pendingTransactionAtWake: null,
+                currentPendingTransaction: null,
+                stableSamples: 2,
+                minimumRecoveryAgeReached: false) ==
+            ResumeTopologyDecision.Healthy,
+            "A stable physical-only resume topology was not accepted as healthy.");
+        Require(
+            ResumeTopologyClassifier.Classify(
+                activePhysicalPaths: 0,
+                activeManagedVirtualPaths: 1,
+                pendingTransactionAtWake: null,
+                currentPendingTransaction: null,
+                stableSamples: 3,
+                minimumRecoveryAgeReached: true) ==
+            ResumeTopologyDecision.Recover,
+            "A stable managed-VDD-only resume topology was not recovered.");
+        Require(
+            ResumeTopologyClassifier.Classify(
+                activePhysicalPaths: 1,
+                activeManagedVirtualPaths: 1,
+                pendingTransactionAtWake: null,
+                currentPendingTransaction: null,
+                stableSamples: 3,
+                minimumRecoveryAgeReached: true) ==
+            ResumeTopologyDecision.Recover,
+            "A stable mixed physical/VDD resume topology was not recovered.");
+        Require(
+            ResumeTopologyClassifier.Classify(
+                activePhysicalPaths: 1,
+                activeManagedVirtualPaths: 0,
+                pendingTransactionAtWake: null,
+                currentPendingTransaction: null,
+                stableSamples: 2,
+                minimumRecoveryAgeReached: true) ==
+            ResumeTopologyDecision.Healthy,
+            "An unrelated virtual display affected physical-only resume classification.");
+        Require(
+            ResumeTopologyClassifier.Classify(
+                activePhysicalPaths: 1,
+                activeManagedVirtualPaths: 0,
+                pendingTransactionAtWake: "same-transaction",
+                currentPendingTransaction: "same-transaction",
+                stableSamples: 3,
+                minimumRecoveryAgeReached: true) ==
+            ResumeTopologyDecision.Recover,
+            "An interrupted pre-sleep display transaction was not recovered.");
+        Require(
+            ResumeTopologyClassifier.Classify(
+                activePhysicalPaths: 0,
+                activeManagedVirtualPaths: 1,
+                pendingTransactionAtWake: null,
+                currentPendingTransaction: "new-transaction",
+                stableSamples: 3,
+                minimumRecoveryAgeReached: true) ==
+            ResumeTopologyDecision.Healthy,
+            "A new post-resume streaming transaction was incorrectly recovered.");
+        Require(
+            ExactScheduledTaskManager.IsNotFound(
+                new InvalidOperationException(
+                    "wrapped task lookup failure",
+                    new COMException(
+                        "missing task",
+                        unchecked((int)0x80070003)))) &&
+            !ExactScheduledTaskManager.IsNotFound(
+                new UnauthorizedAccessException(
+                    "task access denied")),
+            "Exact scheduled-task missing/error classification failed.");
+        if (OperatingSystem.IsWindows())
+        {
+            ManagedStreamBridgeFirewall
+                .VerifyMissingRuleInteropForSelfTest();
+            SchannelServerCertificate.VerifyRuntimeForSelfTest();
+        }
+        RunOwnedStateCleanupSelfTest();
+        Require(
             DisplayWizardAdapter.ClassifyPnPUtilExitCode(0) == PnPUtilExitDisposition.Success &&
             DisplayWizardAdapter.ClassifyPnPUtilExitCode(259) == PnPUtilExitDisposition.ContinueToVerification &&
             DisplayWizardAdapter.ClassifyPnPUtilExitCode(50) == PnPUtilExitDisposition.Failure &&
@@ -837,7 +2086,23 @@ internal static class Program
         var roundTrip = WindowsDisplayNative.BytesToStructures<DisplayPathInfo>(WindowsDisplayNative.StructuresToBytes(sample), 1);
         Require(roundTrip[0].Flags == 123 && roundTrip[0].SourceInfo.Id == 7, "Display topology serialization failed.");
         var command = SunshineConfigurator.BuildStartCommand(@"C:\Program Files\Vita Moonlight\VitaMoonlight.Host.exe");
-        Require(command.Contains("%SUNSHINE_CLIENT_WIDTH%", StringComparison.Ordinal), "Sunshine hook generation failed.");
+        Require(
+            command.Contains("session hook-start", StringComparison.Ordinal) &&
+            command.Contains("%SUNSHINE_CLIENT_WIDTH%", StringComparison.Ordinal) &&
+            !command.Contains(" session start ", StringComparison.Ordinal),
+            "Sunshine tolerant hook generation failed.");
+        Require(
+            TryDescribeUnrelatedSunshineHook(
+                "session",
+                ["hook-start", "--width", "1920", "--height", "1080", "--fps", "120"],
+                out var ignoredHook) &&
+            ignoredHook.Contains("left unchanged", StringComparison.OrdinalIgnoreCase),
+            "An unrelated Sunshine client would not bypass host display state safely.");
+        Require(!TryDescribeUnrelatedSunshineHook(
+                "session",
+                ["hook-start", "--width", "960", "--height", "544", "--fps", "60"],
+                out _),
+            "A recognized Vita client was incorrectly classified as an unrelated no-op.");
 
         var sunshineTestDirectory = Path.Combine(Path.GetTempPath(), $"vita-moonlight-self-test-{Guid.NewGuid():N}");
         try
@@ -845,6 +2110,49 @@ internal static class Program
             Directory.CreateDirectory(sunshineTestDirectory);
             using var ownershipJournalTest = SunshineOwnershipJournal.UseTestFile(
                 Path.Combine(sunshineTestDirectory, "ownership-test.json"));
+            var hostOwnershipClassification = new SunshineOwnershipState();
+            SunshineOwnershipJournal.GetOrAddLocation(
+                hostOwnershipClassification,
+                Path.Combine(sunshineTestDirectory, "Apollo"),
+                "apollo");
+            Require(
+                SunshineOwnershipJournal.HasLocationForHost(
+                    hostOwnershipClassification,
+                    "apollo") &&
+                !SunshineOwnershipJournal.HasLocationForHost(
+                    hostOwnershipClassification,
+                    "sunshine"),
+                "Streaming-host ownership could not isolate experimental Apollo cleanup from Sunshine cleanup.");
+
+            var invalidConfigurationDirectory = Path.Combine(
+                sunshineTestDirectory,
+                "invalid-preflight");
+            Directory.CreateDirectory(invalidConfigurationDirectory);
+            File.WriteAllText(
+                Path.Combine(invalidConfigurationDirectory, "apps.json"),
+                "{ invalid json");
+            var invalidConfigurationRejected = false;
+            try
+            {
+                SunshineConfigurator.Configure(
+                    HostSettings.Default with
+                    {
+                        SunshineConfigDirectory = invalidConfigurationDirectory,
+                        IntegrateAllSunshineApps = false,
+                    },
+                    @"C:\Program Files\Vita Moonlight Host\VitaMoonlight.Host.exe");
+            }
+            catch (JsonException)
+            {
+                invalidConfigurationRejected = true;
+            }
+            Require(
+                invalidConfigurationRejected &&
+                !File.Exists(Path.Combine(
+                    invalidConfigurationDirectory,
+                    "apps.json.vita-moonlight.backup")),
+                "A failed configuration preflight left an unowned apps.json backup.");
+
             File.WriteAllText(Path.Combine(sunshineTestDirectory, "apps.json"), """
                 {
                   "apps": [
@@ -855,22 +2163,30 @@ internal static class Program
                   ]
                 }
                 """);
-            File.WriteAllText(Path.Combine(sunshineTestDirectory, "sunshine.log"), """
-                [test]: Info: Currently available display devices:
-                [
-                  {
-                    "device_id": "{11111111-2222-3333-4444-555555555555}",
-                    "display_name": "",
-                    "edid": { "manufacturer_id": "MTT", "product_code": "1337" },
-                    "friendly_name": "VDD by MTT",
-                    "info": null
-                  }
-                ]
+            File.WriteAllText(
+                Path.Combine(sunshineTestDirectory, "sunshine.conf"),
+                """
+                unrelated = preserved
+                min_log_level = info
+                output_name = {AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE}
+                global_prep_cmd = [{"do":"user-prep","undo":"user-undo","elevated":false,"extension":{"value":7}}]
                 """);
+            var priorInfoLoggingOwnership = new SunshineOwnershipState();
+            var priorInfoLoggingLocation = SunshineOwnershipJournal
+                .GetOrAddLocation(
+                    priorInfoLoggingOwnership,
+                    sunshineTestDirectory,
+                    "sunshine");
+            priorInfoLoggingLocation.Values["min_log_level"] =
+                new SunshineOwnedValue(
+                    OriginalPresent: true,
+                    OriginalValue: "warning",
+                    AppliedValue: "info");
+            SunshineOwnershipJournal.Save(priorInfoLoggingOwnership);
             var integrationSettings = HostSettings.Default with { SunshineConfigDirectory = sunshineTestDirectory };
             var integrationResult = SunshineConfigurator.Configure(integrationSettings, @"C:\Program Files\Vita Moonlight Host\VitaMoonlight.Host.exe");
             Require(integrationResult.CoveredApplicationCount == 2, "Every-app Sunshine integration count failed.");
-            Require(integrationResult.UsesNativeDisplayManagement, "Sunshine native display management was not selected.");
+            Require(integrationResult.UsesAuthenticatedStreamBoundary, "Authenticated Vita stream-boundary integration was not selected.");
             using var integratedApps = JsonDocument.Parse(File.ReadAllText(Path.Combine(sunshineTestDirectory, "apps.json")));
             foreach (var app in integratedApps.RootElement.GetProperty("apps").EnumerateArray())
             {
@@ -884,27 +2200,88 @@ internal static class Program
             Require(steamApp.GetProperty("prep-cmd").EnumerateArray().Any(prep =>
                 prep.GetProperty("do").GetString() == "steam://open/bigpicture"),
                 "Existing Sunshine preparation commands were not preserved.");
-            var nativeConfiguration = File.ReadAllLines(Path.Combine(sunshineTestDirectory, "sunshine.conf"));
-            Require(nativeConfiguration.Contains("output_name = {11111111-2222-3333-4444-555555555555}"),
-                "Sunshine virtual-display selection failed.");
-            Require(nativeConfiguration.Contains("dd_configuration_option = ensure_only_display"),
-                "Sunshine exclusive-display configuration failed.");
-            Require(nativeConfiguration.Contains("dd_refresh_rate_option = manual"),
-                "Sunshine fixed virtual-display refresh configuration failed.");
-            Require(nativeConfiguration.Contains("dd_manual_refresh_rate = 60"),
-                "Sunshine virtual-display refresh rate failed.");
-            Require(nativeConfiguration.Any(line => line.Contains(
-                    "{\"final_resolution\":\"960x544\"}", StringComparison.Ordinal)),
-                "Sunshine native-resolution fallback failed.");
-            Require(nativeConfiguration.Contains("dd_config_revert_on_disconnect = enabled"),
-                "Sunshine disconnect recovery configuration failed.");
-            Require(SunshineConfigurator.IsNativeDisplayManagementReady(sunshineTestDirectory),
-                "Sunshine native display lifecycle readiness check failed.");
+            var nativeConfiguration = File.ReadAllLines(
+                Path.Combine(sunshineTestDirectory, "sunshine.conf"));
+            Require(nativeConfiguration.Count(line =>
+                        line.StartsWith("output_name =", StringComparison.OrdinalIgnoreCase)) == 1 &&
+                    nativeConfiguration.Single(line =>
+                            line.StartsWith("output_name =", StringComparison.OrdinalIgnoreCase))
+                        .Split('=', 2)[1].Trim().Length == 0,
+                "Sunshine retained a pinned output instead of selecting the active display after handoff.");
+            Require(!nativeConfiguration.Any(line =>
+                    line.StartsWith("dd_resolution_option =", StringComparison.OrdinalIgnoreCase) ||
+                    line.StartsWith("dd_refresh_rate_option =", StringComparison.OrdinalIgnoreCase) ||
+                    line.StartsWith("dd_manual_refresh_rate =", StringComparison.OrdinalIgnoreCase) ||
+                    line.StartsWith("dd_mode_remapping =", StringComparison.OrdinalIgnoreCase) ||
+                    line.StartsWith("dd_hdr_option =", StringComparison.OrdinalIgnoreCase) ||
+                    line.StartsWith("dd_config_revert_delay =", StringComparison.OrdinalIgnoreCase)),
+                "Sunshine retained Vita-owned native display directives.");
+            Require(nativeConfiguration.Contains("dd_configuration_option = disabled") &&
+                    nativeConfiguration.Contains("dd_config_revert_on_disconnect = disabled"),
+                "Sunshine native display management was not disabled for companion-owned handoff.");
+            Require(nativeConfiguration.Contains("min_log_level = warning") &&
+                    !SunshineOwnershipJournal.Load().Locations.Single()
+                        .Values.ContainsKey("min_log_level"),
+                "Authenticated handoff did not restore and retire the prior Vita-owned Sunshine INFO log level.");
+            var globalPrepLine = nativeConfiguration.Single(line =>
+                line.StartsWith("global_prep_cmd =", StringComparison.OrdinalIgnoreCase));
+            var globalPrep = JsonNode.Parse(
+                globalPrepLine[(globalPrepLine.IndexOf('=') + 1)..].Trim())!.AsArray();
+            Require(globalPrep.Count == 1 &&
+                    globalPrep[0]!["do"]!.GetValue<string>() == "user-prep" &&
+                    globalPrep[0]!["extension"]!["value"]!.GetValue<int>() == 7,
+                "Authenticated handoff changed an unrelated Sunshine global preparation entry.");
+            Require(SunshineConfigurator.IsAuthenticatedStreamBoundaryConfigurationReady(
+                    sunshineTestDirectory,
+                    integrationSettings.ForceSdr),
+                "Authenticated stream-boundary Sunshine configuration readiness failed.");
+            var staleGlobalCommands = globalPrep.DeepClone().AsArray();
+            staleGlobalCommands.Add(new JsonObject
+            {
+                ["do"] = SunshineConfigurator.BuildStartCommand(
+                    @"C:\Program Files\Vita Moonlight Host\VitaMoonlight.Host.exe"),
+                ["undo"] = SunshineConfigurator.BuildStopCommand(
+                    @"C:\Program Files\Vita Moonlight Host\VitaMoonlight.Host.exe"),
+                ["elevated"] = true,
+            });
             File.WriteAllLines(
                 Path.Combine(sunshineTestDirectory, "sunshine.conf"),
-                nativeConfiguration.Where(line => !line.StartsWith("dd_mode_remapping =", StringComparison.OrdinalIgnoreCase)));
-            Require(!SunshineConfigurator.IsNativeDisplayManagementReady(sunshineTestDirectory),
-                "Sunshine readiness accepted a missing safe-resolution mapping.");
+                nativeConfiguration.Select(line => line.StartsWith(
+                        "global_prep_cmd =",
+                        StringComparison.OrdinalIgnoreCase)
+                    ? $"global_prep_cmd = {staleGlobalCommands.ToJsonString()}"
+                    : line));
+            Require(!SunshineConfigurator.IsAuthenticatedStreamBoundaryConfigurationReady(
+                    sunshineTestDirectory,
+                    integrationSettings.ForceSdr),
+                "Sunshine readiness accepted an unsafe stale global Vita display hook.");
+            File.WriteAllLines(Path.Combine(sunshineTestDirectory, "sunshine.conf"), nativeConfiguration);
+
+            var readinessKeys = new[]
+            {
+                "dd_configuration_option = disabled",
+                "dd_config_revert_on_disconnect = disabled",
+                "controller = enabled",
+                "gamepad = auto",
+                "motion_as_ds4 = enabled",
+                "touchpad_as_ds4 = enabled",
+                "keyboard = enabled",
+                "mouse = enabled",
+                "native_pen_touch = enabled",
+            };
+            foreach (var readinessKey in readinessKeys)
+            {
+                File.WriteAllLines(
+                    Path.Combine(sunshineTestDirectory, "sunshine.conf"),
+                    nativeConfiguration.Where(line => !string.Equals(
+                        line,
+                        readinessKey,
+                        StringComparison.OrdinalIgnoreCase)));
+                Require(!SunshineConfigurator.IsAuthenticatedStreamBoundaryConfigurationReady(
+                        sunshineTestDirectory,
+                        integrationSettings.ForceSdr),
+                    $"Sunshine readiness accepted missing owned key '{readinessKey}'.");
+            }
             File.WriteAllLines(Path.Combine(sunshineTestDirectory, "sunshine.conf"), nativeConfiguration);
             File.WriteAllText(Path.Combine(sunshineTestDirectory, "sunshine-reversed.log"), """
                 [test]: Info: Currently available display devices:
@@ -933,6 +2310,41 @@ internal static class Program
                     timeoutMilliseconds: 0,
                     pollMilliseconds: 1) is null,
                 "Sunshine display enumeration timeout failed.");
+            var staleInventoryAt = DateTimeOffset.Now.AddMinutes(-10);
+            var freshInventoryAt = DateTimeOffset.Now;
+            var generationLogPath = Path.Combine(
+                sunshineTestDirectory,
+                "sunshine-generation.log");
+            File.WriteAllText(generationLogPath, $$"""
+                [{{staleInventoryAt:yyyy-MM-dd HH:mm:ss.fff}}]: Info: Currently available display devices:
+                [
+                  {
+                    "device_id": "{77777777-7777-7777-7777-777777777777}",
+                    "friendly_name": "VDD by MTT"
+                  }
+                ]
+                """);
+            Require(SunshineConfigurator.FindManagedDisplayDeviceId(
+                    generationLogPath,
+                    null,
+                    freshInventoryAt.AddMinutes(-1)) is null,
+                "Sunshine display selection accepted inventory from before the current driver/service generation.");
+            File.AppendAllText(generationLogPath, $$"""
+
+                [{{freshInventoryAt:yyyy-MM-dd HH:mm:ss.fff}}]: Info: Currently available display devices:
+                [
+                  {
+                    "device_id": "{88888888-8888-8888-8888-888888888888}",
+                    "friendly_name": "VDD by MTT"
+                  }
+                ]
+                """);
+            Require(SunshineConfigurator.FindManagedDisplayDeviceId(
+                    generationLogPath,
+                    null,
+                    freshInventoryAt.AddSeconds(-1)) ==
+                    "{88888888-8888-8888-8888-888888888888}",
+                "Sunshine display selection rejected fresh current-generation inventory.");
             File.WriteAllText(Path.Combine(sunshineTestDirectory, "sunshine-stale.log"), """
                 [old]: Info: Currently available display devices:
                 [
@@ -994,11 +2406,30 @@ internal static class Program
                     "{66666666-6666-6666-6666-666666666666}",
                 "An explicit Sunshine display match could not select an alternate virtual display.");
 
+            SunshineConfigurator.Configure(
+                integrationSettings,
+                @"C:\Program Files\Vita Moonlight Host\VitaMoonlight.Host.exe");
+            var reconfiguredLines = File.ReadAllLines(
+                Path.Combine(sunshineTestDirectory, "sunshine.conf"));
+            var reconfiguredGlobalLine = reconfiguredLines.Single(line =>
+                line.StartsWith("global_prep_cmd =", StringComparison.OrdinalIgnoreCase));
+            var reconfiguredGlobalPrep = JsonNode.Parse(
+                reconfiguredGlobalLine[(reconfiguredGlobalLine.IndexOf('=') + 1)..]
+                    .Trim())!.AsArray();
+            Require(reconfiguredGlobalPrep.Count == 1 &&
+                    reconfiguredGlobalPrep.Count(command =>
+                        command?["do"]?.GetValue<string>().Contains(
+                            "VitaMoonlight.Host",
+                            StringComparison.OrdinalIgnoreCase) == true) == 0,
+                "Sunshine reconfiguration installed an unsafe global display hook.");
+
             var cleanupResult = SunshineConfigurator.RemoveManagedIntegration();
             Require(!cleanupResult.RemovedGeneratedApplication,
-                "Native all-app configuration unexpectedly created a disposable Sunshine application.");
+                "Authenticated all-app configuration unexpectedly created a disposable Sunshine application.");
+            Require(cleanupResult.RemovedHooks == 0,
+                "Authenticated all-app cleanup unexpectedly removed a Sunshine hook.");
             Require(cleanupResult.RemovedNativeDisplaySettings,
-                "Uninstall cleanup retained the managed Sunshine display block.");
+                "Uninstall cleanup retained owned Sunshine settings.");
             Require(!File.Exists(Path.Combine(
                     sunshineTestDirectory,
                     "apps.json.vita-moonlight.backup")),
@@ -1007,7 +2438,7 @@ internal static class Program
                 File.ReadAllText(Path.Combine(sunshineTestDirectory, "apps.json")));
             Require(!cleanedApps.RootElement.GetProperty("apps").EnumerateArray().Any(app =>
                     app.GetProperty("name").GetString() == "Vita Moonlight"),
-                "Native all-app configuration created a redundant Vita application.");
+                "Authenticated all-app configuration created a redundant Vita application.");
             var cleanedSteam = cleanedApps.RootElement.GetProperty("apps").EnumerateArray().First(app =>
                 app.GetProperty("name").GetString() == "Steam Big Picture");
             Require(cleanedSteam.GetProperty("prep-cmd").EnumerateArray().Any(prep =>
@@ -1015,18 +2446,140 @@ internal static class Program
                 "Uninstall cleanup removed a user-owned Sunshine preparation command.");
             var cleanedConfiguration = File.ReadAllLines(
                 Path.Combine(sunshineTestDirectory, "sunshine.conf"));
+            var cleanedGlobalLine = cleanedConfiguration.Single(line =>
+                line.StartsWith("global_prep_cmd =", StringComparison.OrdinalIgnoreCase));
+            var cleanedGlobalPrep = JsonNode.Parse(
+                cleanedGlobalLine[(cleanedGlobalLine.IndexOf('=') + 1)..]
+                    .Trim())!.AsArray();
+            Require(cleanedGlobalPrep.Count == 1 &&
+                    cleanedGlobalPrep[0]?["do"]?.GetValue<string>() == "user-prep" &&
+                    cleanedGlobalPrep[0]?["extension"]?["value"]?.GetValue<int>() == 7,
+                "Uninstall cleanup changed or removed an unrelated global preparation entry.");
             Require(!cleanedConfiguration.Any(line =>
                     line.StartsWith("dd_configuration_option =", StringComparison.OrdinalIgnoreCase)),
                 "Uninstall cleanup retained a newly added Sunshine display setting.");
             Require(!cleanedConfiguration.Any(line =>
                     line.StartsWith("controller =", StringComparison.OrdinalIgnoreCase)),
                 "Uninstall cleanup retained a newly added Sunshine controller setting.");
+            Require(cleanedConfiguration.Contains("min_log_level = warning"),
+                "Uninstall cleanup changed the user's Sunshine log level.");
+            Require(cleanedConfiguration.Contains(
+                    "output_name = {AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE}"),
+                "Uninstall cleanup did not restore the user's prior Sunshine output selection.");
             var secondCleanup = SunshineConfigurator.RemoveManagedIntegration();
             Require(
                 secondCleanup.RemovedHooks == 0 &&
                 !secondCleanup.RemovedGeneratedApplication &&
                 !secondCleanup.RemovedNativeDisplaySettings,
                 "Sunshine uninstall cleanup was not idempotent.");
+
+            var falseBaselineLines = new List<string>
+            {
+                "unrelated = preserved",
+            };
+            SunshineConfigurator.ConfigureNativeDisplayManagement(
+                falseBaselineLines,
+                "{11111111-2222-3333-4444-555555555555}",
+                forceSdr: true);
+            var falseBaselineState = new SunshineOwnershipState
+            {
+                FormatVersion = SunshineOwnershipJournal.LegacyFormatVersion,
+            };
+            var falseBaselineOwnership =
+                SunshineOwnershipJournal.GetOrAddLocation(
+                    falseBaselineState,
+                    sunshineTestDirectory,
+                    "sunshine");
+            foreach (var line in falseBaselineLines.Where(line =>
+                         line.StartsWith("output_name =", StringComparison.OrdinalIgnoreCase) ||
+                         line.StartsWith("dd_", StringComparison.OrdinalIgnoreCase)))
+            {
+                var separator = line.IndexOf('=');
+                var key = line[..separator].Trim();
+                var value = line[(separator + 1)..].Trim();
+                falseBaselineOwnership.Values[key] =
+                    new SunshineOwnedValue(true, value, value);
+            }
+            var currentModeRemapping =
+                falseBaselineOwnership.Values["dd_mode_remapping"].AppliedValue;
+            const string legacyMalformedModeRemapping =
+                "{\"mixed\":[],\"resolution_only\":[" +
+                "{\"requested_resolution\":\"960x540\",\"final_resolution\":\"960x540\"}," +
+                "{\"requested_resolution\":\"960x544\",\"final_resolution\":\"960x544\"}," +
+                "{\"requested_resolution\":\"1280x720\",\"final_resolution\":\"1280x720\"}," +
+                "{\"final_resolution\":\"960x544\"}]," +
+                "\"refresh_rate_only\":[]}";
+            falseBaselineOwnership.Values["dd_mode_remapping"] =
+                new SunshineOwnedValue(
+                    true,
+                    legacyMalformedModeRemapping,
+                    currentModeRemapping);
+            var cleanupFalseBaselineState =
+                SunshineOwnershipJournal.Clone(falseBaselineState);
+            var incompleteFalseBaselineState =
+                SunshineOwnershipJournal.Clone(falseBaselineState);
+            Require(SunshineConfigurator.MigrateLegacyFalseBaselineOwnership(
+                    falseBaselineState,
+                    falseBaselineOwnership,
+                    falseBaselineLines) &&
+                    falseBaselineOwnership.Values.Values.All(value =>
+                        !value.OriginalPresent && value.OriginalValue is null),
+                "A complete v1 Vita display fingerprint was not reclassified from a false baseline.");
+            var incompleteOwnership =
+                incompleteFalseBaselineState.Locations.Single();
+            incompleteOwnership.Values["dd_manual_refresh_rate"] =
+                new SunshineOwnedValue(true, "59", "59");
+            Require(!SunshineConfigurator.MigrateLegacyFalseBaselineOwnership(
+                        incompleteFalseBaselineState,
+                        incompleteOwnership,
+                        falseBaselineLines) &&
+                    incompleteOwnership.Values.Values.All(value =>
+                        value.OriginalPresent),
+                "An incomplete v1 display fingerprint was incorrectly claimed as Vita-owned.");
+
+            File.WriteAllLines(
+                Path.Combine(sunshineTestDirectory, "sunshine.conf"),
+                falseBaselineLines);
+            SunshineOwnershipJournal.Save(cleanupFalseBaselineState);
+            var falseBaselineCleanup =
+                SunshineConfigurator.RemoveManagedIntegration();
+            var falseBaselineCleanedLines = File.ReadAllLines(
+                Path.Combine(sunshineTestDirectory, "sunshine.conf"));
+            Require(falseBaselineCleanup.RemovedNativeDisplaySettings &&
+                    falseBaselineCleanedLines.SequenceEqual(
+                        new[] { "unrelated = preserved" }),
+                "Uninstall restored a false v1 Vita display baseline instead of removing it.");
+
+            File.WriteAllLines(
+                Path.Combine(sunshineTestDirectory, "sunshine.conf"),
+                falseBaselineLines);
+            SunshineOwnershipJournal.Save(
+                SunshineOwnershipJournal.Clone(cleanupFalseBaselineState));
+            SunshineConfigurator.Configure(
+                integrationSettings,
+                @"C:\Program Files\Vita Moonlight Host\VitaMoonlight.Host.exe");
+            var upgradedFalseBaselineLines = File.ReadAllLines(
+                Path.Combine(sunshineTestDirectory, "sunshine.conf"));
+            var upgradedFalseBaselineOwnership =
+                SunshineOwnershipJournal.Load();
+            Require(
+                upgradedFalseBaselineOwnership.FormatVersion ==
+                    SunshineOwnershipJournal.CurrentFormatVersion &&
+                upgradedFalseBaselineOwnership.Locations.Single()
+                    .LegacyDisplayOwnershipMigrationCompleted == true &&
+                upgradedFalseBaselineLines.Any(line =>
+                    line.StartsWith("output_name =", StringComparison.OrdinalIgnoreCase) &&
+                    line.Split('=', 2)[1].Trim().Length == 0) &&
+                upgradedFalseBaselineLines.Contains(
+                    "dd_configuration_option = disabled") &&
+                !upgradedFalseBaselineLines.Any(line =>
+                    line.StartsWith("dd_mode_remapping =", StringComparison.OrdinalIgnoreCase)),
+                "Setup did not migrate the live v1 false baseline to companion-owned global handoff.");
+            SunshineConfigurator.RemoveManagedIntegration();
+            Require(File.ReadAllLines(
+                    Path.Combine(sunshineTestDirectory, "sunshine.conf"))
+                    .SequenceEqual(new[] { "unrelated = preserved" }),
+                "Cleanup after v1 setup migration restored retired native display settings.");
 
             var legacySettings = integrationSettings with
             {
@@ -1049,8 +2602,11 @@ internal static class Program
                         new JsonObject
                         {
                             ["do"] =
-                                SunshineConfigurator.BuildStartCommand(
-                                    @"C:\Program Files\Vita Moonlight Host\VitaMoonlight.Host.exe"),
+                                "cmd.exe /D /S /C \"\"C:\\Program Files\\Vita Moonlight Host\\" +
+                                "VitaMoonlight.Host.exe\" session start " +
+                                "--width %SUNSHINE_CLIENT_WIDTH% " +
+                                "--height %SUNSHINE_CLIENT_HEIGHT% " +
+                                "--fps %SUNSHINE_CLIENT_FPS%\"",
                             ["undo"] =
                                 SunshineConfigurator.BuildStopCommand(
                                     @"C:\Program Files\Vita Moonlight Host\VitaMoonlight.Host.exe"),
@@ -1065,11 +2621,80 @@ internal static class Program
             SunshineConfigurator.Configure(
                 legacySettings,
                 @"C:\Program Files\Vita Moonlight Host\VitaMoonlight.Host.exe");
+            Require(File.ReadAllLines(
+                    Path.Combine(sunshineTestDirectory, "sunshine.conf"))
+                    .Contains("min_log_level = info"),
+                "Explicit legacy hook mode did not retain its INFO log fallback.");
+            Require(SunshineConfigurator.IsManagedHookReady(
+                    sunshineTestDirectory,
+                    legacySettings.SunshineApplicationName,
+                    @"C:\Program Files\Vita Moonlight Host\VitaMoonlight.Host.exe"),
+                "Manual Sunshine hook readiness rejected an exact owned hook.");
+            var upgradedLegacyRoot = JsonNode.Parse(
+                File.ReadAllText(Path.Combine(sunshineTestDirectory, "apps.json")))!.AsObject();
+            var upgradedLegacyHooks = upgradedLegacyRoot["apps"]!.AsArray()
+                .OfType<JsonObject>()
+                .Single(app => app["name"]?.GetValue<string>() == "Vita Moonlight")
+                ["prep-cmd"]!.AsArray()
+                .OfType<JsonObject>()
+                .ToArray();
+            Require(
+                upgradedLegacyHooks.Length == 1 &&
+                upgradedLegacyHooks[0]["do"]?.GetValue<string>()?.Contains(
+                    "session hook-start",
+                    StringComparison.Ordinal) == true,
+                "Legacy strict Sunshine hook was not replaced by the tolerant boundary.");
+            var hookRemovedForReadiness = upgradedLegacyRoot.DeepClone().AsObject();
+            hookRemovedForReadiness["apps"]!.AsArray()
+                .OfType<JsonObject>()
+                .Single(app => app["name"]?.GetValue<string>() == "Vita Moonlight")
+                .Remove("prep-cmd");
+            File.WriteAllText(
+                Path.Combine(sunshineTestDirectory, "apps.json"),
+                hookRemovedForReadiness.ToJsonString(
+                    new JsonSerializerOptions { WriteIndented = true }));
+            Require(!SunshineConfigurator.IsManagedHookReady(
+                    sunshineTestDirectory,
+                    legacySettings.SunshineApplicationName,
+                    @"C:\Program Files\Vita Moonlight Host\VitaMoonlight.Host.exe"),
+                "Manual Sunshine hook readiness accepted a missing on-disk hook.");
+            File.WriteAllText(
+                Path.Combine(sunshineTestDirectory, "apps.json"),
+                upgradedLegacyRoot.ToJsonString(
+                    new JsonSerializerOptions { WriteIndented = true }));
+            var savedHookOwnership = SunshineOwnershipJournal.Load();
+            SunshineOwnershipJournal.Delete();
+            Require(!SunshineConfigurator.IsManagedHookReady(
+                    sunshineTestDirectory,
+                    legacySettings.SunshineApplicationName,
+                    @"C:\Program Files\Vita Moonlight Host\VitaMoonlight.Host.exe"),
+                "Manual Sunshine hook readiness accepted a hook without an exact ownership record.");
+            SunshineOwnershipJournal.Save(savedHookOwnership);
             var legacyCleanup = SunshineConfigurator.RemoveManagedIntegration();
             Require(
                 legacyCleanup.RemovedHooks == 1 &&
                 legacyCleanup.RemovedGeneratedApplication,
                 "Exact owned hook/application cleanup failed.");
+
+            SunshineConfigurator.Configure(
+                legacySettings,
+                @"C:\Program Files\Vita Moonlight Host\VitaMoonlight.Host.exe");
+            SunshineConfigurator.Configure(
+                integrationSettings,
+                @"C:\Program Files\Vita Moonlight Host\VitaMoonlight.Host.exe");
+            var nativeTransitionRoot = JsonNode.Parse(
+                File.ReadAllText(Path.Combine(sunshineTestDirectory, "apps.json")))!.AsObject();
+            Require(!nativeTransitionRoot["apps"]!.AsArray()
+                    .OfType<JsonObject>()
+                    .Any(app => string.Equals(
+                        app["name"]?.GetValue<string>(),
+                        "Vita Moonlight",
+                        StringComparison.OrdinalIgnoreCase)),
+                "Switching from manual hooks to global all-app mode retained the unchanged generated launcher.");
+            var nativeTransitionCleanup =
+                SunshineConfigurator.RemoveManagedIntegration();
+            Require(!nativeTransitionCleanup.RemovedGeneratedApplication,
+                "Native-mode cleanup claimed ownership of a generated launcher already removed during transition.");
 
             SunshineConfigurator.Configure(
                 legacySettings,
@@ -1106,6 +2731,54 @@ internal static class Program
             Require(
                 File.Exists(editedBackupPath),
                 "Cleanup deleted a backup whose owned fingerprint changed.");
+
+            SunshineConfigurator.Configure(
+                integrationSettings,
+                @"C:\Program Files\Vita Moonlight Host\VitaMoonlight.Host.exe");
+            var editedGlobalLines = File.ReadAllLines(
+                    Path.Combine(sunshineTestDirectory, "sunshine.conf"))
+                .ToList();
+            var editedGlobalCommands = new JsonArray
+            {
+                new JsonObject
+                {
+                    ["do"] = "user-prep",
+                    ["undo"] = "user-undo",
+                    ["elevated"] = false,
+                    ["extension"] = new JsonObject { ["value"] = 7 },
+                },
+                new JsonObject
+                {
+                    ["do"] = SunshineConfigurator.BuildStartCommand(
+                        @"C:\Program Files\Vita Moonlight Host\VitaMoonlight.Host.exe"),
+                    ["undo"] = SunshineConfigurator.BuildStopCommand(
+                        @"C:\Program Files\Vita Moonlight Host\VitaMoonlight.Host.exe"),
+                    ["elevated"] = true,
+                    ["user-note"] = "old modified Vita hook",
+                },
+            };
+            editedGlobalLines.Add(
+                $"global_prep_cmd = {editedGlobalCommands.ToJsonString()}");
+            File.WriteAllLines(
+                Path.Combine(sunshineTestDirectory, "sunshine.conf"),
+                editedGlobalLines);
+            SunshineConfigurator.Configure(
+                integrationSettings,
+                @"C:\Program Files\Vita Moonlight Host\VitaMoonlight.Host.exe");
+            var preservedGlobalLine = File.ReadAllLines(
+                    Path.Combine(sunshineTestDirectory, "sunshine.conf"))
+                .Single(line => line.StartsWith(
+                    "global_prep_cmd =",
+                    StringComparison.OrdinalIgnoreCase));
+            var migratedGlobalCommands = JsonNode.Parse(
+                preservedGlobalLine[(preservedGlobalLine.IndexOf('=') + 1)..]
+                    .Trim())!.AsArray();
+            Require(migratedGlobalCommands.Count == 1 &&
+                    migratedGlobalCommands[0]?["do"]?.GetValue<string>() ==
+                        "user-prep" &&
+                    migratedGlobalCommands[0]?["extension"]?["value"]?
+                        .GetValue<int>() == 7,
+                "Upgrade did not remove the obsolete Vita global hook while preserving an unrelated global command.");
         }
         finally
         {
@@ -1247,6 +2920,61 @@ internal static class Program
             "A replaced display-driver directory or stale identity record was accepted.");
         Require(VitaDisplayModes.RequireSupported(960, 544, 60) == VitaDisplayModes.Native,
             "Vita native runtime mode validation failed.");
+        var testedStreamModeCount = 0;
+        foreach (var desktopMode in VitaDisplayModes.Supported)
+        {
+            foreach (var streamFps in VitaDisplayModes.SupportedStreamFrameRates)
+            {
+                var streamMode = VitaDisplayModes.RequireSupportedStreamMode(
+                    desktopMode.Width,
+                    desktopMode.Height,
+                    streamFps);
+                Require(
+                    streamMode.DesktopMode == desktopMode &&
+                    streamMode.DesktopMode.Fps == VitaDisplayModes.DesktopRefreshRate &&
+                    streamMode.StreamFps == streamFps,
+                    $"Vita stream mode contract failed for {desktopMode.Width}x{desktopMode.Height} at {streamFps} FPS.");
+                Require(VitaDisplayModes.TryGetSupportedStreamMode(
+                        desktopMode.Width,
+                        desktopMode.Height,
+                        streamFps,
+                        out var hookMode) &&
+                    hookMode == streamMode,
+                    $"Tolerant hook classification missed {streamMode}.");
+                testedStreamModeCount++;
+            }
+        }
+        Require(testedStreamModeCount == 15,
+            "The exhaustive Vita resolution/frame-rate contract matrix was incomplete.");
+        foreach (var invalidStreamMode in new[]
+        {
+            (Width: 800, Height: 600, Fps: 60),
+            (Width: 1920, Height: 1080, Fps: 60),
+            (Width: 960, Height: 544, Fps: 23),
+            (Width: 960, Height: 544, Fps: 25),
+            (Width: 960, Height: 544, Fps: 61),
+        })
+        {
+            Require(!VitaDisplayModes.TryGetSupportedStreamMode(
+                    invalidStreamMode.Width,
+                    invalidStreamMode.Height,
+                    invalidStreamMode.Fps,
+                    out _),
+                $"Tolerant hook would mutate the display for unrelated mode {invalidStreamMode}.");
+            try
+            {
+                VitaDisplayModes.RequireSupportedStreamMode(
+                    invalidStreamMode.Width,
+                    invalidStreamMode.Height,
+                    invalidStreamMode.Fps);
+                throw new InvalidOperationException(
+                    $"Unsupported stream mode {invalidStreamMode} was accepted.");
+            }
+            catch (ArgumentOutOfRangeException)
+            {
+                // Expected: stream hooks accept only the public Vita contract.
+            }
+        }
         try
         {
             VitaDisplayModes.RequireSupported(800, 600, 60);
@@ -1259,7 +2987,14 @@ internal static class Program
         Require(
             HostRecoveryHotkeyWindow.ModeForHotkeyId(4) == VitaDisplayModes.Native &&
             HostRecoveryHotkeyWindow.ModeForHotkeyId(99) is null,
-            "In-stream native display-mode hotkey mapping failed.");
+            "Legacy display-mode hotkey mapping failed.");
+        Require(
+            !HostRecoveryAgentManager.LegacyModeHotkeysRequired(HostSettings.Default) &&
+            HostRecoveryAgentManager.LegacyModeHotkeysRequired(
+                HostSettings.Default with { IntegrateAllSunshineApps = false }) &&
+            HostRecoveryAgentManager.LegacyModeHotkeysRequired(
+                HostSettings.Default with { HostMode = "apollo" }),
+            "Legacy display-mode hotkey policy does not match the selected host path.");
         Require(
             VitaDisplayModes.Supported
                 .Select(HostRecoveryAgentManager.ModeHotkeyReadyEventName)
@@ -1272,6 +3007,12 @@ internal static class Program
         Require(!DisplayTopologyService.IsManagedVirtualDisplay(
             new DisplayDescriptor(0, "Physical Monitor", @"\\?\DISPLAY#ACME123#1", true, true)),
             "Physical display was incorrectly identified as managed virtual display.");
+        Require(
+            DisplayTopologyService.IsExactVitaVirtualDisplay(
+                new DisplayDescriptor(0, "VDD by MTT", @"\\?\DISPLAY#MTT1337#1", true, true)) &&
+            !DisplayTopologyService.IsExactVitaVirtualDisplay(
+                new DisplayDescriptor(0, "VDD by MTT MTT1337", @"\\?\DISPLAY#THIRDPARTY#1", true, true)),
+            "Vita topology authority was not bound exclusively to the exact MTT1337 monitor path.");
         var safeVirtualSelection = DisplayTopologyService.SelectVirtualDisplayForActivation(new[]
         {
             new DisplayDescriptor(0, "MTT Office Monitor", @"\\?\DISPLAY#PHYSICAL#1", true, true),
@@ -1279,6 +3020,71 @@ internal static class Program
         }, "MTT");
         Require(safeVirtualSelection?.FriendlyName == "VDD by MTT",
             "A configured virtual-display match was allowed to select a physical monitor.");
+        Require(DisplayTopologyService.SelectVirtualDisplayForActivation(new[]
+            {
+                new DisplayDescriptor(
+                    0,
+                    "Apollo Virtual Display",
+                    @"\\?\DISPLAY#APOLLO#1",
+                    true,
+                    true,
+                    WindowsDisplayNative.OutputTechnologyIndirectVirtual),
+            }, null) is null,
+            "Automatic virtual-display selection was allowed to hijack an unrelated VDD.");
+        Require(DisplayTopologyService.SelectVirtualDisplayForActivation(new[]
+            {
+                new DisplayDescriptor(
+                    0,
+                    "Apollo Virtual Display",
+                    @"\\?\DISPLAY#APOLLO#1",
+                    true,
+                    true,
+                    WindowsDisplayNative.OutputTechnologyIndirectVirtual),
+                new DisplayDescriptor(
+                    1,
+                    "VDD by MTT",
+                    @"\\?\DISPLAY#MTT1337#1",
+                    false,
+                    true,
+                    WindowsDisplayNative.OutputTechnologyIndirectVirtual),
+            }, null)?.FriendlyName == "VDD by MTT",
+            "Automatic virtual-display selection did not choose the managed VDD in a multi-VDD topology.");
+        Require(DisplayTopologyService.SelectVirtualDisplayForActivation(new[]
+            {
+                new DisplayDescriptor(
+                    0,
+                    "Legacy IddSampleDriver",
+                    @"\\?\DISPLAY#LEGACYIDD#1",
+                    false,
+                    true,
+                    WindowsDisplayNative.OutputTechnologyIndirectVirtual),
+                new DisplayDescriptor(
+                    1,
+                    "VDD by MTT",
+                    @"\\?\DISPLAY#MTT1337#1",
+                    false,
+                    true,
+                    WindowsDisplayNative.OutputTechnologyIndirectVirtual),
+            }, "MTT1337") is null,
+            "Exact Vita selection did not fail closed beside a competing legacy managed target.");
+        Require(DisplayTopologyService.SelectVirtualDisplayForActivation(new[]
+            {
+                new DisplayDescriptor(
+                    0,
+                    "Apollo Virtual Display",
+                    @"\\?\DISPLAY#APOLLO#1",
+                    false,
+                    true,
+                    WindowsDisplayNative.OutputTechnologyIndirectVirtual),
+                new DisplayDescriptor(
+                    1,
+                    "VDD by MTT",
+                    @"\\?\DISPLAY#MTT1337#1",
+                    false,
+                    true,
+                    WindowsDisplayNative.OutputTechnologyIndirectVirtual),
+            }, "APOLLO")?.DevicePath.Contains("MTT1337", StringComparison.OrdinalIgnoreCase) == true,
+            "The supported Sunshine selector honored arbitrary display-match text instead of exact Vita authority.");
         var verificationDisplays = DisplayTopologyService.SelectActivePhysicalDisplaysForVerification(new[]
         {
             new DisplayDescriptor(0, "Internal Panel", @"\\?\DISPLAY#INTERNAL#1", true, true),
@@ -1298,6 +3104,111 @@ internal static class Program
         });
         Require(recoveryDisplays.Length == 2 && recoveryDisplays.All(display => !DisplayTopologyService.IsManagedVirtualDisplay(display)),
             "Multi-monitor physical display recovery selection failed.");
+        var managedOnlyRecoveryPath =
+            DisplayTopologyService.SelectExactManagedVddOnlyRecoveryPath(
+            [
+                new DisplayDescriptor(
+                    0,
+                    "VDD by MTT",
+                    @"\\?\DISPLAY#MTT1337#1",
+                    true,
+                    true,
+                    WindowsDisplayNative.OutputTechnologyIndirectVirtual),
+            ]);
+        Require(
+            managedOnlyRecoveryPath?.FriendlyName == "VDD by MTT" &&
+            DisplayTopologyService.SelectExactManagedVddOnlyRecoveryPath(
+            [
+                managedOnlyRecoveryPath!,
+                new DisplayDescriptor(
+                    1,
+                    "Physical Monitor",
+                    @"\\?\DISPLAY#PHYSICAL#1",
+                    true,
+                    true,
+                    5),
+            ]) is null &&
+            DisplayTopologyService.SelectExactManagedVddOnlyRecoveryPath(
+            [
+                new DisplayDescriptor(
+                    0,
+                    "Apollo Virtual Display",
+                    @"\\?\DISPLAY#APOLLO#1",
+                    true,
+                    true,
+                    WindowsDisplayNative.OutputTechnologyIndirectVirtual),
+            ]) is null &&
+            DisplayTopologyService.SelectExactManagedVddOnlyRecoveryPath(
+            [
+                managedOnlyRecoveryPath!,
+                managedOnlyRecoveryPath! with
+                {
+                    PathIndex = 1,
+                    DevicePath = @"\\?\DISPLAY#MTT1337#2",
+                },
+            ]) is null,
+            "The old-install VDD-only recovery gate would touch a physical, unrelated, or ambiguous display topology.");
+        Require(
+            DisplayWizardAdapter.HasSingleManagedVddRestartTargetForTest(
+            [
+                new ManagedVddDeviceStatus(
+                    @"ROOT\DISPLAY\0001",
+                    Present: true,
+                    Enabled: true,
+                    DeviceStatus: 8,
+                    ProblemCode: 0),
+            ]) &&
+            !DisplayWizardAdapter.HasSingleManagedVddRestartTargetForTest(
+            [
+                new ManagedVddDeviceStatus(
+                    @"ROOT\DISPLAY\0001",
+                    Present: true,
+                    Enabled: true,
+                    DeviceStatus: 8,
+                    ProblemCode: 0),
+                new ManagedVddDeviceStatus(
+                    @"ROOT\DISPLAY\0002",
+                    Present: true,
+                    Enabled: true,
+                    DeviceStatus: 8,
+                    ProblemCode: 0),
+            ]) &&
+            !DisplayWizardAdapter.HasSingleManagedVddRestartTargetForTest(
+            [
+                new ManagedVddDeviceStatus(
+                    @"ROOT\DISPLAY\0001",
+                    Present: true,
+                    Enabled: false,
+                    DeviceStatus: 0,
+                    ProblemCode: 22),
+            ]),
+            "Managed-VDD recovery target selection could restart a paused or shared/ambiguous device instance.");
+        var transientSuspendDisplays =
+            DisplayTopologyService.SelectPhysicalDisplaysForRecovery(new[]
+            {
+                new DisplayDescriptor(
+                    0,
+                    "Internal Panel",
+                    @"\\?\DISPLAY#INTERNAL#1",
+                    true,
+                    false),
+                new DisplayDescriptor(
+                    1,
+                    "Dock Monitor",
+                    @"\\?\DISPLAY#DOCK#1",
+                    false,
+                    false),
+                new DisplayDescriptor(
+                    2,
+                    "VDD by MTT",
+                    @"\\?\DISPLAY#MTT1337#1",
+                    true,
+                    true),
+            });
+        Require(
+            transientSuspendDisplays.Length == 1 &&
+            transientSuspendDisplays[0].FriendlyName == "Internal Panel",
+            "Suspend recovery discarded an active physical path while TargetAvailable was transiently false.");
         var apolloRecoveryDisplays = DisplayTopologyService.SelectPhysicalDisplaysForRecovery(new[]
         {
             new DisplayDescriptor(0, "Apollo Virtual Display", @"\\?\DISPLAY#APOLLO#1", true, true),
@@ -1331,6 +3242,36 @@ internal static class Program
             localizedIndirectRecoveryDisplays.Length == 1 &&
             localizedIndirectRecoveryDisplays[0].FriendlyName == "Panel interno",
             "Emergency recovery treated an indirect display with an unknown name as physical.");
+        Require(
+            DisplayTopologyService.IsPotentialPhysicalModeDrift(
+                new AdvertisedDisplayMode(960, 544, 60)) &&
+            DisplayTopologyService.IsPotentialPhysicalModeDrift(
+                new AdvertisedDisplayMode(2560, 1440, 30)) &&
+            !DisplayTopologyService.IsPotentialPhysicalModeDrift(
+                new AdvertisedDisplayMode(2560, 1440, 280)),
+            "Physical-mode repair did not gate registry reads to suspicious fallback/low-refresh modes.");
+        Require(
+            DisplayTopologyService.IsClearPhysicalModeDrift(
+                new AdvertisedDisplayMode(960, 544, 60),
+                new AdvertisedDisplayMode(2560, 1440, 144)) &&
+            DisplayTopologyService.IsClearPhysicalModeDrift(
+                new AdvertisedDisplayMode(800, 600, 60),
+                new AdvertisedDisplayMode(1920, 1080, 60)) &&
+            DisplayTopologyService.IsClearPhysicalModeDrift(
+                new AdvertisedDisplayMode(1920, 1080, 30),
+                new AdvertisedDisplayMode(1920, 1080, 60)),
+            "Clear Vita/fallback physical-mode drift was not selected for repair.");
+        Require(
+            !DisplayTopologyService.IsClearPhysicalModeDrift(
+                new AdvertisedDisplayMode(1280, 720, 60),
+                new AdvertisedDisplayMode(2560, 1440, 144)) &&
+            !DisplayTopologyService.IsClearPhysicalModeDrift(
+                new AdvertisedDisplayMode(1920, 1080, 60),
+                new AdvertisedDisplayMode(2560, 1440, 144)) &&
+            !DisplayTopologyService.IsClearPhysicalModeDrift(
+                new AdvertisedDisplayMode(800, 600, 60),
+                new AdvertisedDisplayMode(800, 600, 60)),
+            "Physical-mode repair would override an intentional temporary mode.");
         Require(StreamingHostLocator.ExtractExecutablePath(
                 @"""C:\Program Files\Sunshine\sunshinesvc.exe"" --service") ==
                 @"C:\Program Files\Sunshine\sunshinesvc.exe",
@@ -1339,16 +3280,45 @@ internal static class Program
                 @"C:\Sunshine Portable\sunshine.exe --service") ==
                 @"C:\Sunshine Portable\sunshine.exe",
             "Unquoted Sunshine service path parsing failed.");
-        Require(HostRecoveryActions.IsProtectedProcessName("explorer"), "Windows shell protection failed.");
-        Require(HostRecoveryActions.IsProtectedProcessName("StartMenuExperienceHost"), "Windows Start menu protection failed.");
-        Require(HostRecoveryActions.IsProtectedProcessName("Sunshine"), "Sunshine process protection failed.");
-        Require(!HostRecoveryActions.IsProtectedProcessName("DOOMEternalx64vk"), "Game process was incorrectly protected.");
+        var unsupportedTaskAccountMessage =
+            ScheduledTaskAccount.BuildUnsupportedAccountMessageForTest(
+                "Vita Moonlight setup or repair",
+                @"DESKTOP-TEST\Administrator",
+                @"DESKTOP-TEST\Streamer");
+        Require(
+            ScheduledTaskAccount.AccountsMatchForTest(
+                @"DESKTOP-TEST\Streamer",
+                @"desktop-test\streamer") &&
+            !ScheduledTaskAccount.AccountsMatchForTest(
+                @"DESKTOP-TEST\Administrator",
+                @"DESKTOP-TEST\Streamer") &&
+            unsupportedTaskAccountMessage.Contains(
+                @"DESKTOP-TEST\Administrator",
+                StringComparison.Ordinal) &&
+            unsupportedTaskAccountMessage.Contains(
+                @"DESKTOP-TEST\Streamer",
+                StringComparison.Ordinal) &&
+            unsupportedTaskAccountMessage.Contains(
+                "different administrator password is intentionally rejected",
+                StringComparison.Ordinal),
+            "Interactive scheduled-task account classification failed.");
         var supportDiagnostics = new HostDiagnosticReport(
             IsWindows: true,
             OperatingSystem: "Test Windows",
             Architecture: "x64; Client",
             IsSupportedPlatform: true,
             IsAdministrator: false,
+            ScheduledTaskAccountReady: true,
+            ScheduledTaskAccountMessage: "Recovery tasks target the streaming account.",
+            BackendStatus: BackendLifecycleStatus.Enabled,
+            BackendDesiredState: BackendDesiredState.Enabled,
+            BackendPreferencePersisted: true,
+            BackendIssues: Array.Empty<string>(),
+            BackendIssueCodes: Array.Empty<string>(),
+            BackendActivePhysicalDisplayCount: 1,
+            BackendManagedVddDeviceCount: 1,
+            BackendManagedVddEnabledCount: 1,
+            BackendManagedVddActive: false,
             HostMode: @"C:\Users\PrivateName\malformed-host-mode",
             SunshinePath: @"C:\Users\PrivateName\Sunshine\sunshine.exe",
             SunshineVersion: "1.2.3",
@@ -1364,7 +3334,9 @@ internal static class Program
             VirtualDisplayModesReady: true,
             RecoveryPending: false,
             RecoveryTaskInstalled: true,
+            RecoveryTaskState: ExactScheduledTaskState.Present,
             RescueAgentInstalled: true,
+            RescueAgentTaskState: ExactScheduledTaskState.Present,
             RescueAgentRunning: true,
             ModeHotkeys: Array.Empty<HostModeHotkeyStatus>(),
             IntegrateAllSunshineApps: true,
@@ -1382,7 +3354,10 @@ internal static class Program
                     true,
                     true,
                     false,
-                    WindowsDisplayNative.OutputTechnologyIndirectWired),
+                    WindowsDisplayNative.OutputTechnologyIndirectWired,
+                    960,
+                    544,
+                    60),
             },
             null,
             installedPackage: true,
@@ -1390,10 +3365,15 @@ internal static class Program
         var supportJson = SupportReportExporter.Serialize(supportReport);
         Require(
             supportReport.SchemaVersion == SupportReportExporter.CurrentSchemaVersion &&
+            supportReport.ScheduledTaskAccountReady &&
             supportReport.SunshineInstalled &&
+            supportReport.BackendStatus == "Enabled" &&
+            supportReport.RecoveryTaskStatus == "Present" &&
             supportReport.HostMode == "unknown" &&
             supportReport.Displays.Count == 1 &&
-            supportReport.Displays[0].Name == "Vita virtual display",
+            supportReport.Displays[0].Name == "Vita virtual display" &&
+            supportReport.Displays[0].Width == 960 &&
+            supportReport.BackendActivePhysicalDisplayCount == 1,
             "Support report schema or component projection failed.");
         Require(
             !supportJson.Contains("PrivateName", StringComparison.Ordinal) &&
@@ -1405,30 +3385,123 @@ internal static class Program
         return ExitSuccess;
     }
 
+    private static void RunOwnedStateCleanupSelfTest()
+    {
+        var testRoot = Path.Combine(
+            Path.GetTempPath(),
+            $"vita-moonlight-uninstall-self-test-{Guid.NewGuid():N}");
+        var currentRoot = Path.Combine(testRoot, "current");
+        var legacyRoot = Path.Combine(testRoot, "legacy");
+        var diagnosticsRoot = Path.Combine(currentRoot, "Diagnostics");
+        var unknownSentinel = Path.Combine(currentRoot, "community-notes.txt");
+        var uninstallGuard = Path.Combine(
+            currentRoot,
+            "uninstall-in-progress.intent");
+        var lockedState = Path.Combine(currentRoot, "session.lock");
+        try
+        {
+            Directory.CreateDirectory(diagnosticsRoot);
+            Directory.CreateDirectory(legacyRoot);
+            File.WriteAllText(
+                Path.Combine(currentRoot, "display-recovery.json"),
+                "owned");
+            File.WriteAllText(
+                Path.Combine(currentRoot, "backend-disabled.intent"),
+                "owned");
+            File.WriteAllText(
+                Path.Combine(diagnosticsRoot, "stream-rescue.log"),
+                "owned");
+            File.WriteAllText(
+                Path.Combine(legacyRoot, "host-settings.json"),
+                "owned");
+            File.WriteAllText(unknownSentinel, "retain");
+            File.WriteAllText(
+                uninstallGuard,
+                "vita-moonlight-uninstall-in-progress-v1");
+            File.WriteAllText(lockedState, "owned but temporarily busy");
+
+            using (var busyState = new FileStream(
+                       lockedState,
+                       FileMode.Open,
+                       FileAccess.ReadWrite,
+                       FileShare.None))
+            {
+                var first = UninstallManager.CleanupOwnedStateFiles(
+                    currentRoot,
+                    legacyRoot);
+                Require(
+                    first.RemovedFiles == 4 &&
+                    first.RemovedDirectories == 2 &&
+                    first.RetainedEntries.Any(path =>
+                        string.Equals(
+                            Path.GetFullPath(path),
+                            Path.GetFullPath(currentRoot),
+                            OperatingSystem.IsWindows()
+                                ? StringComparison.OrdinalIgnoreCase
+                                : StringComparison.Ordinal)) &&
+                    File.Exists(unknownSentinel) &&
+                    File.Exists(uninstallGuard) &&
+                    File.Exists(lockedState) &&
+                    !File.Exists(Path.Combine(
+                        currentRoot,
+                        "display-recovery.json")) &&
+                    !File.Exists(Path.Combine(
+                        currentRoot,
+                        "backend-disabled.intent")) &&
+                    !Directory.Exists(diagnosticsRoot) &&
+                    !Directory.Exists(legacyRoot),
+                    "Uninstall cleanup stopped after a busy owned file, removed unknown state, or removed its guard.");
+            }
+
+            var second = UninstallManager.CleanupOwnedStateFiles(
+                currentRoot,
+                legacyRoot);
+            Require(
+                second.RemovedFiles == 1 &&
+                second.RemovedDirectories == 0 &&
+                File.Exists(unknownSentinel) &&
+                File.Exists(uninstallGuard) &&
+                !File.Exists(lockedState),
+                "Uninstall cleanup was not idempotent or removed an unknown/transaction-guard file on retry.");
+        }
+        finally
+        {
+            if (Directory.Exists(testRoot))
+            {
+                Directory.Delete(testRoot, recursive: true);
+            }
+        }
+    }
+
     private static int PrintHelp()
     {
         Console.WriteLine("VitaMoonlight.Host gui");
         Console.WriteLine("VitaMoonlight.Host doctor [--json]");
         Console.WriteLine("VitaMoonlight.Host profile [--json]");
-        Console.WriteLine("VitaMoonlight.Host configure [--host sunshine|apollo] [--config-dir PATH] [--display-match TEXT] [--all-apps true|false] [--force-sdr true|false]");
+        Console.WriteLine("VitaMoonlight.Host configure [--host sunshine] [--config-dir PATH] [--display-match TEXT] [--all-apps true|false] [--force-sdr true|false]");
+        Console.WriteLine("  Experimental only: configure --host apollo requires an explicit --display-match and is not public-beta qualified.");
         Console.WriteLine("VitaMoonlight.Host host status|restart [--host sunshine]");
         Console.WriteLine("VitaMoonlight.Host host ensure-compatible --installer PATH");
         Console.WriteLine("VitaMoonlight.Host gamepad status|ensure-compatible [--installer PATH]");
         Console.WriteLine("VitaMoonlight.Host runtime status|ensure-compatible [--installer PATH]");
         Console.WriteLine("VitaMoonlight.Host dependency uninstall sunshine|vigembus");
         Console.WriteLine("VitaMoonlight.Host state secure");
-        Console.WriteLine("VitaMoonlight.Host driver install|reload|uninstall|status");
+        Console.WriteLine("VitaMoonlight.Host maintenance begin|end|backend-was-enabled|rescue-task-was-present|recovery-task-was-present|vdd-adoption-required|suspend-safeguards|restore-safeguards --owner-pid PID|status");
+        Console.WriteLine("VitaMoonlight.Host deferred-setup save --host sunshine [--virtual-driver true] [--adoption-owner-pid PID]|clear|status");
+        Console.WriteLine("VitaMoonlight.Host backend enable|disable|status [--json] [--require-enabled] [--intent-exit-code]");
+        Console.WriteLine("VitaMoonlight.Host driver install [--adopt-existing-vdd-id INSTANCE_ID]|adopt-idle --adoption-owner-pid PID|reload|uninstall|status");
         Console.WriteLine("VitaMoonlight.Host display list");
         Console.WriteLine("VitaMoonlight.Host display disable-virtual");
-        Console.WriteLine("VitaMoonlight.Host session test --width N --height N --fps N [--seconds 5..120]");
-        Console.WriteLine("VitaMoonlight.Host session start --width N --height N --fps N");
+        Console.WriteLine("VitaMoonlight.Host session test --width 960|1280 --height 540|544|720 --fps 24|30|40|50|60 [--seconds 5..120]");
+        Console.WriteLine("VitaMoonlight.Host session start --width 960|1280 --height 540|544|720 --fps 24|30|40|50|60");
+        Console.WriteLine("VitaMoonlight.Host session hook-start --width N --height N --fps N (Sunshine prep hook)");
         Console.WriteLine("VitaMoonlight.Host session mode --width 960|1280 --height 540|544|720 [--fps 60]");
         Console.WriteLine("VitaMoonlight.Host session stop|recover|recover-upgrade|status");
-        Console.WriteLine("VitaMoonlight.Host recovery install|uninstall|status");
-        Console.WriteLine("VitaMoonlight.Host agent run [--background]|install|uninstall|status");
-        Console.WriteLine("VitaMoonlight.Host emergency close-foreground|recover-display|reset-display-driver");
+        Console.WriteLine("VitaMoonlight.Host recovery install|uninstall|status|task-status");
+        Console.WriteLine("VitaMoonlight.Host agent run [--background]|install|uninstall|status|task-status");
+        Console.WriteLine("VitaMoonlight.Host emergency recover-display|reset-display-driver");
         Console.WriteLine("VitaMoonlight.Host support export [--output PATH]");
-        Console.WriteLine("VitaMoonlight.Host uninstall prepare|cleanup-integration");
+        Console.WriteLine("VitaMoonlight.Host uninstall prepare|cleanup-integration|finalize-owned [--sunshine-removed] [--vdd-removed]");
         Console.WriteLine("VitaMoonlight.Host self-test");
         return ExitSuccess;
     }
@@ -1447,6 +3520,91 @@ internal static class Program
             }
         }
         return null;
+    }
+
+    private static string? GetExpectedVddAdoptionInstanceId(
+        string[] args)
+    {
+        if (HasFlag(args, "--adopt-existing-vdd"))
+        {
+            throw new ArgumentException(
+                "--adopt-existing-vdd no longer grants unbound device adoption. Use the control-panel question, or supply the exact --adopt-existing-vdd-id shown by `display list`.");
+        }
+        var direct = GetOption(args, "--adopt-existing-vdd-id");
+        var ownerText = GetOption(args, "--adoption-owner-pid");
+        if (direct is not null && ownerText is not null)
+        {
+            throw new ArgumentException(
+                "Specify either --adopt-existing-vdd-id or --adoption-owner-pid, not both.");
+        }
+
+        string? candidate = direct;
+        if (ownerText is not null)
+        {
+            if (!int.TryParse(ownerText, out var ownerProcessId) ||
+                ownerProcessId <= 0)
+            {
+                throw new ArgumentException(
+                    "--adoption-owner-pid requires a positive process id.");
+            }
+            candidate = InstallerMaintenanceFence
+                .RequireStagedVddAdoptionCandidateForOwner(
+                    ownerProcessId);
+        }
+        if (candidate is not null &&
+            !ManagedVddOwnershipJournal.IsValidInstanceIdForAdoption(
+                candidate))
+        {
+            throw new ArgumentException(
+                "The expected existing virtual-display instance ID is invalid.");
+        }
+        return candidate;
+    }
+
+    private static bool TryDescribeUnrelatedSunshineHook(
+        string command,
+        string[] args,
+        out string message)
+    {
+        message = string.Empty;
+        if (!command.Equals("session", StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(
+                args.FirstOrDefault(),
+                "hook-start",
+                StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        int width;
+        int height;
+        int streamFps;
+        try
+        {
+            width = GetRequiredInt(args, "--width");
+            height = GetRequiredInt(args, "--height");
+            streamFps = GetRequiredInt(args, "--fps");
+        }
+        catch (ArgumentException)
+        {
+            // A malformed generated command is a packaging/configuration bug,
+            // not an unrelated client. Let normal validation report it.
+            return false;
+        }
+
+        if (VitaDisplayModes.TryGetSupportedStreamMode(
+                width,
+                height,
+                streamFps,
+                out _))
+        {
+            return false;
+        }
+
+        message =
+            $"Sunshine client mode {width}x{height} at {streamFps} FPS " +
+            "is not a Vita mode; the host display was left unchanged.";
+        return true;
     }
 
     private static int GetRequiredInt(string[] args, string name)
@@ -1552,6 +3710,50 @@ internal static class Program
         }
     }
 
+    private static void TryWriteMaintenanceHelperError(string details)
+    {
+        try
+        {
+            var executable = Environment.ProcessPath;
+            if (string.IsNullOrWhiteSpace(executable) ||
+                !Path.GetFileName(executable).Equals(
+                    "VitaMoonlight.Host.Maintenance.exe",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+            var helperDirectory = Path.GetFullPath(AppContext.BaseDirectory)
+                .TrimEnd(
+                    Path.DirectorySeparatorChar,
+                    Path.AltDirectorySeparatorChar);
+            var temporaryRoot = Path.GetFullPath(Path.GetTempPath())
+                .TrimEnd(
+                    Path.DirectorySeparatorChar,
+                    Path.AltDirectorySeparatorChar);
+            var relative = Path.GetRelativePath(
+                temporaryRoot,
+                helperDirectory);
+            if (relative == ".." ||
+                relative.StartsWith(
+                    $"..{Path.DirectorySeparatorChar}",
+                    StringComparison.Ordinal) ||
+                Path.IsPathRooted(relative))
+            {
+                return;
+            }
+            File.WriteAllText(
+                Path.Combine(
+                    helperDirectory,
+                    "VitaMoonlight.Host.Maintenance.error.txt"),
+                details + Environment.NewLine);
+        }
+        catch
+        {
+            // The process exit code remains authoritative when even the
+            // setup-private diagnostic channel is unavailable.
+        }
+    }
+
     private static bool IsCurrentProcessAdministrator()
     {
         if (!OperatingSystem.IsWindows()) return false;
@@ -1590,6 +3792,53 @@ internal static class Program
         InstallationTrust.RequireInstalledPayload(operation);
     }
 
+    private static void EnsureMaintenanceAdministrator(string operation)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            throw new PlatformNotSupportedException(
+                "Administrator detection is only supported on Windows.");
+        }
+        using var identity = WindowsIdentity.GetCurrent();
+        if (!new WindowsPrincipal(identity).IsInRole(
+                WindowsBuiltInRole.Administrator))
+        {
+            throw new UnauthorizedAccessException(
+                $"{operation} requires an Administrator terminal.");
+        }
+        InstallerMaintenanceFence.RequireControllerProcess();
+    }
+
+    private static void EnsureBackendEnabled(string message)
+    {
+        if (!BackendLifecycleManager.IsEnabled)
+        {
+            throw new InvalidOperationException(message + ".");
+        }
+    }
+
+    private static void EnsureBackendReadyForStreaming()
+    {
+        var report = BackendLifecycleManager.Inspect();
+        if (report.Status != BackendLifecycleStatus.Enabled ||
+            report.Components is null ||
+            !report.Components.RecoveryTaskInstalled ||
+            !report.Components.RescueAgentTaskInstalled ||
+            !report.Components.RescueAgentRunning)
+        {
+            throw new InvalidOperationException(
+                "Vita display switching is paused or its recovery safeguards are not fully ready. " +
+                "Open the host control panel as Administrator, choose Enable Vita host features, " +
+                "then run Check readiness before starting a Vita session");
+        }
+        if (!IsVirtualDisplayReady(out var displayReadiness))
+        {
+            throw new InvalidOperationException(
+                displayReadiness +
+                " Open Display & recovery and repair the Vita display driver before streaming");
+        }
+    }
+
     private static int InvalidCommand(string command)
     {
         Console.Error.WriteLine($"Unknown command: {command}");
@@ -1603,6 +3852,10 @@ internal static class Program
     {
         WriteIndented = true,
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        Converters =
+        {
+            new System.Text.Json.Serialization.JsonStringEnumConverter(),
+        },
     };
 }
 
@@ -1617,6 +3870,17 @@ internal sealed record HostDiagnosticReport(
     string Architecture,
     bool IsSupportedPlatform,
     bool IsAdministrator,
+    bool ScheduledTaskAccountReady,
+    string ScheduledTaskAccountMessage,
+    BackendLifecycleStatus BackendStatus,
+    BackendDesiredState BackendDesiredState,
+    bool BackendPreferencePersisted,
+    IReadOnlyList<string> BackendIssues,
+    IReadOnlyList<string> BackendIssueCodes,
+    int BackendActivePhysicalDisplayCount,
+    int BackendManagedVddDeviceCount,
+    int BackendManagedVddEnabledCount,
+    bool BackendManagedVddActive,
     string HostMode,
     string? SunshinePath,
     string? SunshineVersion,
@@ -1632,7 +3896,9 @@ internal sealed record HostDiagnosticReport(
     bool VirtualDisplayModesReady,
     bool RecoveryPending,
     bool RecoveryTaskInstalled,
+    ExactScheduledTaskState RecoveryTaskState,
     bool RescueAgentInstalled,
+    ExactScheduledTaskState RescueAgentTaskState,
     bool RescueAgentRunning,
     IReadOnlyList<HostModeHotkeyStatus> ModeHotkeys,
     bool IntegrateAllSunshineApps,
@@ -1641,11 +3907,23 @@ internal sealed record HostDiagnosticReport(
     string Recommendation)
 {
     public bool HasStreamingHost => SunshinePath is not null || ApolloPath is not null;
-    public bool HasSelectedStreamingHost => HostMode == "apollo" ? ApolloPath is not null : SunshinePath is not null;
-    public bool HasDisplaySupport => HostMode == "apollo" ||
-        (DisplayWizardPath is not null && VirtualDisplayDriverInstalled && VirtualDisplayModesReady);
-    public bool ModeHotkeysReady => ModeHotkeys.Count == VitaDisplayModes.Supported.Count &&
-        ModeHotkeys.All(status => status.Ready);
+    public bool HasSelectedStreamingHost =>
+        HostMode == "sunshine" && SunshinePath is not null;
+    public bool HasDisplaySupport =>
+        HostMode == "sunshine" &&
+        DisplayWizardPath is not null &&
+        VirtualDisplayDriverInstalled &&
+        VirtualDisplayModesReady;
+    public bool ModeHotkeysReady =>
+        HostRecoveryAgentManager.LegacyModeHotkeysRequired(
+            HostSettings.Default with
+            {
+                HostMode = HostMode,
+                IntegrateAllSunshineApps = IntegrateAllSunshineApps,
+            })
+            ? ModeHotkeys.Count == VitaDisplayModes.Supported.Count &&
+              ModeHotkeys.All(status => status.Ready)
+            : ModeHotkeys.Count == 0;
 }
 
 internal static class HostDiagnostics
@@ -1653,12 +3931,14 @@ internal static class HostDiagnostics
     public static HostDiagnosticReport Inspect()
     {
         var settings = HostSettings.Load();
+        var backend = BackendLifecycleManager.Inspect();
         var platform = WindowsPlatformCompatibility.Inspect();
         var isWindows = platform.IsWindows;
         var architecture = platform.IsWindows
             ? $"{platform.ArchitectureDescription}; {platform.InstallationType ?? "unknown Windows type"}"
             : platform.ArchitectureDescription;
         var supportedPlatform = platform.IsSupported;
+        var scheduledTaskAccount = ScheduledTaskAccount.Inspect();
         var sunshine = StreamingHostLocator.FindSunshineExecutable();
         var sunshineCompatibility = SunshineCompatibility.Inspect(sunshine);
         var apollo = StreamingHostLocator.FindApolloExecutable();
@@ -1676,31 +3956,68 @@ internal static class HostDiagnostics
         var vigemRunning = vigemState == WindowsServiceState.Running;
         var sunshineNeedsRestart = settings.HostMode == "sunshine" && vigemRunning && SunshineLogReportsMissingViGEm(settings);
         var virtualDisplay = DisplayWizardAdapter.IsDriverInstalled();
+        var nativeVerificationCurrent =
+            DriverNativeModeVerification.TryGetCurrent(
+                out var nativeVerification,
+                out _);
         var virtualDisplayModesReady =
-            settings.HostMode == "apollo" ||
-            (DisplayWizardAdapter.HasVitaCompatibilityModes() &&
-             DriverNativeModeVerification.IsCurrent(out _));
+            DisplayWizardAdapter.HasVitaCompatibilityModes() &&
+            nativeVerificationCurrent;
         var recoveryPending = File.Exists(HostStatePaths.RecoveryFile);
-        var recoveryTaskInstalled = RecoveryTaskManager.IsInstalled();
-        var rescueAgentInstalled = HostRecoveryAgentManager.IsInstalled();
+        var recoveryTask = RecoveryTaskManager.GetInstallationState();
+        var recoveryTaskInstalled = recoveryTask.State ==
+            ExactScheduledTaskState.Present;
+        var rescueAgentTask = HostRecoveryAgentManager.GetInstallationState();
+        var rescueAgentInstalled = rescueAgentTask.State ==
+            ExactScheduledTaskState.Present;
         var rescueAgentRunning = HostRecoveryAgentManager.IsRunning();
         var modeHotkeys = HostRecoveryAgentManager.GetModeHotkeyReadiness();
-        var modeHotkeysReady = modeHotkeys.Count == VitaDisplayModes.Supported.Count &&
-            modeHotkeys.All(status => status.Ready);
-        var nativeDisplayLifecycleReady = settings.HostMode != "sunshine" || !settings.IntegrateAllSunshineApps ||
-            SunshineConfigurator.IsNativeDisplayManagementReady(
-                SunshineConfigurator.ResolveConfigurationDirectory(settings.SunshineConfigDirectory, "sunshine"));
+        var legacyModeHotkeysRequired =
+            HostRecoveryAgentManager.LegacyModeHotkeysRequired(settings);
+        var modeHotkeysReady = legacyModeHotkeysRequired
+            ? modeHotkeys.Count == VitaDisplayModes.Supported.Count &&
+              modeHotkeys.All(status => status.Ready)
+            : modeHotkeys.Count == 0;
+        var hostConfigurationDirectory =
+            SunshineConfigurator.ResolveConfigurationDirectory(
+                settings.SunshineConfigDirectory,
+                settings.HostMode);
+        var companionPath = Path.GetFullPath(
+            Path.Combine(AppContext.BaseDirectory, "VitaMoonlight.Host.exe"));
+        var automaticDisplayLifecycleReady =
+            settings.HostMode == "sunshine" &&
+            settings.IntegrateAllSunshineApps
+                ? nativeVerificationCurrent &&
+                  SunshineConfigurator.IsAuthenticatedStreamBoundaryConfigurationReady(
+                    hostConfigurationDirectory,
+                    settings.ForceSdr,
+                    settings.DisplayMatch,
+                    nativeVerification?.VerifiedAt)
+                : SunshineConfigurator.IsManagedHookReady(
+                    hostConfigurationDirectory,
+                    settings.SunshineApplicationName,
+                    companionPath);
 
         var recommendation = !isWindows
             ? "Run this companion on a Windows 10 version 2004 or newer / Windows 11 x64 streaming host."
             : !supportedPlatform
                 ? platform.RequirementMessage
+            : !scheduledTaskAccount.IsSameInteractiveAccount
+                ? scheduledTaskAccount.Message +
+                  " Sign in to the administrator account used for streaming and run setup there; do not approve setup with a different account's credentials."
             : recoveryPending
                 ? "An earlier session did not restore its display layout. Open Display & recovery and choose Restore physical display now before streaming."
-                : settings.HostMode == "apollo" && apollo is null
-                    ? "Install Apollo or configure Sunshine mode, then run this check again."
+                : backend.Status == BackendLifecycleStatus.Error
+                    ? "The protected Vita host-feature state could not be verified. Open the control panel as Administrator and review Diagnostics & support before enabling or pausing Vita host features."
+                : backend.DesiredState == BackendDesiredState.Disabled &&
+                  backend.Status == BackendLifecycleStatus.Partial
+                    ? "Vita host features are set to paused, but one or more owned components could not be stopped safely. Open Overview as Administrator and choose Pause Vita host features again."
+                : backend.Status == BackendLifecycleStatus.Disabled
+                    ? "Vita host features are paused by you. Shared streaming servers remain installed and reachable, but clients pinned to the Vita virtual display may need a physical output; choose Enable Vita host features on Overview before the next Vita session."
+                : settings.HostMode == "apollo"
+                    ? "Apollo is an experimental CLI-only compatibility path and is not public-beta qualified. Open Streaming, select the supported Sunshine configuration, then run Set up or repair this PC. Apollo itself and unrelated settings are preserved."
                     : settings.HostMode == "sunshine" && sunshine is null
-                        ? "Install Sunshine or configure Apollo mode, then run this check again."
+                        ? "Install Sunshine with Set up or repair this PC, then run this check again."
                         : settings.HostMode == "sunshine" && !sunshineCompatibility.IsSupported
                             ? $"Update Sunshine to {SunshineCompatibility.MinimumVersionText} or newer with the Vita Moonlight host installer."
                     : settings.HostMode == "sunshine" && !visualCppRuntime.IsSupported
@@ -1711,20 +4028,26 @@ internal static class HostDiagnostics
                                 ? "Controller support is installed but is not running. Restart Windows; if it remains stopped, open Diagnostics & support and choose Repair controller support."
                             : sunshineNeedsRestart
                                     ? "Controller support is ready, but Sunshine started before it. Open Get started and choose Set up or repair this PC to restart Sunshine safely."
-                        : !nativeDisplayLifecycleReady
-                            ? "Sunshine is not configured to restore displays when the Vita disconnects. Open Get started and choose Set up or repair this PC."
+                        : !automaticDisplayLifecycleReady
+                            ? "The selected streaming host does not have a current, verified Vita display lifecycle configuration. Open Get started and choose Set up or repair this PC."
                         : settings.HostMode == "sunshine" && displayWizard is null
-                            ? "Reinstall the host companion's signed display-driver bundle or switch to Apollo."
+                            ? "Reinstall the host companion so its signed display-driver bundle is available."
                             : settings.HostMode == "sunshine" && !virtualDisplay
                                 ? "Install the signed virtual display driver, reboot if requested, and run this check again."
                                 : settings.HostMode == "sunshine" && !virtualDisplayModesReady
                                     ? "The Vita display modes are missing or native 960x544 is not verified. Open Display & recovery, repair the Vita display driver, then run Set up or repair this PC."
+                                : recoveryTask.State == ExactScheduledTaskState.Unknown
+                                    ? "Windows could not inspect the automatic recovery task. Confirm the Task Scheduler service is running, then run this check again."
                                 : !recoveryTaskInstalled
                                     ? "Automatic sign-in recovery is not installed. Open the control panel as Administrator, then run Set up or repair this PC."
+                                : rescueAgentTask.State == ExactScheduledTaskState.Unknown
+                                    ? "Windows could not inspect the stream-rescue task. Confirm the Task Scheduler service is running, then run this check again."
                                 : !rescueAgentInstalled || !rescueAgentRunning
-                                    ? "Stream recovery shortcuts are not ready. Open Get started and choose Set up or repair this PC."
+                                    ? "Authenticated Vita handoff and stream recovery are not ready. Open Get started and choose Set up or repair this PC."
                                 : !modeHotkeysReady
                                     ? "One or more display-mode shortcuts are unavailable. Close software using Ctrl+Alt+Shift+F8/F9/F10, then open Diagnostics & support and repair stream rescue shortcuts."
+                                : backend.Status == BackendLifecycleStatus.Partial
+                                    ? "The enabled Vita host features are only partly applied. Open Overview as Administrator and choose Enable Vita host features again."
                                 : "This PC is ready. Install the matching Vita VPK, pair with Sunshine, and launch Steam Big Picture, Desktop, or a game.";
 
         return new HostDiagnosticReport(
@@ -1733,6 +4056,18 @@ internal static class HostDiagnostics
             architecture,
             supportedPlatform,
             IsAdministrator(),
+            scheduledTaskAccount.IsSameInteractiveAccount,
+            scheduledTaskAccount.Message,
+            backend.Status,
+            backend.DesiredState,
+            backend.PreferencePersisted,
+            backend.Issues,
+            backend.Issues.Select(BackendIssueCode).Distinct().ToArray(),
+            backend.Components?.ActivePhysicalDisplayCount ?? 0,
+            backend.Components?.ManagedVirtualDisplayDevices.Count ?? 0,
+            backend.Components?.ManagedVirtualDisplayDevices.Count(device =>
+                device.Present && device.Enabled) ?? 0,
+            backend.Components?.ManagedVirtualDisplayActive ?? false,
             settings.HostMode,
             sunshine,
             sunshineCompatibility.DetectedVersion,
@@ -1748,13 +4083,50 @@ internal static class HostDiagnostics
             virtualDisplayModesReady,
             recoveryPending,
             recoveryTaskInstalled,
+            recoveryTask.State,
             rescueAgentInstalled,
+            rescueAgentTask.State,
             rescueAgentRunning,
             modeHotkeys,
             settings.IntegrateAllSunshineApps,
             settings.ForceSdr,
-            nativeDisplayLifecycleReady,
+            automaticDisplayLifecycleReady,
             recommendation);
+    }
+
+    private static string BackendIssueCode(string issue)
+    {
+        if (issue.Contains("uninstall", StringComparison.OrdinalIgnoreCase) &&
+            issue.Contains("progress", StringComparison.OrdinalIgnoreCase))
+        {
+            return "uninstall-transaction";
+        }
+        if (issue.Contains("physical display", StringComparison.OrdinalIgnoreCase) ||
+            issue.Contains("physical-display", StringComparison.OrdinalIgnoreCase))
+        {
+            return "physical-display";
+        }
+        if (issue.Contains("recovery task", StringComparison.OrdinalIgnoreCase) ||
+            issue.Contains("Task Scheduler", StringComparison.OrdinalIgnoreCase))
+        {
+            return "recovery-task";
+        }
+        if (issue.Contains("rescue", StringComparison.OrdinalIgnoreCase))
+        {
+            return "rescue-agent";
+        }
+        if (issue.Contains("virtual display", StringComparison.OrdinalIgnoreCase) ||
+            issue.Contains("VDD", StringComparison.OrdinalIgnoreCase))
+        {
+            return "managed-vdd";
+        }
+        if (issue.Contains("lifecycle", StringComparison.OrdinalIgnoreCase) ||
+            issue.Contains("protected backend", StringComparison.OrdinalIgnoreCase) ||
+            issue.Contains("host-feature state", StringComparison.OrdinalIgnoreCase))
+        {
+            return "lifecycle-state";
+        }
+        return "backend-other";
     }
 
     private static bool SunshineLogReportsMissingViGEm(HostSettings settings)

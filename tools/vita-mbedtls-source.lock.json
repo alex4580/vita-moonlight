@@ -1,0 +1,58 @@
+{
+  "build": {
+    "build_target": "mbedtls",
+    "cmake_definitions": [
+      "CMAKE_BUILD_TYPE=Release",
+      "CMAKE_C_FLAGS=-D__vita__",
+      "ENABLE_PROGRAMS=OFF",
+      "ENABLE_TESTING=OFF",
+      "MBEDTLS_FATAL_WARNINGS=OFF"
+    ],
+    "config_enable": [
+      "MBEDTLS_THREADING_C",
+      "MBEDTLS_THREADING_PTHREAD"
+    ],
+    "install_prefix": "${VITASDK}/arm-vita-eabi",
+    "patch_fuzz": 0,
+    "patch_strip": 1,
+    "toolchain_file": "${VITASDK}/share/vita.toolchain.cmake"
+  },
+  "component": {
+    "abi_line": "3.6-lts",
+    "license_expression": "Apache-2.0 AND GPL-3.0-or-later",
+    "name": "mbedtls",
+    "version": "3.6.7"
+  },
+  "inputs": [
+    {
+      "license_expression": "Apache-2.0 OR GPL-2.0-or-later",
+      "name": "mbedtls-3.6.7.tar.bz2",
+      "provenance": {
+        "asset_id": 464469768,
+        "path": "mbedtls-3.6.7.tar.bz2",
+        "repository": "Mbed-TLS/mbedtls",
+        "revision": "mbedtls-3.6.7",
+        "url": "https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-3.6.7/mbedtls-3.6.7.tar.bz2"
+      },
+      "role": "official-source",
+      "sha256": "a7e8bcbec0e6f761b4af24f25677626b35f762f68eef79c08677a363212d11f6",
+      "size": 5473689
+    },
+    {
+      "license_expression": "GPL-3.0-or-later",
+      "name": "mbedtls-3.6.7-vita.patch",
+      "provenance": {
+        "asset_id": null,
+        "path": "vendor/vita-source/mbedtls-3.6.7-vita.patch",
+        "repository": "alex4580/vita-moonlight",
+        "revision": "release-tree",
+        "url": null
+      },
+      "role": "project-vita-compatibility-patch",
+      "sha256": "406e38b8057dbef41bc1a02949511469034886869875631f3ee3c30c29b7c511",
+      "size": 5896
+    }
+  ],
+  "locked_at_utc": "2026-08-07T23:00:57Z",
+  "schema": "vita-moonlight/vita-mbedtls-source-lock/v1"
+}

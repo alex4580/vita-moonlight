@@ -26,8 +26,9 @@ Not currently packaged:
   ViGEmBus, VDD, and safe device-reload path require a newer release.
 - PCs with no writable `C:` volume. The pinned signed VDD binary reads
   `C:\VirtualDisplayDriver\vdd_settings.xml`; this path is imposed by that
-  upstream driver even when Windows itself is installed elsewhere. Use Apollo
-  on an unusual machine without a usable `C:` volume.
+  upstream driver even when Windows itself is installed elsewhere. Apollo is
+  not a supported public-beta fallback; such PCs are unsupported by this
+  package.
 
 ## Machine layouts covered by the companion
 
@@ -45,14 +46,17 @@ Not currently packaged:
 
 The rescue hotkey and sign-in recovery triggers belong to the Windows account
 used for streaming. This release supports one configured interactive streaming
-account per PC; applying setup from another account reassigns the tasks to that
-account. Simultaneous fast-user-switching sessions are not a release target.
+account per PC. Setup/repair verifies that its elevated process still belongs
+to that interactive account before it changes the PC; approving UAC with a
+different Administrator account fails before topology, tasks, or product files
+are changed. Simultaneous fast-user-switching sessions are not a release target.
 Recovery state itself is machine-wide beneath the protected
 `%ProgramFiles%\Vita Moonlight Host\state` directory.
-Use the same Windows account for setup and streaming. Supplying credentials for
-a different Administrator account from a standard-user session is a required
-release test and must not be advertised as supported until both scheduled
-tasks are observed in the intended interactive session.
+Use the same Administrator Windows account for setup and streaming. A standard
+streaming account that supplies credentials for a different Administrator is
+explicitly unsupported for setup/repair. Elevated uninstall remains available
+from another Administrator because it creates no interactive task and deletes
+only tasks whose exact owned action has been verified.
 
 The companion never selects a display by a developer's monitor model or device
 path. It identifies only the managed VDD by its published driver identities and
@@ -68,7 +72,7 @@ a physical Vita. The final checklist therefore still requires:
 - Windows 10 and Windows 11 consumer machines when testers are available.
 - At least two of AMD, Intel, and NVIDIA encoder families.
 - A laptop/on-battery pass and a multi-monitor pass.
-- Clean install, upgrade, uninstall, suspend, Wi-Fi-loss, game-close, and
+- Clean install, upgrade, uninstall, suspend, Wi-Fi-loss, stuck-game, and
   emergency-recovery tests.
 
 Do not describe the package as universal until those hardware gates pass.

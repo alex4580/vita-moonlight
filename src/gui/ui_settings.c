@@ -9,6 +9,7 @@
 #include "../config.h"
 #include "../input/vita.h"
 #include "../input/swap_shoulder_buttons.h"
+#include "../power/vita.h"
 #include "../video/vita.h"
 #include "../debug.h"
 #include "../input/touchabsolute.h"
@@ -193,7 +194,6 @@ enum {
   SETTINGS_INPUT_HELP,
   SETTINGS_FPS,
   SETTINGS_BITRATE,
-  SETTINGS_SOPS,
   SETTINGS_ENABLE_FRAME_INVAL,
   SETTINGS_ENABLE_STREAM_OPTIMIZE,
   SETTINGS_ENABLE_VITA_VBLANK_WAIT,
@@ -207,13 +207,11 @@ enum {
   SETTINGS_JP_LAYOUT,
   SETTINGS_SHOW_FPS,
   SETTINGS_LOCAL_AUDIO,
-  SETTINGS_ENABLE_FRAME_PACER,
   SETTINGS_CENTER_REGION_ONLY,
   SETTINGS_ENABLE_MAPPING,
   SETTINGS_CONTROLLER_MAPPER,
   SETTINGS_BACK_DEADZONE,
   SETTINGS_SPECIAL_KEYS,
-  SETTINGS_ENABLE_SPECIAL_KEYS,
   SETTINGS_PSBUTTON_MODE,
   SETTINGS_CONTROLLER_TYPE,
   SETTINGS_SWAP_SHOULDER_BUTTONS,
@@ -227,7 +225,6 @@ enum {
   SETTINGS_VIEW_STREAM_PRESET,
   SETTINGS_VIEW_FPS,
   SETTINGS_VIEW_BITRATE,
-  SETTINGS_VIEW_SOPS,
   SETTINGS_VIEW_ENABLE_FRAME_INVAL,
   SETTINGS_VIEW_ENABLE_STREAM_OPTIMIZE,
   SETTINGS_VIEW_ENABLE_VITA_VBLANK_WAIT,
@@ -241,12 +238,10 @@ enum {
   SETTINGS_VIEW_JP_LAYOUT,
   SETTINGS_VIEW_SHOW_FPS,
   SETTINGS_VIEW_LOCAL_AUDIO,
-  SETTINGS_VIEW_ENABLE_FRAME_PACER,
   SETTINGS_VIEW_CENTER_REGION_ONLY,
   SETTINGS_VIEW_ENABLE_MAPPING,
   SETTINGS_VIEW_MAPPING_LOCATION,
   SETTINGS_VIEW_BACK_DEADZONE,
-  SETTINGS_VIEW_ENABLE_SPECIAL_KEYS,
   SETTINGS_VIEW_PSBUTTON_MODE,
   SETTINGS_VIEW_CONTROLLER_TYPE,
   SETTINGS_VIEW_SWAP_SHOULDER_BUTTONS,
@@ -311,7 +306,6 @@ static int settings_category_for_id(int id) {
     case SETTINGS_MOUSE_ACCEL:
     case SETTINGS_BACK_DEADZONE:
     case SETTINGS_SPECIAL_KEYS:
-    case SETTINGS_ENABLE_SPECIAL_KEYS:
     case SETTINGS_TOUCH_MODE_SELECT:
     case SETTINGS_KEYBOARD_LAYOUT:
       return SETTINGS_ROOT_TOUCH_KEYBOARD;
@@ -323,11 +317,9 @@ static int settings_category_for_id(int id) {
     case SETTINGS_LOCAL_AUDIO:
       return SETTINGS_ROOT_SYSTEM_SUPPORT;
 
-    case SETTINGS_SOPS:
     case SETTINGS_ENABLE_FRAME_INVAL:
     case SETTINGS_ENABLE_STREAM_OPTIMIZE:
     case SETTINGS_ENABLE_VITA_VBLANK_WAIT:
-    case SETTINGS_ENABLE_FRAME_PACER:
     case SETTINGS_ADVANCED_STREAM_HELP:
       return SETTINGS_ROOT_ADVANCED;
 
@@ -375,7 +367,8 @@ static int settings_loop(int id, void *context, const input_data *input) {
     display_alert(
         "Presets reset the complete stream path: resolution, FPS, bitrate, "
         "packet size, network detection, H.264/SDR color, stereo audio, "
-        "host optimization, loss recovery, pacing, scaling, and power behavior.\n\n"
+        "host optimization, loss recovery, immediate presentation, scaling, "
+        "and decoder timing. Keep-awake remains an independent choice.\n\n"
         "Recommended: native 960x544, 60 FPS, 8 Mbps.\n"
         "Reliable: 30 FPS/5 Mbps for unstable Wi-Fi.\n"
         "High quality: 12 Mbps for cleaner motion on a strong link.\n"
@@ -402,10 +395,13 @@ static int settings_loop(int id, void *context, const input_data *input) {
         "Bitrate improves detail during movement, but a value your Wi-Fi cannot "
         "sustain creates queues, delay, and packet loss. FPS 60 feels smoother "
         "and more responsive; FPS 30 halves the frame cadence and is easier to carry.\n\n"
-        "Frame pacing evens delivery. Packet-loss recovery requests clean reference "
-        "frames. Fit shows the whole desktop; Crop fills the panel by trimming edges. "
+        "Frames are presented immediately for the lowest latency. Packet-loss recovery "
+        "requests clean reference frames. Fit shows the whole desktop; Crop fills the panel by trimming edges. "
         "Vblank can reduce tearing but may add latency. Auto network mode is safest "
-        "unless you know the host is local or reached through a VPN.",
+        "unless you know the host is local or reached through a VPN.\n\n"
+        "If Wi-Fi is unstable, open Vita Settings > Power Save Settings and clear "
+        "Use Wi-Fi in Power Save Mode. Sony says this may improve stability; it "
+        "does not guarantee higher speed.",
         NULL, 1, NULL, NULL);
     return 0;
   }
@@ -595,7 +591,8 @@ static int settings_loop(int id, void *context, const input_data *input) {
         char value[512];
         int ret;
         if ((ret = ime_dialog_number(
-                 value, "Enter bitrate in Kbps (1000-30000)", "")) == 0) {
+                 value, sizeof(value),
+                 "Enter bitrate in Kbps (1000-30000)", "")) == 0) {
           int bitrate = atoi(value);
           if (bitrate >= 1000 && bitrate <= 30000) {
             config.stream.bitrate = bitrate;
@@ -606,19 +603,17 @@ static int settings_loop(int id, void *context, const input_data *input) {
         }
       }
       break;
-    case SETTINGS_SOPS:
-      if ((input->buttons & config.btn_confirm) == 0 || input->buttons & SCE_CTRL_HOLD) {
-        break;
-      }
-      did_change = 1;
-      config.sops = !config.sops;
-      break;
     case SETTINGS_ENABLE_FRAME_INVAL:
       if ((input->buttons & config.btn_confirm) == 0 || input->buttons & SCE_CTRL_HOLD) {
         break;
       }
-      did_change = 1;
-      config.enable_ref_frame_invalidation = !config.enable_ref_frame_invalidation;
+      config.enable_ref_frame_invalidation = false;
+      display_alert(
+          "The Vita hardware decoder requires a one-reference-frame H.264 "
+          "stream, so reference-frame invalidation is unavailable.\n\n"
+          "Moonlight still requests a clean keyframe automatically when "
+          "decoding must recover from packet loss.",
+          NULL, 1, NULL, NULL);
       break;
     case SETTINGS_ENABLE_STREAM_OPTIMIZE:
       if (!left && !right) {
@@ -649,7 +644,8 @@ static int settings_loop(int id, void *context, const input_data *input) {
       }
       char value[512];
       if (ime_dialog_number(
-              value, "Enter horizontal gyro sensitivity (0.1-5.0)", "") == 0) {
+              value, sizeof(value),
+              "Enter horizontal gyro sensitivity (0.1-5.0)", "") == 0) {
         float scalar;
         if (parse_sensitivity(value, &scalar)) {
           config.motion_controls_scalar_x = scalar;
@@ -669,7 +665,8 @@ static int settings_loop(int id, void *context, const input_data *input) {
       }
       char value[512];
       if (ime_dialog_number(
-              value, "Enter vertical gyro sensitivity (0.1-5.0)", "") == 0) {
+              value, sizeof(value),
+              "Enter vertical gyro sensitivity (0.1-5.0)", "") == 0) {
         float scalar;
         if (parse_sensitivity(value, &scalar)) {
           config.motion_controls_scalar_y = scalar;
@@ -697,7 +694,8 @@ static int settings_loop(int id, void *context, const input_data *input) {
         char value[512];
         int ret;
         if ((ret = ime_dialog_number(
-                 value, "Enter sprint double-tap window in milliseconds", "")) == 0) {
+                 value, sizeof(value),
+                 "Enter sprint double-tap window in milliseconds", "")) == 0) {
           int stp = atoi(value);
           if (stp >= 50 && stp <= 1000) {
             config.double_tap_sprint_step_time = stp;
@@ -776,13 +774,6 @@ static int settings_loop(int id, void *context, const input_data *input) {
       did_change = 1;
       config.localaudio = !config.localaudio;
       break;
-    case SETTINGS_ENABLE_FRAME_PACER:
-      if ((input->buttons & config.btn_confirm) == 0 || input->buttons & SCE_CTRL_HOLD) {
-        break;
-      }
-      did_change = 1;
-      config.enable_frame_pacer = !config.enable_frame_pacer;
-      break;
     case SETTINGS_CENTER_REGION_ONLY:
       if ((input->buttons & config.btn_confirm) == 0 || input->buttons & SCE_CTRL_HOLD) {
         break;
@@ -813,15 +804,6 @@ static int settings_loop(int id, void *context, const input_data *input) {
       if (ui_front_touch_mapper_menu()) {
         did_change = 1;
       }
-      break;
-    case SETTINGS_ENABLE_SPECIAL_KEYS:
-      if ((input->buttons & config.btn_confirm) == 0 || input->buttons & SCE_CTRL_HOLD) {
-        break;
-      }
-
-      config.enable_front_touchzones = !config.enable_front_touchzones;
-      vitainput_refresh_touchzones();
-      did_change = 1;
       break;
     case SETTINGS_PSBUTTON_MODE:
       if (!left && !right) {
@@ -879,11 +861,9 @@ static int settings_loop(int id, void *context, const input_data *input) {
   sprintf(current, "%d", config.stream.bitrate);
   MENU_REPLACE(SETTINGS_VIEW_BITRATE, current);
 
-  MENU_REPLACE(SETTINGS_VIEW_SOPS, on_off(config.sops));
-
   MENU_REPLACE(
       SETTINGS_VIEW_ENABLE_FRAME_INVAL,
-      on_off(config.enable_ref_frame_invalidation));
+      "Automatic IDR");
 
   sprintf(current, "%s", network_mode_names[config.stream.streamingRemotely]);
   MENU_REPLACE(SETTINGS_VIEW_ENABLE_STREAM_OPTIMIZE, current);
@@ -922,10 +902,6 @@ static int settings_loop(int id, void *context, const input_data *input) {
 
   MENU_REPLACE(SETTINGS_VIEW_LOCAL_AUDIO, on_off(config.localaudio));
 
-  MENU_REPLACE(
-      SETTINGS_VIEW_ENABLE_FRAME_PACER,
-      on_off(config.enable_frame_pacer));
-
   sprintf(current, "%s",
           config.center_region_only ? "Crop / fill" : "Fit entire frame");
   MENU_REPLACE(SETTINGS_VIEW_CENTER_REGION_ONLY, current);
@@ -946,10 +922,6 @@ static int settings_loop(int id, void *context, const input_data *input) {
 
   sprintf(current, "%s", psbutton_mode_names[config.psbutton_mode]);
   MENU_REPLACE(SETTINGS_VIEW_PSBUTTON_MODE, current);
-
-  MENU_REPLACE(
-      SETTINGS_VIEW_ENABLE_SPECIAL_KEYS,
-      on_off(config.enable_front_touchzones));
 
   MENU_REPLACE(
       SETTINGS_VIEW_ENABLE_MAPPING,
@@ -1033,11 +1005,9 @@ static int ui_settings_category_menu(int category) {
   MENU_ACTION(SETTINGS_RESOLUTION_HELP, "Resolution and quality guide");
   MENU_ENTRY(SETTINGS_FPS, SETTINGS_VIEW_FPS, "Frame rate", ICON_LEFT_RIGHT_ARROWS);
   MENU_ENTRY(SETTINGS_BITRATE, SETTINGS_VIEW_BITRATE, "Video bitrate (Kbps)", "");
-  MENU_ENTRY(SETTINGS_SOPS, SETTINGS_VIEW_SOPS, "Optimize games for streaming", "");
   MENU_ENTRY(SETTINGS_ENABLE_FRAME_INVAL, SETTINGS_VIEW_ENABLE_FRAME_INVAL, "Packet-loss recovery", "");
   MENU_ENTRY(SETTINGS_ENABLE_STREAM_OPTIMIZE, SETTINGS_VIEW_ENABLE_STREAM_OPTIMIZE, "Network mode", ICON_LEFT_RIGHT_ARROWS);
   MENU_ENTRY(SETTINGS_ENABLE_VITA_VBLANK_WAIT, SETTINGS_VIEW_ENABLE_VITA_VBLANK_WAIT, "Sync video to Vita display", "");
-  MENU_ENTRY(SETTINGS_ENABLE_FRAME_PACER, SETTINGS_VIEW_ENABLE_FRAME_PACER, "Frame pacing", "");
   MENU_ENTRY(SETTINGS_CENTER_REGION_ONLY, SETTINGS_VIEW_CENTER_REGION_ONLY, "Aspect scaling", "");
   MENU_ACTION(SETTINGS_ADVANCED_STREAM_HELP, "Latency and recovery guide");
 
@@ -1077,8 +1047,11 @@ static int ui_settings_category_menu(int category) {
     idx++;
   }
   MENU_ENTRY(SETTINGS_TOUCH_MODE_SELECT, SETTINGS_VIEW_TOUCH_MODE_SELECT, "Touchscreen mode", "");
-  MENU_ENTRY(SETTINGS_ENABLE_SPECIAL_KEYS, SETTINGS_VIEW_ENABLE_SPECIAL_KEYS, "Front-touch zones", "");
-  MENU_ACTION(SETTINGS_SPECIAL_KEYS, "Front-touch zone mapper");
+  MENU_ACTION(
+      SETTINGS_SPECIAL_KEYS,
+      config.enable_front_touchzones
+          ? "Front-touch tap-zone mapper (On)"
+          : "Front-touch tap-zone mapper (Off)");
   MENU_ENTRY(SETTINGS_BACK_DEADZONE, SETTINGS_VIEW_BACK_DEADZONE, "Back touchscreen deadzone", "");
   MENU_ENTRY(SETTINGS_MOUSE_ACCEL, SETTINGS_VIEW_MOUSE_ACCEL, "Mouse acceleration", ICON_LEFT_RIGHT_ARROWS);
   MENU_ENTRY(SETTINGS_KEYBOARD_LAYOUT, SETTINGS_VIEW_KEYBOARD_LAYOUT, "Keyboard layout", "");
@@ -1123,6 +1096,8 @@ static int settings_root_loop(
     config.double_tap_sprint_step_time = 200;
     ui_controller_mapping_set_enabled(false);
     swap_shoulder_buttons = false;
+    config.disable_powersave = true;
+    vitapower_config(config);
     ui_diagnostics_set_overlay_mode(UI_DIAGNOSTICS_OVERLAY_OFF);
     vita_debug_set_logging_enabled(false);
     touchabsolute_enable(false);
@@ -1177,7 +1152,7 @@ int ui_settings_menu() {
   ROOT_ENTRY(
       SETTINGS_ROOT_ADVANCED,
       "Advanced streaming",
-      "Network, pacing, loss recovery", ICON_RIGHT_ARROW);
+      "Network, timing, loss recovery", ICON_RIGHT_ARROW);
 
 #undef ROOT_ENTRY
 
@@ -1188,7 +1163,13 @@ int ui_settings_menu() {
 }
 
 void ui_settings_save_config() {
-  config_save(config_path, &config);
+  if (!config_path || !config_save(config_path, &config)) {
+    display_error(
+        "Settings could not be saved. The current choices remain active for "
+        "this run, but may be lost after closing Moonlight. Check free "
+        "storage space and try again.");
+    return;
+  }
   vita_debug_log_config_snapshot("settings_saved");
 }
 

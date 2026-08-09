@@ -27,7 +27,7 @@ VPK_PATH="build/moonlight.vpk"
 echo "[+] Iniciando compilación para PS Vita..."
 mkdir -p build
 cd build
-cmake ..
+cmake -DCMAKE_BUILD_TYPE=Release ..
 if [ $? -ne 0 ]; then
     echo "[!] Error en cmake. Abortando."
     exit 1

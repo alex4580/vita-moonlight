@@ -10,7 +10,30 @@ internal sealed record DisplayDescriptor(
     string DevicePath,
     bool IsActive,
     bool IsAvailable,
-    int OutputTechnology = -1);
+    int OutputTechnology = -1,
+    int? Width = null,
+    int? Height = null,
+    int? RefreshRate = null);
+
+internal sealed record PhysicalDisplayModeRepairWarning(
+    string Code,
+    string Display,
+    string Detail)
+{
+    public override string ToString() =>
+        $"{Code} ({Display}): {Detail}";
+}
+
+internal sealed record PhysicalDisplayModeRepairResult(
+    IReadOnlyList<string> RestoredModes,
+    IReadOnlyList<PhysicalDisplayModeRepairWarning> Warnings)
+{
+    internal static PhysicalDisplayModeRepairResult Empty { get; } =
+        new([], []);
+}
+
+internal sealed class PhysicalDisplayUnavailableException(string message)
+    : InvalidOperationException(message);
 
 internal sealed record DisplayRecoveryRecord(
     int FormatVersion,
@@ -24,7 +47,12 @@ internal sealed record DisplayRecoveryRecord(
     string? SelectedDisplay,
     int RequestedWidth,
     int RequestedHeight,
-    int RequestedFps);
+    int RequestedFps,
+    AudioEndpointRecoveryRecord? AudioDefaults = null);
+
+internal sealed record PhysicalOnlyDisplaySnapshot(
+    DisplayConfiguration Configuration,
+    IReadOnlyList<string> PhysicalDisplays);
 
 internal static class HostStatePaths
 {
@@ -44,6 +72,15 @@ internal static class HostStatePaths
     }
 
     internal static string RecoveryFile => Path.Combine(Root, "display-recovery.json");
+    internal static string AudioRecoveryFile => Path.Combine(
+        Root,
+        "audio-recovery.json");
+    internal static string AudioRecoveryBackupFile => Path.Combine(
+        Root,
+        "audio-recovery.backup.json");
+    internal static string AudioRecoveryLockFile => Path.Combine(
+        Root,
+        "audio-recovery.lock");
     internal static string SettingsFile => Path.Combine(Root, "host-settings.json");
     internal static string LockFile => Path.Combine(Root, "session.lock");
     internal static string DiagnosticsDirectory => Path.Combine(Root, "Diagnostics");
@@ -74,6 +111,49 @@ internal sealed class DisplayTopologyService
         return Describe(configuration);
     }
 
+    /// <summary>
+    /// Captures the complete active physical configuration, including its
+    /// supplied mode array. Unlike the emergency recovery path, restoring this
+    /// snapshot preserves source positions, primary-display selection, clone
+    /// groups, and refresh rates instead of asking Windows to synthesize a new
+    /// layout.
+    /// </summary>
+    internal bool TryCaptureExactPhysicalOnlySnapshot(
+        out PhysicalOnlyDisplaySnapshot? snapshot)
+    {
+        var configuration = WindowsDisplayNative.Query(
+            WindowsDisplayNative.QueryOnlyActivePaths);
+        var described = Describe(configuration);
+        var physical = described.Where(display =>
+            display.IsActive &&
+            !IsLikelyVirtualDisplay(display)).ToArray();
+
+        // Describe deliberately omits unnamed/transient targets. Do not call a
+        // partially described configuration "physical only" because an
+        // unknown virtual path could otherwise be preserved in the snapshot.
+        if (configuration.Paths.Length == 0 ||
+            described.Count != configuration.Paths.Length ||
+            physical.Length != described.Count ||
+            physical.Any(display => !display.IsAvailable))
+        {
+            snapshot = null;
+            return false;
+        }
+
+        snapshot = new PhysicalOnlyDisplaySnapshot(
+            configuration,
+            physical.Select(DisplayLabel).ToArray());
+        return true;
+    }
+
+    internal void RestoreExactPhysicalOnlySnapshot(
+        PhysicalOnlyDisplaySnapshot snapshot)
+    {
+        ArgumentNullException.ThrowIfNull(snapshot);
+        WindowsDisplayNative.Restore(snapshot.Configuration);
+        UninstallManager.VerifyPhysicalOnlyTopology(this);
+    }
+
     private static IReadOnlyList<DisplayDescriptor> Describe(DisplayConfiguration configuration)
     {
         var displays = new Dictionary<string, DisplayDescriptor>(StringComparer.OrdinalIgnoreCase);
@@ -95,13 +175,33 @@ internal sealed class DisplayTopologyService
                 continue;
             }
 
+            AdvertisedDisplayMode? activeMode = null;
+            if ((path.Flags & WindowsDisplayNative.PathActive) != 0)
+            {
+                try
+                {
+                    var source = WindowsDisplayNative.GetSourceNameFor(path);
+                    activeMode = WindowsDisplayNative.ReadCurrentSourceMode(
+                        source.ViewGdiDeviceName);
+                }
+                catch (Exception error) when (
+                    error is InvalidOperationException or Win32Exception)
+                {
+                    // Keep topology inventory available while Windows finishes
+                    // enumerating a source mode. Resume recovery will retry.
+                }
+            }
+
             var descriptor = new DisplayDescriptor(
                 index,
                 name.MonitorFriendlyDeviceName ?? string.Empty,
                 name.MonitorDevicePath ?? string.Empty,
                 (path.Flags & WindowsDisplayNative.PathActive) != 0,
                 path.TargetInfo.TargetAvailable != 0,
-                path.TargetInfo.OutputTechnology);
+                path.TargetInfo.OutputTechnology,
+                activeMode?.Width,
+                activeMode?.Height,
+                activeMode?.Fps);
             var key = string.IsNullOrWhiteSpace(descriptor.DevicePath)
                 ? $"{path.TargetInfo.AdapterId.HighPart}:{path.TargetInfo.AdapterId.LowPart}:{path.TargetInfo.Id}"
                 : descriptor.DevicePath;
@@ -115,8 +215,22 @@ internal sealed class DisplayTopologyService
 
     internal DisplayRecoveryRecord CaptureRecovery(int width, int height, int fps)
     {
-        var configuration = WindowsDisplayNative.Query(WindowsDisplayNative.QueryOnlyActivePaths);
+        // Recovery is an exact rollback transaction, so use the same strict
+        // completeness proof as idle reconciliation. Describe() intentionally
+        // skips unnamed/transient targets; accepting a merely partially
+        // described QueryDisplayConfig result could otherwise journal and
+        // later restore an unknown virtual path.
+        if (!TryCaptureExactPhysicalOnlySnapshot(out var exact) ||
+            exact is null)
+        {
+            throw new InvalidOperationException(
+                "Vita Moonlight refused to capture a display recovery baseline because Windows did not expose a complete, available, physical-only active layout.");
+        }
+        var configuration = exact.Configuration;
         return new DisplayRecoveryRecord(
+            // AudioDefaults is an additive optional field. Keep format 1 so
+            // the previous host can still ignore it and restore the display
+            // if setup rolls back during an in-place upgrade.
             1,
             DateTimeOffset.UtcNow,
             Marshal.SizeOf<DisplayPathInfo>(),
@@ -128,23 +242,31 @@ internal sealed class DisplayTopologyService
             null,
             width,
             height,
-            fps);
+            fps,
+            AudioEndpointRecoveryService.CaptureCurrentDefaults());
     }
 
     internal bool DisableManagedVirtualDisplays()
     {
         var configuration = WindowsDisplayNative.Query(WindowsDisplayNative.QueryOnlyActivePaths);
-        var managedIndexes = Describe(configuration)
-            .Where(display => display.IsActive && IsManagedVirtualDisplay(display))
-            .Select(display => display.PathIndex)
-            .ToHashSet();
-        if (managedIndexes.Count == 0)
+        var activeDisplays = Describe(configuration)
+            .Where(display => display.IsActive)
+            .ToArray();
+        var selected = SelectUniqueExactVitaVirtualDisplayForMutation(
+            activeDisplays,
+            requireAvailable: false);
+        if (selected is null)
         {
+            if (activeDisplays.Any(IsExactVitaVirtualDisplay))
+            {
+                throw new InvalidOperationException(
+                    "The Vita virtual-display topology is ambiguous. Refusing to disable any display until exactly one MTT1337 target remains and no competing managed virtual target is active.");
+            }
             return false;
         }
 
         var remainingPaths = configuration.Paths
-            .Where((_, index) => !managedIndexes.Contains(index))
+            .Where((_, index) => index != selected.PathIndex)
             .ToArray();
         if (remainingPaths.Length == 0)
         {
@@ -156,37 +278,275 @@ internal sealed class DisplayTopologyService
         return true;
     }
 
-    internal IReadOnlyList<string> RecoverPhysicalDisplays()
+    internal IReadOnlyList<string> RecoverPhysicalDisplays() =>
+        RecoverPhysicalDisplays(out _);
+
+    internal IReadOnlyList<string> RecoverPhysicalDisplays(
+        out PhysicalDisplayModeRepairResult modeRepair)
     {
-        var configuration = WindowsDisplayNative.Query(WindowsDisplayNative.QueryAllPaths);
-        var displays = Describe(configuration);
-        var selected = SelectPhysicalDisplaysForRecovery(displays);
+        DisplayConfiguration configuration = default!;
+        DisplayDescriptor[] selected = [];
+        const int inventoryAttempts = 5;
+        for (var attempt = 0; attempt < inventoryAttempts; attempt++)
+        {
+            configuration = WindowsDisplayNative.Query(
+                WindowsDisplayNative.QueryAllPaths);
+            selected = SelectPhysicalDisplaysForRecovery(
+                Describe(configuration));
+
+            // TargetAvailable can briefly fall to false while Windows handles
+            // PBT_APMSUSPEND. Prefer a freshly available physical target, but
+            // retain an already-active physical path as the bounded fallback
+            // instead of declaring that the machine has no physical display.
+            if (selected.Any(display => display.IsAvailable) ||
+                attempt == inventoryAttempts - 1)
+            {
+                break;
+            }
+            Thread.Sleep(100);
+        }
         if (selected.Length == 0)
         {
-            throw new InvalidOperationException("No available physical display was found for emergency recovery.");
+            throw new PhysicalDisplayUnavailableException(
+                "No physical display path was found for emergency recovery after Windows display enumeration was retried.");
         }
 
         var indexes = selected.Select(display => display.PathIndex).ToHashSet();
         WindowsDisplayNative.ApplyPaths(configuration.Paths
             .Where((_, index) => indexes.Contains(index))
             .ToArray());
+        // Mode repair is deliberately advisory. Activating a visible physical
+        // path is the safety invariant; a monitor with an unusual registry or
+        // mode-enumeration implementation must not turn that success into a
+        // failed Pause, uninstall, or emergency recovery.
+        try
+        {
+            modeRepair = RestorePersistedPhysicalDisplayModes();
+        }
+        catch (Exception error)
+        {
+            // Keep a successfully activated physical topology successful even
+            // if a future/native mode-repair implementation introduces an
+            // exception that the best-effort routine did not anticipate.
+            modeRepair = new PhysicalDisplayModeRepairResult(
+                [],
+                [new PhysicalDisplayModeRepairWarning(
+                    "mode-repair-unexpected",
+                    "physical displays",
+                    FormatModeRepairError(error))]);
+        }
         return selected
             .Select(display => string.IsNullOrWhiteSpace(display.FriendlyName) ? display.DevicePath : display.FriendlyName)
             .ToArray();
     }
 
-    internal static DisplayDescriptor[] SelectPhysicalDisplaysForRecovery(IEnumerable<DisplayDescriptor> displays)
+    /// <summary>
+    /// Repairs the sleep/resume failure where Windows activates the physical
+    /// monitor at a temporary Vita/800x600 fallback mode. The persisted user
+    /// mode is read from Windows for the same active physical source and is
+    /// applied only when the current mode is an unambiguous Vita/800x600
+    /// fallback (or a 30 Hz form of the persisted resolution) and that exact
+    /// source advertises the persisted resolution. Per-display failures are
+    /// returned as structured warnings and never invalidate a visible physical
+    /// topology. No virtual display or disconnected/docked-away target is
+    /// changed.
+    /// </summary>
+    internal PhysicalDisplayModeRepairResult
+        RestorePersistedPhysicalDisplayModes()
     {
-        var availablePhysical = displays
-            .Where(display => display.IsAvailable && !IsLikelyVirtualDisplay(display))
-            .ToArray();
-        var activePhysical = availablePhysical.Where(display => display.IsActive).ToArray();
-        return activePhysical.Length > 0 ? activePhysical : availablePhysical;
+        DisplayConfiguration configuration;
+        IReadOnlyList<DisplayDescriptor> displays;
+        try
+        {
+            configuration = WindowsDisplayNative.Query(
+                WindowsDisplayNative.QueryOnlyActivePaths);
+            displays = Describe(configuration);
+        }
+        catch (Exception error)
+        {
+            return new PhysicalDisplayModeRepairResult(
+                [],
+                [new PhysicalDisplayModeRepairWarning(
+                    "mode-inventory-unavailable",
+                    "physical displays",
+                    FormatModeRepairError(error))]);
+        }
+
+        var restored = new List<string>();
+        var warnings = new List<PhysicalDisplayModeRepairWarning>();
+        foreach (var display in displays.Where(display =>
+                     display.IsActive &&
+                     display.IsAvailable &&
+                     !IsLikelyVirtualDisplay(display)))
+        {
+            var displayLabel = DisplayLabel(display);
+            try
+            {
+                var path = configuration.Paths[display.PathIndex];
+                var source = WindowsDisplayNative.GetSourceNameFor(path);
+                var current = WindowsDisplayNative.ReadCurrentSourceMode(
+                    source.ViewGdiDeviceName);
+                if (!IsPotentialPhysicalModeDrift(current))
+                {
+                    continue;
+                }
+                var persisted = WindowsDisplayNative.ReadPersistedSourceMode(
+                    source.ViewGdiDeviceName);
+                if (!IsClearPhysicalModeDrift(current, persisted))
+                {
+                    continue;
+                }
+
+                var advertised = WindowsDisplayNative.EnumerateSourceModes(
+                    source.ViewGdiDeviceName);
+                var matchingResolution = advertised.Where(mode =>
+                    mode.Width == persisted.Width &&
+                    mode.Height == persisted.Height).ToArray();
+                if (matchingResolution.Length == 0)
+                {
+                    warnings.Add(new PhysicalDisplayModeRepairWarning(
+                        "persisted-mode-not-advertised",
+                        displayLabel,
+                        $"current={current}; persisted={persisted}"));
+                    continue;
+                }
+
+                var resolutionChanged =
+                    current.Width != persisted.Width ||
+                    current.Height != persisted.Height;
+                var target = matchingResolution
+                        .Where(mode =>
+                            persisted.Fps > 1 && mode.Fps == persisted.Fps)
+                        .Select(mode => (AdvertisedDisplayMode?)mode)
+                        .FirstOrDefault()
+                    ?? (resolutionChanged
+                        ? matchingResolution
+                            .Where(mode => mode.Fps == current.Fps)
+                            .Select(mode => (AdvertisedDisplayMode?)mode)
+                            .FirstOrDefault()
+                        : null)
+                    ?? matchingResolution
+                        .OrderBy(mode => persisted.Fps > 1
+                            ? Math.Abs(mode.Fps - persisted.Fps)
+                            : 0)
+                        .ThenByDescending(mode => mode.Fps)
+                        .First();
+                if (current == target)
+                {
+                    continue;
+                }
+
+                WindowsDisplayNative.ChangeSourceMode(
+                    source.ViewGdiDeviceName,
+                    target.Width,
+                    target.Height,
+                    target.Fps);
+                restored.Add($"{displayLabel} {current} -> {target}");
+            }
+            catch (Exception error)
+            {
+                warnings.Add(new PhysicalDisplayModeRepairWarning(
+                    "mode-repair-failed",
+                    displayLabel,
+                    FormatModeRepairError(error)));
+            }
+        }
+        return new PhysicalDisplayModeRepairResult(restored, warnings);
     }
 
-    internal void SaveRecovery(DisplayRecoveryRecord recovery)
+    internal static bool IsClearPhysicalModeDrift(
+        AdvertisedDisplayMode current,
+        AdvertisedDisplayMode persisted)
     {
-        MachineStateSecurity.Secure();
+        if (current == persisted ||
+            persisted.Width < 640 ||
+            persisted.Height < 480)
+        {
+            return false;
+        }
+
+        var resolutionDrift =
+            IsKnownFallbackResolution(current) &&
+            !IsKnownFallbackResolution(persisted) &&
+            (long)persisted.Width * persisted.Height >
+            (long)current.Width * current.Height;
+        var refreshDrift =
+            current.Width == persisted.Width &&
+            current.Height == persisted.Height &&
+            current.Fps is > 1 and <= 30 &&
+            persisted.Fps >= 50;
+        return resolutionDrift || refreshDrift;
+    }
+
+    internal static bool IsPotentialPhysicalModeDrift(
+        AdvertisedDisplayMode current) =>
+        IsKnownFallbackResolution(current) ||
+        current.Fps is > 1 and <= 30;
+
+    private static bool IsKnownFallbackResolution(
+        AdvertisedDisplayMode mode) =>
+        (mode.Width, mode.Height) is
+            (800, 600) or
+            (960, 540) or
+            (960, 544);
+
+    private static string DisplayLabel(DisplayDescriptor display) =>
+        string.IsNullOrWhiteSpace(display.FriendlyName)
+            ? $"physical display {display.PathIndex + 1}"
+            : display.FriendlyName;
+
+    private static string FormatModeRepairError(Exception error) =>
+        $"{error.GetType().Name}:0x{error.HResult:X8}";
+
+    internal static DisplayDescriptor[] SelectPhysicalDisplaysForRecovery(IEnumerable<DisplayDescriptor> displays)
+    {
+        var physical = displays
+            .Where(display => !IsLikelyVirtualDisplay(display))
+            .ToArray();
+        var activeAvailable = physical
+            .Where(display => display.IsActive && display.IsAvailable)
+            .ToArray();
+        if (activeAvailable.Length > 0) return activeAvailable;
+
+        var available = physical
+            .Where(display => display.IsAvailable)
+            .ToArray();
+        if (available.Length > 0) return available;
+
+        // Windows can transiently clear TargetAvailable during suspend while
+        // leaving the physical path active. It remains safer to re-apply that
+        // known physical path than to leave the managed VDD as the sleep
+        // topology or to report that no physical monitor exists.
+        return physical
+            .Where(display => display.IsActive)
+            .ToArray();
+    }
+
+    /// <summary>
+    /// Identifies the one topology in which installer/emergency recovery may
+    /// safely consider restarting the Vita VDD: Windows exposes exactly one
+    /// active, available path and that path belongs to the explicitly managed
+    /// MTT device. A physical path, another virtual-display product, or an
+    /// ambiguous set of managed paths always fails closed.
+    /// </summary>
+    internal static DisplayDescriptor? SelectExactManagedVddOnlyRecoveryPath(
+        IEnumerable<DisplayDescriptor> displays)
+    {
+        var active = displays
+            .Where(display => display.IsActive)
+            .ToArray();
+        return active.Length == 1 &&
+               active[0].IsAvailable &&
+               IsExactVitaVirtualDisplay(active[0])
+            ? active[0]
+            : null;
+    }
+
+    internal void SaveRecovery(
+        DisplayTransactionLease transaction,
+        DisplayRecoveryRecord recovery)
+    {
+        transaction.RequireActive();
         TrustedFileSystem.WriteAllText(
             HostStatePaths.RecoveryFile,
             JsonSerializer.Serialize(recovery, JsonOptions));
@@ -198,7 +558,7 @@ internal sealed class DisplayTopologyService
             TrustedFileSystem.ReadAllText(HostStatePaths.RecoveryFile),
             JsonOptions)
             ?? throw new InvalidDataException("The display recovery record is empty.");
-        if (recovery.FormatVersion != 1 ||
+        if (recovery.FormatVersion is not (1 or 2) ||
             recovery.PathStructureSize != Marshal.SizeOf<DisplayPathInfo>() ||
             recovery.ModeStructureSize != Marshal.SizeOf<DisplayModeInfo>())
         {
@@ -213,16 +573,22 @@ internal sealed class DisplayTopologyService
         int height,
         int fps,
         bool forceSdr = true,
-        bool persistMode = false)
+        bool persistMode = false,
+        bool requireExactVitaTarget = true)
     {
         var configuration = WindowsDisplayNative.Query(WindowsDisplayNative.QueryAllPaths);
         var displays = Describe(configuration);
-        var selected = SelectVirtualDisplayForActivation(displays, nameMatch);
+        var selected = SelectVirtualDisplayForActivation(
+            displays,
+            nameMatch,
+            requireExactVitaTarget);
 
         if (selected is null)
         {
             throw new InvalidOperationException(
-                "No virtual display was found. Run `display list` and configure its name with `configure --display-match <text>`."
+                requireExactVitaTarget
+                    ? "No unambiguous Vita MTT1337 display target was found. Vita Moonlight will not activate a legacy or third-party virtual display."
+                    : "No virtual display was found. Run `display list` and configure its name with `configure --display-match <text>`."
             );
         }
 
@@ -284,7 +650,10 @@ internal sealed class DisplayTopologyService
         // display target returns to QueryDisplayConfig. Do not mistake that
         // transient gap for a bad installation, and do not alter the active
         // topology while waiting for the target to finish enumerating.
-        var availableSelection = WaitForVirtualDisplay(nameMatch, enumerationAttempts);
+        var availableSelection = WaitForVirtualDisplay(
+            nameMatch,
+            enumerationAttempts,
+            requireExactVitaTarget: true);
         var availableConfiguration = availableSelection.Configuration;
         var selected = availableSelection.Display;
 
@@ -349,7 +718,8 @@ internal sealed class DisplayTopologyService
 
     private static VirtualDisplaySelection WaitForVirtualDisplay(
         string? nameMatch,
-        int attempts)
+        int attempts,
+        bool requireExactVitaTarget)
     {
         Exception? lastError = null;
         IReadOnlyList<DisplayDescriptor> lastDisplays = Array.Empty<DisplayDescriptor>();
@@ -359,7 +729,10 @@ internal sealed class DisplayTopologyService
             {
                 var configuration = WindowsDisplayNative.Query(WindowsDisplayNative.QueryAllPaths);
                 lastDisplays = Describe(configuration);
-                var selected = SelectVirtualDisplayForActivation(lastDisplays, nameMatch);
+                var selected = SelectVirtualDisplayForActivation(
+                    lastDisplays,
+                    nameMatch,
+                    requireExactVitaTarget);
                 if (selected is not null)
                 {
                     return new VirtualDisplaySelection(configuration, selected);
@@ -391,7 +764,9 @@ internal sealed class DisplayTopologyService
         throw new InvalidOperationException(
             $"The virtual display did not become available within {attempts * 0.5:0.#} seconds after its driver restart. " +
             $"{detail}{response} Keep the physical display enabled, wait a few seconds, then click " +
-            "Repair Vita display driver again. If more than one virtual display is listed, select the intended one under Streaming.");
+            (requireExactVitaTarget
+                ? "Repair Vita display driver again. Remove or disable any legacy Vita IddSampleDriver target; Vita Moonlight will only use one exact MTT1337 monitor path."
+                : "Repair Vita display driver again. If more than one virtual display is listed, select the intended one under Streaming."));
     }
 
     private static string DisplayIdentity(DisplayDescriptor display) =>
@@ -435,18 +810,33 @@ internal sealed class DisplayTopologyService
 
     internal static DisplayDescriptor? SelectVirtualDisplayForActivation(
         IEnumerable<DisplayDescriptor> displays,
-        string? nameMatch)
+        string? nameMatch,
+        bool requireExactVitaTarget = true)
     {
         var candidates = displays
             .Where(display => display.IsAvailable && IsLikelyVirtualDisplay(display))
             .ToArray();
+        if (requireExactVitaTarget)
+        {
+            // The supported Sunshine path is bound to the monitor identity
+            // exposed by the bundled MTT driver. Friendly names and user
+            // display-match text are not authority: another IDD can copy
+            // either. Ambiguity always fails closed.
+            return SelectUniqueExactVitaVirtualDisplayForMutation(
+                candidates,
+                requireAvailable: true);
+        }
         if (!string.IsNullOrWhiteSpace(nameMatch))
         {
             return candidates.FirstOrDefault(display =>
                 display.FriendlyName.Contains(nameMatch, StringComparison.OrdinalIgnoreCase) ||
                 display.DevicePath.Contains(nameMatch, StringComparison.OrdinalIgnoreCase));
         }
-        return candidates.FirstOrDefault(IsManagedVirtualDisplay) ?? candidates.FirstOrDefault();
+        // Automatic selection is deliberately restricted to the VDD bundled
+        // and managed by this product. Other virtual displays (Apollo,
+        // Parsec, VR runtimes, etc.) must never be hijacked merely because the
+        // managed device is still enumerating.
+        return candidates.FirstOrDefault(IsManagedVirtualDisplay);
     }
 
     internal DisplayDescriptor ChangeActiveVirtualDisplayMode(
@@ -454,17 +844,17 @@ internal sealed class DisplayTopologyService
         int width,
         int height,
         int fps,
-        bool forceSdr = true)
+        bool forceSdr = true,
+        bool requireExactVitaTarget = true)
     {
         var configuration = WindowsDisplayNative.Query(WindowsDisplayNative.QueryOnlyActivePaths);
         var candidates = Describe(configuration)
             .Where(display => display.IsActive && IsLikelyVirtualDisplay(display))
             .ToArray();
-        var selected = !string.IsNullOrWhiteSpace(nameMatch)
-            ? candidates.FirstOrDefault(display =>
-                display.FriendlyName.Contains(nameMatch, StringComparison.OrdinalIgnoreCase) ||
-                display.DevicePath.Contains(nameMatch, StringComparison.OrdinalIgnoreCase))
-            : candidates.FirstOrDefault(IsManagedVirtualDisplay) ?? candidates.FirstOrDefault();
+        var selected = SelectVirtualDisplayForActivation(
+            candidates,
+            nameMatch,
+            requireExactVitaTarget);
         if (selected is null)
         {
             throw new InvalidOperationException(
@@ -489,9 +879,11 @@ internal sealed class DisplayTopologyService
         WindowsDisplayNative.Restore(new DisplayConfiguration(paths, modes));
     }
 
-    internal static void ClearRecovery()
+    internal static bool ClearRecovery(
+        DisplayTransactionLease transaction)
     {
-        TrustedFileSystem.DeleteFile(HostStatePaths.RecoveryFile);
+        transaction.RequireActive();
+        return TrustedFileSystem.DeleteFile(HostStatePaths.RecoveryFile);
     }
 
     internal static void AtomicWrite(string path, string content)
@@ -523,5 +915,43 @@ internal sealed class DisplayTopologyService
                identity.Contains("MTT1337", StringComparison.OrdinalIgnoreCase) ||
                identity.Contains("MttVDD", StringComparison.OrdinalIgnoreCase) ||
                identity.Contains("IddSampleDriver", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Exact topology identity of the single monitor created by the bundled
+    /// MTT driver. Broad virtual-display heuristics are useful for inventory
+    /// and physical-safety classification, but never grant mutation authority.
+    /// </summary>
+    internal static bool IsExactVitaVirtualDisplay(DisplayDescriptor display) =>
+        !string.IsNullOrWhiteSpace(display.DevicePath) &&
+        display.DevicePath.StartsWith(
+            @"\\?\DISPLAY#MTT1337#",
+            StringComparison.OrdinalIgnoreCase);
+
+    internal static DisplayDescriptor?
+        SelectUniqueExactVitaVirtualDisplayForMutation(
+            IEnumerable<DisplayDescriptor> displays,
+            bool requireAvailable = true)
+    {
+        var candidates = displays
+            .Where(display => !requireAvailable || display.IsAvailable)
+            .ToArray();
+        var exact = candidates
+            .Where(IsExactVitaVirtualDisplay)
+            .ToArray();
+        if (exact.Length != 1)
+        {
+            return null;
+        }
+
+        // A second broad target from an old Vita build (notably
+        // IddSampleDriver) makes ownership-to-topology mapping ambiguous.
+        // Never deactivate, activate, or mode-change either target in that
+        // state. Unrelated virtual displays remain untouched.
+        return candidates.Any(display =>
+                !IsExactVitaVirtualDisplay(display) &&
+                IsManagedVirtualDisplay(display))
+            ? null
+            : exact[0];
     }
 }
