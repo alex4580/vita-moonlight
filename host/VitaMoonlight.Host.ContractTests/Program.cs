@@ -1,4 +1,5 @@
 using System.Xml.Linq;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text.Json;
@@ -7,6 +8,24 @@ using VitaMoonlight.Host;
 static void Require(bool condition, string message)
 {
     if (!condition) throw new InvalidOperationException(message);
+}
+
+static void TestFirewallMissingRuleClassification()
+{
+    Require(
+        ManagedStreamBridgeFirewall.IsMissingRuleError(
+            new FileNotFoundException("missing firewall rule")) &&
+        ManagedStreamBridgeFirewall.IsMissingRuleError(
+            new COMException(
+                "missing firewall rule",
+                unchecked((int)0x80070002))) &&
+        ManagedStreamBridgeFirewall.IsMissingRuleError(
+            new InvalidOperationException(
+                "wrapped firewall lookup failure",
+                new FileNotFoundException("missing firewall rule"))) &&
+        !ManagedStreamBridgeFirewall.IsMissingRuleError(
+            new UnauthorizedAccessException("firewall access denied")),
+        "Windows Firewall missing-rule HRESULT classification failed.");
 }
 
 static void TestVddConfigurationNormalization()
@@ -756,6 +775,7 @@ static void TestSunshineInfoLoggingRetirement()
 }
 
 TestVddConfigurationNormalization();
+TestFirewallMissingRuleClassification();
 TestVersionedExactResidueCleanup();
 TestStreamBoundaryProtocolParsing();
 TestStreamBoundaryOperationalFailures();

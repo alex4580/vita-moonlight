@@ -2012,6 +2012,11 @@ internal static class Program
                 new UnauthorizedAccessException(
                     "task access denied")),
             "Exact scheduled-task missing/error classification failed.");
+        if (OperatingSystem.IsWindows())
+        {
+            ManagedStreamBridgeFirewall
+                .VerifyMissingRuleInteropForSelfTest();
+        }
         RunOwnedStateCleanupSelfTest();
         Require(
             DisplayWizardAdapter.ClassifyPnPUtilExitCode(0) == PnPUtilExitDisposition.Success &&

@@ -219,13 +219,63 @@ internal static class ManagedStreamBridgeFirewall
 
     private static INetFwRule? TryGetRule(INetFwRules rules)
     {
+        return TryGetRule(rules, RuleName);
+    }
+
+    private static INetFwRule? TryGetRule(
+        INetFwRules rules,
+        string ruleName)
+    {
         try
         {
-            return rules.Item(RuleName);
+            return rules.Item(ruleName);
         }
-        catch (COMException error) when (error.HResult == ErrorFileNotFound)
+        catch (Exception error) when (IsMissingRuleError(error))
         {
             return null;
+        }
+    }
+
+    // The firewall automation interface reports a missing rule with
+    // HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND). Depending on the exact COM
+    // dispatch path, .NET maps that HRESULT either to COMException or to
+    // FileNotFoundException. Classify the HRESULT instead of the managed
+    // exception type so a normal first install (where no old rule exists) is
+    // idempotent on every supported Windows build.
+    internal static bool IsMissingRuleError(Exception error)
+    {
+        for (Exception? current = error;
+             current is not null;
+             current = current.InnerException)
+        {
+            if (current.HResult == ErrorFileNotFound) return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Exercises the real Windows Firewall automation dispatch without
+    /// creating or changing a rule. A unique name must be absent, and its
+    /// HRESULT must pass through the same production classifier used during
+    /// first-install rule creation.
+    /// </summary>
+    internal static void VerifyMissingRuleInteropForSelfTest()
+    {
+        var (policy, rules) = OpenRules();
+        try
+        {
+            var impossibleName =
+                $"{RuleName}.self-test.{Guid.NewGuid():N}";
+            var unexpected = TryGetRule(rules, impossibleName);
+            if (unexpected is null) return;
+            Marshal.FinalReleaseComObject(unexpected);
+            throw new InvalidOperationException(
+                "Windows Firewall unexpectedly returned a rule for a unique self-test name.");
+        }
+        finally
+        {
+            Marshal.FinalReleaseComObject(rules);
+            Marshal.FinalReleaseComObject(policy);
         }
     }
 

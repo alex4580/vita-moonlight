@@ -920,6 +920,12 @@ def _check_host(root: Path, values: dict[str, Any]) -> None:
         'rule.InterfaceTypes,\n                    "All"' in firewall,
         "the mTLS bridge firewall rule must be exact, all-profile/interface, and ownership-checked",
     )
+    _require(
+        "catch (Exception error) when (IsMissingRuleError(error))" in firewall and
+        "current.HResult == ErrorFileNotFound" in firewall and
+        "VerifyMissingRuleInteropForSelfTest();" in program,
+        "a missing first-install firewall rule must accept both COMException and FileNotFoundException HRESULT mappings and exercise the real Windows COM lookup in self-test",
+    )
     manager_install = _extract_braced_block(
         hotkeys,
         r"internal\s+static\s+void\s+Install\s*\(",
